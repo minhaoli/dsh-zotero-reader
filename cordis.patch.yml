@@ -1,0 +1,22 @@
+# dsh-zotero-reader bundle layer
+# 注意：YAML 里 @ 开头的字符串必须加引号。
+- insert:
+    - id: zotero-reader
+      name: 'dsh-zotero-reader'
+      config:
+        # Zotero 数据目录；留空则自动探测（~/Zotero, ~/Documents/Zotero, D:\\Zotero 等）
+        zoteroDataDir: ''
+        # 缓存目录；留空则在插件数据目录下
+        dataDir: ''
+        # 翻译并发与分段
+        translateConcurrency: 4
+        translateChunkChars: 2400
+        # 划词翻译用的模型；留空则跟随会话当前模型
+        selectionProvider: ''
+        selectionModel: ''
+        # MinerU：none | local | cloud
+        mineruMode: none
+        mineruLocalUrl: 'http://127.0.0.1:8000'
+        mineruCloudToken: ''
+        # 触发 MinerU 的自动判定：文本层为空或乱码比例过高
+        mineruAutoOnScanned: true

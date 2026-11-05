@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "title": "Zotero 伴读",
+    "description": "在会话里识别 AI 搜到的 Zotero 文献，右侧栏直接打开本地 PDF；回答带可点页码、一键中文版、划词翻译保留公式。"
+  },
+  "reader": {
+    "title": "Zotero 伴读",
+    "open": "打开",
+    "empty": "在会话里让 AI 搜索 Zotero 文献，搜到的文章会出现在这里，点一篇即可开始阅读。",
+    "loading": "正在加载 PDF…",
+    "loadFailed": "PDF 加载失败",
+    "page": "第 {{page}} 页",
+    "pageOfTotal": "第 {{page}} / {{total}} 页",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "fitWidth": "适应宽度",
+    "translateAll": "一键中文版",
+    "translateAllRunning": "正在翻译 {{done}}/{{total}}",
+    "modeOriginal": "原文",
+    "modeBilingual": "中英对照",
+    "modeChinese": "纯中文",
+    "exportChinese": "导出纯中文 PDF",
+    "exportBilingual": "导出中英对照 PDF",
+    "exportRunning": "正在生成…",
+    "translateSelection": "译",
+    "askSelection": "问",
+    "noteSelection": "笔记",
+    "mineruRunning": "MinerU 解析中…",
+    "mineruReady": "MinerU 已解析",
+    "sourceLocal": "本地文本层",
+    "sourceMineruLocal": "本地 MinerU",
+    "sourceMineruCloud": "云端 MinerU",
+    "needConfig": "此功能需要先在设置里配置",
+    "close": "关闭",
+    "clearHighlight": "取消高亮"
+  }
+}

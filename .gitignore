@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+.pnpm-cache/
+
+# 运行时数据与缓存
+.cache/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# 本地设置（可能含 token）
+settings.json
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 临时文件
+*.tmp
+*.bak

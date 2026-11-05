@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "title": "Zotero Paper Reader",
+    "description": "Detects Zotero papers found in conversation and opens their local PDF in the right sidebar, with page-linked answers, one-click Chinese, and selection translation that preserves formulas."
+  },
+  "reader": {
+    "title": "Zotero Paper Reader",
+    "open": "Open",
+    "empty": "Ask the assistant to search your Zotero library; the papers it finds appear here. Click one to start reading.",
+    "loading": "Loading PDF…",
+    "loadFailed": "Failed to load PDF",
+    "page": "Page {{page}}",
+    "pageOfTotal": "Page {{page}} of {{total}}",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "fitWidth": "Fit width",
+    "translateAll": "Chinese version",
+    "translateAllRunning": "Translating {{done}}/{{total}}",
+    "modeOriginal": "Original",
+    "modeBilingual": "Bilingual",
+    "modeChinese": "Chinese",
+    "exportChinese": "Export Chinese PDF",
+    "exportBilingual": "Export bilingual PDF",
+    "exportRunning": "Generating…",
+    "translateSelection": "Translate",
+    "askSelection": "Ask",
+    "noteSelection": "Note",
+    "mineruRunning": "Parsing with MinerU…",
+    "mineruReady": "MinerU parsed",
+    "sourceLocal": "Local text layer",
+    "sourceMineruLocal": "Local MinerU",
+    "sourceMineruCloud": "Cloud MinerU",
+    "needConfig": "Configure this in settings first",
+    "close": "Close",
+    "clearHighlight": "Clear highlight"
+  }
+}
