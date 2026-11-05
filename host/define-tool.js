@@ -5,7 +5,11 @@
  * app.asar 内、由 DSH 的插件加载器解析，磁盘上 node_modules 里并不存在。插件一旦
  * 走 link 安装，import 它的解析结果就取决于 loader 的内部路径，属于不必承担的风险。
  *
- * 它做的事只有两件，这里逐字对齐（已对照 @ggboy123/dsh-paper-reader 的实际用法验证）：
+ * 来源说明：这个「规整简写 schema」的思路参考了 @ggboy123/dsh-paper-reader（MIT）
+ * 里工具声明的写法 —— 见 https://github.com/GGboya/dsh-paper-reader
+ * 代码是照着观察到的产物形态自己实现的，没有复制其源码。
+ *
+ * 它做的事只有两件：
  *   1. 属性上的 `required: true` 收进父级的 `required: []` 数组；
  *   2. `parameters` 允许写成「属性名 → schema」的裸 map，自动包成 object schema。
  * `ctx.tools.register` 接受的就是处理完的纯对象，所以产物完全等价。

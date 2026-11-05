@@ -31,27 +31,35 @@
 
 ## 安装
 
+在 DSH 的 profile 目录里执行：
+
 ```bash
-cd <你的 DSH profile 目录>/node_modules
-git clone https://github.com/<user>/dsh-zotero-reader.git
+npm i minhaoli/dsh-zotero-reader
 ```
 
-然后在 profile 的 `package.json` 里加入依赖与 bundle：
+这会把插件和它的依赖（`pdfjs-dist`）一起装进 `node_modules`，不需要手动 clone，也不用再单独跑 `npm i`。
+
+然后把 bundle 加进 profile 的 `package.json`（依赖项 npm 已经写好了）：
 
 ```json
 {
-  "dependencies": { "dsh-zotero-reader": "link:<插件绝对路径>" },
-  "dsh": { "profile": { "bundles": ["dsh-zotero-reader"] } }
+  "dsh": { "profile": { "bundles": ["...已有的...", "dsh-zotero-reader"] } }
 }
 ```
 
-重启 DSH。右栏「开始」页会出现「Zotero 伴读」卡片。
+重启 DSH，右栏「开始」页会出现「Zotero 伴读」卡片。
 
-依赖：本插件自带 `pdfjs-dist`，但要先装一次：
+升级到新版本：重跑同一条 `npm i minhaoli/dsh-zotero-reader` 即可。
 
-```bash
-cd <插件目录> && npm i
+### 从本地目录开发
+
+要改代码时，用 link 指向源码目录，改完重载插件就生效：
+
+```json
+{ "dependencies": { "dsh-zotero-reader": "link:D:/path/to/dsh-zotero-reader" } }
 ```
+
+这种方式下依赖要自己在插件目录里装一次：`npm i`。
 
 ## 配置
 
@@ -97,6 +105,20 @@ node test/host-e2e.mjs         # 主机侧端到端（需要本机有 Zotero 库
 - 批注写入依赖 Zotero 10+ 的本地 API；不满足时「高亮」按钮会禁用并说明原因
 - 大纲对极端排版（标题与正文同字号）会退化为按章节词识别
 
+## 致谢与来源
+
+这个插件是在 [@ggboy123/dsh-paper-reader](https://github.com/GGboya/dsh-paper-reader)（作者 GGboya，MIT 许可）的启发下写的。它是本插件之前我实际在用的论文阅读插件，卸载它之后才有了重做一份的想法。
+
+**没有复制它的源代码**（仓库里不含任何来自它的文件），但下面这些做法参考了它：
+
+- **工具声明的形态**：`host/define-tool.js` 里「把属性上的 `required: true` 收进父级数组、把裸 map 包成 object schema」这套规整方式，是照着它的工具产物形态反推实现的。原因是宿主提供的 `defineTool` 在 app.asar 内、磁盘上解析不到，只能自己实现等价物。
+- **右栏 tab 的注册方式**：`client.js` 里 `sidebarRightTabs.register + sidebar.right.pane.tab slot` 的组合，早期是照它的 `lib/client.js` 学的，包括 `guide` 字段用来在右栏「开始」页生成入口卡片。
+- **pdf.js 的加载思路**：它从宿主已装的包里取 pdf.js；本插件改成自带一份并用路由发出去，起因正是它被卸载后宿主里没有 `pdfjs-dist` 了。
+
+它解决的问题和本插件不同（它自带文献库管理、分步精读、检索重排等），两者可以共存。
+
 ## License
 
-尚未指定，按保留所有权利对待。
+[MIT](LICENSE)。
+
+本插件在运行时使用 [pdf.js](https://github.com/mozilla/pdf.js)（Apache-2.0，作为 `pdfjs-dist` 依赖由 npm 安装，不随本仓库分发）。

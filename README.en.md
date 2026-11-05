@@ -31,27 +31,35 @@ This plugin lets the assistant read PDFs straight out of your Zotero library, ke
 
 ## Install
 
+From your DSH profile directory:
+
 ```bash
-cd <your DSH profile>/node_modules
-git clone https://github.com/<user>/dsh-zotero-reader.git
+npm i minhaoli/dsh-zotero-reader
 ```
 
-Add the dependency and bundle to your profile `package.json`:
+This installs the plugin together with its dependency (`pdfjs-dist`); no manual clone or extra `npm i` needed.
+
+Then add the bundle to your profile `package.json` (npm has already added the dependency entry):
 
 ```json
 {
-  "dependencies": { "dsh-zotero-reader": "link:<absolute path to the plugin>" },
-  "dsh": { "profile": { "bundles": ["dsh-zotero-reader"] } }
+  "dsh": { "profile": { "bundles": ["...existing...", "dsh-zotero-reader"] } }
 }
 ```
 
 Restart DSH. A "Zotero reader" card appears on the right sidebar's start page.
 
-The plugin ships its own `pdfjs-dist` dependency — install it once:
+To upgrade, run the same `npm i minhaoli/dsh-zotero-reader` again.
 
-```bash
-cd <plugin dir> && npm i
+### Developing from a local directory
+
+To change the code, link to the source directory instead — reloading the plugin picks up edits:
+
+```json
+{ "dependencies": { "dsh-zotero-reader": "link:D:/path/to/dsh-zotero-reader" } }
 ```
+
+With a link install you must install dependencies yourself once: `npm i`.
 
 ## Configuration
 
@@ -97,6 +105,20 @@ node test/host-e2e.mjs         # host-side end-to-end (needs a local Zotero libr
 - Writing annotations needs Zotero 10+; otherwise the Highlight button is disabled with an explanation
 - The outline falls back to section keywords for layouts where headings match body text in size
 
+## Credits
+
+This plugin was inspired by [@ggboy123/dsh-paper-reader](https://github.com/GGboya/dsh-paper-reader) (by GGboya, MIT). That was the paper reader I was actually using before this one; the idea of rebuilding it came after uninstalling it.
+
+**No source code was copied** (the repository contains no files from it). These approaches were informed by it:
+
+- **Tool declaration shape**: `host/define-tool.js` normalizes `required: true` on properties into the parent array and wraps a bare map into an object schema. This mirrors how its tools are shaped — the host's own `defineTool` lives inside app.asar and cannot be resolved from disk, so an equivalent had to be written.
+- **Sidebar tab registration**: the `sidebarRightTabs.register` + `sidebar.right.pane.tab` slot pairing in `client.js`, including the `guide` field that produces the entry card on the right sidebar's start page, was learned from its `lib/client.js`.
+- **pdf.js loading**: it borrows pdf.js from whatever the host has installed; this plugin instead ships its own and serves it over a route — precisely because uninstalling it left the host without `pdfjs-dist`.
+
+It solves different problems (it brings its own library management, staged close reading, retrieval re-ranking), so the two can coexist.
+
 ## License
 
-Not specified; all rights reserved.
+[MIT](LICENSE).
+
+At runtime this plugin uses [pdf.js](https://github.com/mozilla/pdf.js) (Apache-2.0), installed by npm as the `pdfjs-dist` dependency and not redistributed in this repository.

@@ -4,6 +4,10 @@
 //   · 注册一个右栏 tab 类型（sidebarRightTabs）+ 同 key 的 tab 内容（sidebar.right.pane.tab）
 //   · 打开入口有两个：① 用户在会话里点 `zotero://<key>` 链接；② 右栏 tab 里的文献列表
 //
+// 来源说明：右栏 tab 的注册方式（含 guide 字段生成入口卡片）参考了
+// @ggboy123/dsh-paper-reader（MIT，https://github.com/GGboya/dsh-paper-reader）。
+// 代码为本插件自行实现，未复制其源码。
+//
 // 「在会话里识别搜出来的文章」不靠监听消息：
 //   工具返回的每条结果都带 itemKey，模型把它写成 zotero://<key>。前端只是在 document 上
 //   挂一个捕获阶段的 click 委托，认得这个 scheme 就打开对应 PDF。既不拦截渲染，也不改消息。
