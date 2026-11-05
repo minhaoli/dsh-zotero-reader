@@ -21,6 +21,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { loadLibrary, loadAnnotations } from './host/zotero.js'
 import { extractText, searchChunks, outlineOf } from './host/pdf.js'
 import { translateDocument, translateSelection, pickSelection } from './host/translate.js'
@@ -45,30 +46,47 @@ export { Config } from './config.js'
 const ROUTE_PREFIX = '/zotero-reader'
 
 /**
- * 找到插件自带的 pdfjs-dist 资源文件。
+ * 找到 pdfjs-dist 的资源文件。
+ *
+ * 为什么不能只写两三个固定路径：依赖可能落在完全不同的位置，
+ *   · link 安装：就装在自己 <包目录>/node_modules 下
+ *   · pnpm hoisted：被提升到 <profile>/node_modules（插件目录本身就在它里面）
+ *   · 其它包管理器：可能在更上面某一层
+ * 硬编码 `..` 只上退一级，在 hoisted 情况下会落到 `node_modules/node_modules`（实测踩过）。
+ *
+ * 所以用 Node 自己的解析规则（createRequire + require.resolve）：它会从插件目录
+ * 沿 node_modules 逐级向上找，是这里唯一可靠的锚点。再补两个明确候选兜底。
  *
  * 用 `fileURLToPath` 而不是手工处理 `URL.pathname`：Windows 下 pathname 是
  * `/D:/%E6%96%87...` 这种形态，手工 replace + decode 容易在中文字符或盘符边界出错。
- *
- * 两个候选落点，覆盖 link 安装（源码目录即包目录）与打包安装：
- *   1. <包目录>/node_modules/pdfjs-dist/...   —— 依赖就装在自己下面
- *   2. <包目录>/../node_modules/pdfjs-dist/... —— 被提升到上一层时
- * 找不到返回 null，由调用方给出可读的错误提示。
  */
 async function resolvePdfjsAsset(relPath) {
   const anchorDir = path.dirname(fileURLToPath(import.meta.url))
+
+  // ① 交给 Node 的解析器：从插件目录逐级向上找 node_modules/pdfjs-dist
+  try {
+    const requireHere = createRequire(path.join(anchorDir, 'noop.cjs'))
+    const pkgJson = requireHere.resolve('pdfjs-dist/package.json')
+    const file = path.join(path.dirname(pkgJson), relPath)
+    const st = await fsp.stat(file)
+    if (st.isFile()) return file
+  } catch { /* 解析不到就试下面的候选 */ }
+
+  // ② 明确候选：自己下面、上一层、再上一层
   const candidates = [
     path.join(anchorDir, 'node_modules', 'pdfjs-dist', relPath),
     path.join(anchorDir, '..', 'node_modules', 'pdfjs-dist', relPath),
+    path.join(anchorDir, '..', '..', 'node_modules', 'pdfjs-dist', relPath),
   ]
   for (const file of candidates) {
     try {
-      const stat = await fsp.stat(file)
-      if (stat.isFile()) return file
+      const st = await fsp.stat(file)
+      if (st.isFile()) return file
     } catch { /* 试下一个 */ }
   }
   return null
 }
+
 /** 库索引缓存时长：短到新加文献能立刻被搜到，长到不必每次提问都重读 sqlite。 */
 const LIBRARY_TTL_MS = 15_000
 
