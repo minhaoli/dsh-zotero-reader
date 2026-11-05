@@ -107,15 +107,37 @@ node test/host-e2e.mjs         # 主机侧端到端（需要本机有 Zotero 库
 
 ## 致谢与来源
 
-这个插件是在 [@ggboy123/dsh-paper-reader](https://github.com/GGboya/dsh-paper-reader)（作者 GGboya，MIT 许可）的启发下写的。它是本插件之前我实际在用的论文阅读插件，卸载它之后才有了重做一份的想法。
+本插件在实现方式上参考了 [@ggboy123/dsh-paper-reader](https://github.com/GGboya/dsh-paper-reader)（作者 GGboya，MIT 许可）。它是我在本插件之前实际使用的论文阅读插件，卸载它之后才有了重做一份的想法。
 
-**没有复制它的源代码**（仓库里不含任何来自它的文件），但下面这些做法参考了它：
+本仓库**未复制该项目的源代码**（不含来自它的任何文件）。参考之处：工具声明的规整形态（`host/define-tool.js`）、右栏 tab 的注册方式与 `guide` 入口卡片（`client.js`）、以及 pdf.js 的取用思路。
 
-- **工具声明的形态**：`host/define-tool.js` 里「把属性上的 `required: true` 收进父级数组、把裸 map 包成 object schema」这套规整方式，是照着它的工具产物形态反推实现的。原因是宿主提供的 `defineTool` 在 app.asar 内、磁盘上解析不到，只能自己实现等价物。
-- **右栏 tab 的注册方式**：`client.js` 里 `sidebarRightTabs.register + sidebar.right.pane.tab slot` 的组合，早期是照它的 `lib/client.js` 学的，包括 `guide` 字段用来在右栏「开始」页生成入口卡片。
-- **pdf.js 的加载思路**：它从宿主已装的包里取 pdf.js；本插件改成自带一份并用路由发出去，起因正是它被卸载后宿主里没有 `pdfjs-dist` 了。
+依据 MIT 许可证「须在副本或实质部分中保留版权声明与许可声明」的要求，下面原样收录其版权声明与完整许可证文本；第三方依赖 pdf.js（Apache-2.0）的声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
-它解决的问题和本插件不同（它自带文献库管理、分步精读、检索重排等），两者可以共存。
+**Upstream**: https://github.com/GGboya/dsh-paper-reader
+**Version referenced**: 1.7.0
+**License**: MIT
+
+```text
+Copyright (c) 2026 GGboya
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## License
 

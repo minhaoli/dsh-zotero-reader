@@ -107,15 +107,37 @@ node test/host-e2e.mjs         # host-side end-to-end (needs a local Zotero libr
 
 ## Credits
 
-This plugin was inspired by [@ggboy123/dsh-paper-reader](https://github.com/GGboya/dsh-paper-reader) (by GGboya, MIT). That was the paper reader I was actually using before this one; the idea of rebuilding it came after uninstalling it.
+This plugin's approach was informed by [@ggboy123/dsh-paper-reader](https://github.com/GGboya/dsh-paper-reader) (by GGboya, MIT). It was the paper reader I used before this one, and the idea of rebuilding it came after uninstalling it.
 
-**No source code was copied** (the repository contains no files from it). These approaches were informed by it:
+**No source code from that project was copied** (this repository contains none of its files). What was informed by it: the tool-declaration normalization (`host/define-tool.js`), the sidebar tab registration and its `guide` entry card (`client.js`), and the approach to loading pdf.js.
 
-- **Tool declaration shape**: `host/define-tool.js` normalizes `required: true` on properties into the parent array and wraps a bare map into an object schema. This mirrors how its tools are shaped — the host's own `defineTool` lives inside app.asar and cannot be resolved from disk, so an equivalent had to be written.
-- **Sidebar tab registration**: the `sidebarRightTabs.register` + `sidebar.right.pane.tab` slot pairing in `client.js`, including the `guide` field that produces the entry card on the right sidebar's start page, was learned from its `lib/client.js`.
-- **pdf.js loading**: it borrows pdf.js from whatever the host has installed; this plugin instead ships its own and serves it over a route — precisely because uninstalling it left the host without `pdfjs-dist`.
+Because the MIT license requires the copyright and permission notice to be retained in copies or substantial portions, the upstream notice and full license text are reproduced verbatim below. Third-party dependency notices (pdf.js, Apache-2.0) are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-It solves different problems (it brings its own library management, staged close reading, retrieval re-ranking), so the two can coexist.
+**Upstream**: https://github.com/GGboya/dsh-paper-reader
+**Version referenced**: 1.7.0
+**License**: MIT
+
+```text
+Copyright (c) 2026 GGboya
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## License
 
