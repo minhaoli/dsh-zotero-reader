@@ -58,11 +58,51 @@ async function openSqlite(file, options) {
 /**
  * 把 zotero.sqlite 复制到缓存目录，返回副本路径。
  * 原件可能正被 Zotero 独占，复制采用「失败逐个重试」的策略。
+ *
+ * **源库没变就不重复复制。**
+ *
+ * 这个库实测 15.7 MB，加上 -wal 又有 15.2 MB，每次复制约 31 MB。
+ * 而它原来被调用得极其频繁：每次打开 PDF 都要经 findItem → library()，
+ * 库索引一过 TTL 就整份重建，重建的第一步就是这 31 MB 复制。
+ * 客户端日志里 `fetch-bytes` 因此从 180ms 剧烈波动到 16 秒 ——
+ * 同一篇 PDF，只因为上次读库是 15 秒之前，就要多等十几秒。
+ *
+ * 判据用「源文件与 -wal 的大小 + 修改时间」：
+ *   · 只读打开不会改动快照，所以快照的 mtime 天然比源文件旧；
+ *   · -wal 必须一起算 —— Zotero 写入时常只动 wal，主库文件本身不变，
+ *     漏掉它就会拿旧快照读到过时数据。
+ * 签名存成旁路 .meta.json，和快照同目录，随快照一起失效。
  */
 async function snapshotDatabase(dataDir, cacheDir) {
   const src = path.join(dataDir, 'zotero.sqlite')
   await fsp.mkdir(cacheDir, { recursive: true })
   const dst = path.join(cacheDir, 'zotero.snapshot.sqlite')
+  const meta = dst + '.meta.json'
+
+  /** 源库指纹：主库与 wal 各自的大小 + 修改时间。 */
+  const fingerprint = async () => {
+    const parts = []
+    for (const f of [src, src + '-wal']) {
+      try {
+        const st = await fsp.stat(f)
+        parts.push(`${f}:${st.size}:${Math.round(st.mtimeMs)}`)
+      } catch {
+        parts.push(`${f}:missing`)
+      }
+    }
+    return parts.join('|')
+  }
+
+  let sig = null
+  try { sig = await fingerprint() } catch { /* 取不到就老老实实复制 */ }
+
+  if (sig && fs.existsSync(dst)) {
+    try {
+      const saved = JSON.parse(await fsp.readFile(meta, 'utf8'))
+      if (saved && saved.sig === sig) return dst
+    } catch { /* 没有元数据或损坏 → 重新复制 */ }
+  }
+
   let lastError
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
@@ -73,6 +113,14 @@ async function snapshotDatabase(dataDir, cacheDir) {
         if (fs.existsSync(side)) {
           try { await fsp.copyFile(side, dst + suffix) } catch { /* shm 复制失败无妨 */ }
         }
+      }
+      /**
+       * 元数据必须在复制**之后**写，而且要用复制前的指纹。
+       * 先写后复制的话，复制过程中源库又被 Zotero 改动，
+       * 就会记下一个对不上实际内容的签名，下次误判为「没变」。
+       */
+      if (sig) {
+        try { await fsp.writeFile(meta, JSON.stringify({ sig }), 'utf8') } catch { /* 写不进去就每次重复制 */ }
       }
       return dst
     } catch (error) {

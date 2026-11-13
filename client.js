@@ -2550,8 +2550,20 @@ window.__ModuleLoader__.load({
           const openWin = perf.windowOpen()
           openWinRef.current = openWin
           try {
+            /**
+             * **单独给「加载 pdf.js」计时，别混进 fetch-bytes。**
+             *
+             * 原来 openWin 建好之后紧接着就 await getPdfjs()，于是首次加载
+             * 那 460KB+1.2MB 模块的时间全被算进 fetch-bytes ——
+             * 日志里出现过 fetch-bytes=16162ms 而 getDocument 只有 3.3ms
+             * 的荒谬组合：等的是模块，账却记在取字节上，方向完全带偏。
+             *
+             * 拆成独立阶段后，才能看出「首次冷启动」与「取文件慢」是两回事。
+             */
+            const pdfjsWin = perf.windowOpen()
             // 两处都套超时：任何一个 await 不 settle 都会让界面永久停在「加载中」
             const pdfjs = await withTimeout(getPdfjs(), 15000, '加载 pdf.js')
+            perf.attribute('load-pdfjs-module', pdfjsWin)
 
             /**
              * 不要用 `getDocument({ url })`。
