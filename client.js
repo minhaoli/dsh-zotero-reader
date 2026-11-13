@@ -393,6 +393,296 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /**
+     * ============================ 性能探针 ============================
+     *
+     * 目的：用**不受主线程排队影响**的测量回答「卡在哪」。
+     *
+     * 为什么不能只用现有诊断打点：
+     * `viewer:render-check` 是 `setTimeout(..., 600)`，它在日志里显示的
+     * 「doc-set 之后 7311ms」不是渲染耗时，而是定时器被主线程堵住、晚了 6.7 秒才执行。
+     * 同理 `resume-applied` 的 3112ms 里含 120ms×N 重试。直接把这两个数当耗时，
+     * 会把「主线程阻塞」误读成「渲染慢」，而这两者的改法完全不同。
+     *
+     * 所以本探针同时量两条独立的东西：
+     *   ① 各阶段真实耗时 —— 用 render() 的 Promise resolve / pagerendered 事件做锚点，
+     *      这些在任务真正完成时触发，不靠定时器；
+     *   ② 主线程健康度 —— longtask 与 rAF 帧间隔，用来解释「为什么定时器晚了 6.7 秒」。
+     *
+     * 限流：明细事件按「每次操作」聚合，汇总事件 2 秒内最多一条。
+     * 绝不可能每帧一行 —— 帧间隔只在内存里累积，2 秒汇总时取分位数。
+     */
+    /**
+     * 探针版本。心跳里带上它，日志里一看就知道当前页面跑的是哪一版探针。
+     * 改动探针逻辑时记得同步 +1，否则「刷新了没生效」又要靠猜。
+     */
+    const PERF_PROBE_VERSION = 'p3-2026-11-13'
+
+    const perf = (() => {
+      const t0 = (typeof performance !== 'undefined' ? performance : Date)
+      const now = () => t0.now()
+
+      /** 帧间隔采样（ms）。只在内存里累积，开销是一次 now() 相减。 */
+      let frameSamples = []
+      let frameMax = 0
+      let lastFrame = 0
+      let rafOn = false
+
+      /** longtask 采样 */
+      let longTasks = []
+      let longtaskOn = false
+
+      /** 按操作分组暂存的明细，汇总后清空 */
+      let phaseLog = []
+
+      let lastSummaryAt = 0
+      const SUMMARY_MIN_GAP = 2000
+      /** 按 label 分别限流：open / jump / scroll 互不挤占，各自最多每 2s 一条。 */
+      const lastSummaryByLabel = new Map()
+
+      const percentile = (arr, p) => {
+        if (!arr.length) return 0
+        const s = [...arr].sort((a, b) => a - b)
+        const i = Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1))
+        return s[i]
+      }
+      const round1 = (v) => Math.round(v * 10) / 10
+
+      /**
+       * rAF 帧间隔采样器。
+       * 侧栏隐藏时浏览器会把 rAF 节流到 ~1Hz 甚至暂停，这本身也是要测的事实
+       * （「隐藏时是否还在空转」），所以照常记录，由汇总区分。
+       */
+      function startFrames() {
+        if (rafOn || typeof requestAnimationFrame !== 'function') return
+        rafOn = true
+        lastFrame = now()
+        const tick = () => {
+          if (!rafOn) return
+          const t = now()
+          const dt = t - lastFrame
+          lastFrame = t
+          if (dt > 0 && dt < 60000) {
+            frameSamples.push(dt)
+            if (dt > frameMax) frameMax = dt
+            // 每个汇总周期最多留 600 个样本，够算分位数且不会无限涨
+            if (frameSamples.length > 600) frameSamples = frameSamples.slice(-600)
+          }
+          requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      }
+
+      function startLongTasks() {
+        if (longtaskOn || typeof PerformanceObserver !== 'function') return
+        try {
+          const po = new PerformanceObserver((list) => {
+            for (const e of list.getEntries()) {
+              longTasks.push({ t: Math.round(e.startTime), d: Math.round(e.duration) })
+              if (longTasks.length > 400) longTasks = longTasks.slice(-400)
+            }
+          })
+          po.observe({ entryTypes: ['longtask'] })
+          longtaskOn = true
+        } catch { /* 不支持 longtask 就算了，帧间隔仍可用 */ }
+      }
+
+      /**
+       * 强制同步布局（forced reflow）探针。
+       *
+       * 这是最能把「卡顿」解释清楚的指标，也是 pdf.js 与自绘标注层最典型的病根：
+       * 只要「改样式/改 DOM」之后紧跟一次「读取几何」（getBoundingClientRect、
+       * offsetTop、scrollTop、getComputedStyle…），浏览器就必须立刻重排整个页面，
+       * 把本来可以合批的布局拆成一次一次同步做。几百次下来就是几秒。
+       *
+       * 检测方式：包住 Element.prototype.getBoundingClientRect 与 getComputedStyle，
+       * 记录每次调用的耗时；若单次耗时超过阈值（说明触发了真实重排而非读缓存），
+       * 就计一次「强制布局」。同时统计总调用次数与累计耗时。
+       *
+       * 注意：包装会带来微小开销，但这是纯函数转发，量级远低于它要测的重排本身。
+       */
+      const layout = (() => {
+        let calls = 0
+        let costly = 0
+        let totalMs = 0
+        let maxMs = 0
+        let installed = false
+
+        function install() {
+          if (installed || typeof Element === 'undefined') return
+          installed = true
+          try {
+            const proto = Element.prototype
+            const origRect = proto.getBoundingClientRect
+            if (typeof origRect === 'function') {
+              proto.getBoundingClientRect = function patchedGBCR() {
+                const s = now()
+                const r = origRect.apply(this, arguments)
+                const d = now() - s
+                calls += 1
+                totalMs += d
+                if (d > maxMs) maxMs = d
+                /**
+                 * 阈值取 1ms：读缓存布局通常只有几十微秒，
+                 * 一次真实重排至少在 1ms 量级，两者能分开。
+                 */
+                if (d > 1) costly += 1
+                return r
+              }
+            }
+          } catch { /* 无法包装就算了，不影响阅读 */ }
+          try {
+            const origGCS = window.getComputedStyle
+            if (typeof origGCS === 'function') {
+              window.getComputedStyle = function patchedGCS() {
+                const s = now()
+                const r = origGCS.apply(this, arguments)
+                const d = now() - s
+                calls += 1
+                totalMs += d
+                if (d > maxMs) maxMs = d
+                if (d > 1) costly += 1
+                return r
+              }
+            }
+          } catch { /* 同上 */ }
+        }
+
+        function stats() {
+          return {
+            layoutReads: calls,
+            layoutForced: costly,
+            layoutMs: Math.round(totalMs),
+            layoutMax: round1(maxMs),
+          }
+        }
+        function reset() {
+          calls = 0
+          costly = 0
+          totalMs = 0
+          maxMs = 0
+        }
+        return { install, stats, reset }
+      })()
+
+      /** 记录一个阶段的耗时（同步或异步都可以） */
+      function phase(name, ms, extra) {        // 第二参数是数字时按「耗时」处理，否则当成纯标记（如页码），不参与求和
+        if (typeof ms !== 'number') {
+          phaseLog.push({ n: name, tag: ms, ...(extra || {}) })
+          if (phaseLog.length > 200) phaseLog = phaseLog.slice(-200)
+          return
+        }
+        if (!(ms >= 0)) return
+        phaseLog.push({ n: name, ms: round1(ms), ...(extra || {}) })
+        if (phaseLog.length > 200) phaseLog = phaseLog.slice(-200)
+      }
+
+      /** 页渲染计数：回答「15 页是不是一次性全画了」和「有没有重复画」 */
+      const painted = new Map()
+      function notePainted(pageNo) {
+        painted.set(pageNo, (painted.get(pageNo) || 0) + 1)
+      }
+      function paintedStats() {
+        const pages = [...painted.keys()]
+        const dup = [...painted.entries()].filter(([, n]) => n > 1)
+        return {
+          paintedPages: pages.length,
+          paintedList: pages.sort((a, b) => a - b).slice(0, 40),
+          repaintPages: dup.length,
+          repaintTimes: dup.reduce((a, [, n]) => a + (n - 1), 0),
+        }
+      }
+
+      /**
+       * 长任务归因：把 longtask 的时间区间和调用方打的时间窗做交集。
+       *
+       * 这是回答「主线程被谁占了」的关键 —— 光知道有 6 秒长任务不够，
+       * 还要知道这 6 秒是不是落在 pdf.js 的某一段里。
+       * 用法：const w = perf.window(); ...干活...; perf.attribute('pdf-render', w)
+       */
+      function windowOpen() {
+        return { s: now(), e: 0 }
+      }
+      function attribute(label, w) {
+        if (!w) return
+        w.e = now()
+        const covered = longTasks
+          .filter((x) => x.t + x.d > w.s && x.t < w.e)
+          .reduce((a, x) => a + Math.max(0, Math.min(x.t + x.d, w.e) - Math.max(x.t, w.s)), 0)
+        phaseLog.push({
+          n: label,
+          ms: round1(w.e - w.s),
+          // 这一段里主线程被长任务占了多久 —— 越大说明该段越「堵」
+          blockedMs: Math.round(covered),
+        })
+        if (phaseLog.length > 200) phaseLog = phaseLog.slice(-200)
+      }
+
+      /** 包一个 Promise，量它真正 settle 的时间 */
+      async function timed(name, fn, extra) {
+        const s = now()
+        try {
+          return await fn()
+        } finally {
+          phase(name, now() - s, extra)
+        }
+      }
+
+      /**
+       * 汇总一条 perf:summary。
+       * 低于 SUMMARY_MIN_GAP 的重复调用直接丢弃 —— 这是唯一的限流闸门，
+       * 保证日志不会被探针撑爆。
+       */
+      function summary(label, extra) {
+        const t = now()
+        /**
+         * 限流按 label 分开：一次操作里的 open / jump / scroll 不会互相挤掉。
+         * 但全局仍有 2s 地板，避免极端情况下同一瞬间刷出一堆记录。
+         */
+        const lastSame = lastSummaryByLabel.get(label) ?? 0
+        if (t - lastSame < SUMMARY_MIN_GAP) return false
+        if (t - lastSummaryAt < 300) return false
+        lastSummaryByLabel.set(label, t)
+        lastSummaryAt = t
+
+        const frames = frameSamples
+        const lt = longTasks
+        const ltTotal = lt.reduce((a, b) => a + b.d, 0)
+        const rec = {
+          event: 'perf:summary',
+          label,
+          spanMs: Math.round(t),
+          frames: frames.length,
+          frameP50: round1(percentile(frames, 50)),
+          frameP95: round1(percentile(frames, 95)),
+          frameMax: round1(frameMax),
+          /** 超过 50ms ≈ 丢掉 3 帧以上，是肉眼可见的卡 */
+          jank: frames.filter((v) => v > 50).length,
+          /** 超过 200ms 基本等于「界面定住了」 */
+          freeze: frames.filter((v) => v > 200).length,
+          longTasks: lt.length,
+          longTaskMs: Math.round(ltTotal),
+          longTaskMax: lt.length ? Math.round(Math.max(...lt.map((x) => x.d))) : 0,
+          phases: phaseLog.slice(-40),
+          ...paintedStats(),
+          ...layout.stats(),
+          ...(extra || {}),
+        }
+        reportDiag(rec)
+
+        // 汇总后清空，下一轮重新累积 —— 这样每个数都是「这一段」的，不是全程累加的
+        frameSamples = []
+        frameMax = 0
+        longTasks = []
+        phaseLog = []
+        painted.clear()
+        layout.reset()
+        return true
+      }
+
+      return { now, startFrames, startLongTasks, phase, timed, summary, percentile, notePainted, paintedStats, windowOpen, attribute, installLayoutProbe: layout.install }
+    })()
+
     async function importFromSource(pathname) {
       const res = await fetch(pathname, { credentials: 'same-origin' })
       if (!res.ok) {
@@ -914,6 +1204,23 @@ window.__ModuleLoader__.load({
           tabKey,
           hasSessionId: Boolean(props.sessionId),
           hasCtx: Boolean(props.ctx),
+        })
+        /**
+         * 探针心跳。
+         *
+         * 只有打开 PDF 才会产出 perf:summary，于是「日志里没有 perf 行」
+         * 分不清是「页面还是旧代码」还是「刷新了但没打开 PDF」——
+         * 这两种情况下要做的事完全不同。挂载时打一条版本心跳，
+         * 一眼就能分辨：有心跳=新代码已加载，没心跳=需要刷新页面。
+         */
+        reportDiag({
+          event: 'perf:probe-ready',
+          version: PERF_PROBE_VERSION,
+          raf: typeof requestAnimationFrame === 'function',
+          longtaskObserver: typeof PerformanceObserver === 'function'
+            && Array.isArray(PerformanceObserver.supportedEntryTypes)
+            && PerformanceObserver.supportedEntryTypes.includes('longtask'),
+          layoutProbe: typeof Element !== 'undefined' && Boolean(Element.prototype.getBoundingClientRect),
         })
       }, [])
 
@@ -1889,6 +2196,15 @@ window.__ModuleLoader__.load({
       }, [itemKey, loadAnnotationsFromZotero])
 
       /* ---------- 加载 PDF ---------- */
+      /**
+       * 本次打开 PDF 的性能计时窗口，供 viewer 的 effect 共用。
+       *
+       * 两个 effect 有明确分工：这个负责取字节 + getDocument，
+       * viewer 那个负责 setDocument + 建页。`setDocument-total` 要衡量
+       * 「点开文献到页建好」的整段，起点必须在这个 effect 里拿，
+       * 而终点在另一个 —— 所以只能经由 ref 传递。
+       */
+      const openWinRef = useRef(null)
       useEffect(() => {
         let alive = true
         /**
@@ -1927,6 +2243,24 @@ window.__ModuleLoader__.load({
         setStatus('loading')
         ;(async () => {
           reportDiag({ event: 'pdf:start', itemKey })
+          /**
+           * 打开一篇 PDF 是这套阅读器最重的操作，探针从这一刻开始累积。
+           * 采样器只启动一次（内部有幂等守卫），重复调用无副作用。
+           */
+          perf.startFrames()
+          perf.startLongTasks()
+          // 强制同步布局计数：必须在打开前装好，否则漏掉首屏最大的一段
+          perf.installLayoutProbe()
+          /**
+           * 计时窗口要跨两个 effect 用，所以存到 ref 上。
+           *
+           * `setDocument` 跑在**另一个** effect 里（viewer 那个，依赖 status 变成
+           * 'ready' 才启动），把它写成局部 const 会直接 ReferenceError ——
+           * 实测「官方阅读器加载失败：openWin is not defined」，PDF 完全打不开。
+           * ref 让两个 effect 共享同一个起点，`setDocument-total` 才是从这里算起。
+           */
+          const openWin = perf.windowOpen()
+          openWinRef.current = openWin
           try {
             // 两处都套超时：任何一个 await 不 settle 都会让界面永久停在「加载中」
             const pdfjs = await withTimeout(getPdfjs(), 15000, '加载 pdf.js')
@@ -1948,8 +2282,11 @@ window.__ModuleLoader__.load({
             if (!res.ok) throw new Error(`下载 PDF 失败：HTTP ${res.status}`)
             const bytes = new Uint8Array(await withTimeout(res.arrayBuffer(), 20000, '读取 PDF 字节'))
             reportDiag({ event: 'pdf:bytes', itemKey, bytes: bytes.length })
+            perf.attribute('fetch-bytes', openWin)
 
+            const docWin = perf.windowOpen()
             const doc = await withTimeout(pdfjs.getDocument({ data: bytes }).promise, 30000, '解析 PDF')
+            perf.attribute('getDocument', docWin)
             if (!alive) { doc.destroy?.(); return }
             pdfRef.current = { doc, pdfjs }
             setPageCount(doc.numPages)
@@ -1979,6 +2316,7 @@ window.__ModuleLoader__.load({
               pageSizesRef.current = new Map()
               const sizeLimit = Math.min(doc.numPages, 120)
               const CONCURRENCY = 16
+              const sizeWin = perf.windowOpen()
               for (let base = 1; base <= sizeLimit; base += CONCURRENCY) {
                 const batch = []
                 for (let i = base; i < Math.min(base + CONCURRENCY, sizeLimit + 1); i += 1) {
@@ -1996,6 +2334,7 @@ window.__ModuleLoader__.load({
                 if (!alive) return
               }
               const paneWidth = (scrollRef.current?.clientWidth ?? 0) || paneWidthHint
+              perf.attribute('prefetch-page-sizes', sizeWin)
               if (paneWidth > 80 && base.width > 0) {
                 setScale(Math.max(0.4, Math.min(3, Number(((paneWidth - 24) / base.width).toFixed(3)))))
               }
@@ -2302,6 +2641,7 @@ window.__ModuleLoader__.load({
             viewer.setDocument(pdf.doc)
             linkService.setDocument(pdf.doc, null)
             reportDiag({ event: 'viewer:doc-set', pages: pdf.doc.numPages })
+            perf.attribute('setDocument-total', openWinRef.current)
 
             // 官方 viewer 把页码/缩放变化通过 eventBus 广播，转成我们自己的 state
             eventBus.on('pagechanging', (e) => {
@@ -2364,12 +2704,40 @@ window.__ModuleLoader__.load({
             eventBus.on('pagerendered', (e) => {
               if (disposed) return
               /**
-               * 每页画完就把批注/高亮叠上去。
+               * 性能锚点：pagerendered 在 canvas 真正画完时触发，
+               * 不受 setTimeout 排队影响，是「这一页到底什么时候画好」的可信时刻。
                *
-               * 走 ref 而不是直接引用 decoratePage：它的声明在这个 effect 之后
-               * （被 C 规则标出来了）。虽然运行时闭包执行时声明已完成，
-               * 但用 ref 更稳妥，也不依赖那个时序假设。
+               * 这里同时数两个决定改法方向的事实：
+               *   ① 一共画了多少页 —— 15 页文档若一次性全画，根因就是没有按需渲染；
+               *   ② 有没有页被重复画 —— 重复渲染是纯浪费，通常来自缩放/重排抖动。
                */
+              perf.phase('page-painted', e.pageNumber)
+              perf.notePainted(e.pageNumber)
+              /**
+               * 逐页绘制的直接证据。三个字段合起来才能区分两种截然不同的成因：
+               *   · 只画可见页但每页很慢   → 单页渲染太重
+               *   · 一口气把 15 页全画了   → 根本没有按需渲染
+               * 这两种改法完全相反，所以不能靠推断。
+               */
+              let visibleAtPaint = null
+              let canvasCount = 0
+              try {
+                const pageEl = host.querySelector(`.page[data-page-number="${e.pageNumber}"]`)
+                if (pageEl) {
+                  const pr = pageEl.getBoundingClientRect()
+                  const cr = container.getBoundingClientRect()
+                  // 与本页可见区域有交集即算「在视口内」
+                  visibleAtPaint = pr.bottom > cr.top && pr.top < cr.bottom && pr.height > 0
+                }
+                canvasCount = host.querySelectorAll('canvas').length
+              } catch { /* 量不到就留空，不编数据 */ }
+              reportDiag({
+                event: 'perf:paint',
+                page: e.pageNumber,
+                at: Math.round(perf.now()),
+                visibleAtPaint,
+                canvasCount,
+              })
               decoratePageRef.current?.(e.pageNumber)
               // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
               paintSelectRef.current?.(annotSelectedRef.current)
@@ -2551,6 +2919,31 @@ window.__ModuleLoader__.load({
                 rendered: after > 0,
               })
             }, 600)
+
+            /**
+             * ========== 性能探针：首屏汇总 ==========
+             *
+             * 判据用事件而不是固定延时 —— 这样汇总时刻不会因主线程堵塞而漂移，
+             * 也只在真正画完首页时才出数据（不会在空白期打一条全 0 的假记录）。
+             *
+             * 这条 `perf:summary label=open` 就是「打开一篇 PDF 有多卡」的量化画像：
+             * 长任务占比、帧间隔分位数、各阶段耗时、实际画了几页、有没有重复画。
+             */
+            const onFirstPaint = () => {
+              try { eventBus.off?.('pagerendered', onFirstPaint) } catch { /* 老版本没有 off */ }
+              setTimeout(() => {
+                if (disposed) return
+                let domP = 0
+                try { domP = host.querySelectorAll('.page[data-page-number]').length } catch { /* 忽略 */ }
+                perf.summary('open', {
+                  itemKey,
+                  numPages: pdf.doc.numPages,
+                  domPages: domP,
+                  viewerScale: Number(viewer.currentScale?.toFixed?.(3) ?? 0),
+                })
+              }, 1000)
+            }
+            eventBus.on('pagerendered', onFirstPaint)
           } catch (e) {
             if (disposed) return
             reportDiag({ event: 'viewer:error', itemKey, message: String(e?.message ?? e), stack: String(e?.stack ?? '').slice(0, 600) })
@@ -3171,6 +3564,29 @@ window.__ModuleLoader__.load({
          * 带令牌停止：连按回车只有最后一次生效，成功即停，不和用户手动滚动抢位置。
          */
         const token = ++jumpSeqRef.current
+        /**
+         * 跳页探针：从点击到「新页真的画出来」花了多久。
+         * 完成判据用 pagerendered（canvas 真画完时触发），不是定时器 ——
+         * 定时器会被主线程堵塞推迟，正好把「卡」掩盖掉。
+         */
+        const jumpWin = perf.windowOpen()
+        // 从 viewer 直接读当前页，避免把 visiblePage 加进 deps
+        // （那会让 gotoPage 每次翻页重建，反而多一轮重渲染，污染测量）
+        const jumpFrom = (() => {
+          try { return viewerRef.current?.currentPageNumber ?? 0 } catch { return 0 }
+        })()
+        let jumpDone = false
+        const onJumpPaint = (ev) => {
+          if (jumpDone || ev.pageNumber !== target) return
+          jumpDone = true
+          try { eventBusRef.current?.off?.('pagerendered', onJumpPaint) } catch { /* 忽略 */ }
+          perf.attribute('jump-page', jumpWin)
+          perf.summary('jump', { from: jumpFrom, to: target })
+        }
+        try {
+          if (target !== jumpFrom) eventBusRef.current?.on?.('pagerendered', onJumpPaint)
+        } catch { /* 忽略 */ }
+
         let tries = 0
         const retry = () => {
           if (token !== jumpSeqRef.current) return
@@ -3181,8 +3597,37 @@ window.__ModuleLoader__.load({
         requestAnimationFrame(() => setTimeout(retry, 60))
       }, [pageCount])
 
-      /* ---------- 全局跳转请求（来自会话里的页码点击） ---------- */
+      /* ---------- 滚动性能探针 ---------- */
       useEffect(() => {
+        if (status !== 'ready') return undefined
+        const host = hostRef.current
+        if (!host) return undefined
+        /**
+         * 挂到真正吃滚动的那一层（.pdfViewer），按几何找，不写死 class。
+         * 滚动本身不产生长任务，卡的是滚动过程中触发的重渲染/重排，
+         * 所以这里用帧间隔 + 长任务来度量，滚动停止 400ms 后汇总一条。
+         */
+        const scroller = host.querySelector('.pdfViewer') ?? findScrollParent(host)
+        if (!scroller) return undefined
+        let timer = null
+        let scrolls = 0
+        const onScroll = () => {
+          scrolls += 1
+          if (timer) clearTimeout(timer)
+          timer = setTimeout(() => {
+            timer = null
+            if (scrolls >= 3) perf.summary('scroll', { scrollEvents: scrolls, scrollerTop: Math.round(scroller.scrollTop) })
+            scrolls = 0
+          }, 400)
+        }
+        scroller.addEventListener('scroll', onScroll, { passive: true })
+        return () => {
+          scroller.removeEventListener('scroll', onScroll)
+          if (timer) clearTimeout(timer)
+        }
+      }, [status])
+
+      /* ---------- 全局跳转请求（来自会话里的页码点击） ---------- */      useEffect(() => {
         const onJump = (event) => {
           const detail = event?.detail ?? {}
           if (detail.itemKey && String(detail.itemKey).toUpperCase() !== itemKey) return
