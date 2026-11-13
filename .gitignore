@@ -21,3 +21,10 @@ Thumbs.db
 # 临时文件
 *.tmp
 *.bak
+# 带时间戳的备份（*.bak 只匹配以 .bak 结尾的，匹配不到 .bak-20261113-172933）
+*.bak-*
+*.bak2-*
+
+# 本地调研/一次性产物，不属于插件本体
+asar-index.json
+probe-*.mjs

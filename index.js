@@ -28,8 +28,8 @@ import { translateDocument, translateSelection, pickSelection } from './host/tra
 import { parseWithMineru, sectionsFromMarkdown } from './host/mineru.js'
 import { searchTool, readTool, askTool } from './host/tools.js'
 import {
-  readAnnotations, createAnnotation, deleteAnnotation,
-  probeLocalApi, HIGHLIGHT_COLORS,
+  readAnnotations, createAnnotation, deleteAnnotation, updateAnnotation,
+  probeLocalApi, HIGHLIGHT_COLORS, setApiKeyStore,
 } from './host/annotations.js'
 
 export const name = 'dsh-zotero-reader'
@@ -121,9 +121,11 @@ export function apply(ctx, config = {}) {
 function applyInner(ctx, config = {}) {
   const docs = new Map()          // itemKey → 文本层缓存
   /**
-   * 会话 → 本次搜索命中过的 itemKey（按出现顺序，去重）。
-   * 右侧栏「本次搜索」tab 读它，于是列表只反映这次对话真正搜出来的文章。
-   * 存内存不落盘：这是「这次对话」的视角，重启后本就不该还留着。
+   * 会话 → 该会话搜索命中过的 itemKey（按出现顺序，去重）。
+   *
+   * 隔离要求：**不同会话互不可见**。key 是归一化后的 sessionId，
+   * 所以 A 对话里搜到的文章不会出现在 B 对话的「本次搜索」里。
+   * 落盘时也保持这个分桶结构（`{ 会话id: [key...] }`），重启后隔离关系不变。
    */
   const searched = new Map()
   const translating = new Map()   // itemKey:lang → 进度
@@ -136,6 +138,32 @@ function applyInner(ctx, config = {}) {
     || process.env['DSH_ZOTERO_READER_DATA']
     || path.join(os.homedir(), '.dsh-zotero-reader')
   const cacheDir = path.join(dataDir, 'cache')
+  /** 搜索记录落盘位置：按会话分桶，重启后仍能取回各自的清单。 */
+  const searchedFile = path.join(dataDir, 'searched.json')
+
+  /**
+   * 宿主侧诊断出口。
+   *
+   * 搜索记录这条链路横跨「宿主写」「前端读」两侧，写入又是静默的 ——
+   * 两边分开看都正常，必须把两侧用的 key 摆进同一个日志才好判断断在哪。
+   */
+  const reportHostDiag = makeHostDiag(() => dataDir)
+
+
+  /**
+   * 启动时读回搜索记录。
+   * 读失败（文件不存在 / 内容坏了）就当没有，不要因为一份缓存让插件起不来。
+   */
+  try {
+    const saved = JSON.parse(fs.readFileSync(searchedFile, 'utf8'))
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      for (const [id, list] of Object.entries(saved)) {
+        if (Array.isArray(list)) {
+          searched.set(normalizeSessionId(id), list.filter((k) => typeof k === 'string'))
+        }
+      }
+    }
+  } catch { /* 首次运行没有这个文件，属正常 */ }
 
   /**
    * 运行期设置。
@@ -264,25 +292,80 @@ function applyInner(ctx, config = {}) {
   ctx.tools.register(searchTool(() => library(true), {
     /**
      * 记下这次搜索命中的文章，供右侧栏「本次搜索」tab 使用。
-     * 用 exec 里的会话 id 区分：同一台机器上多个会话各有各的清单。
+     *
+     * 会话身份取自 `exec.agent.id`（形如 `session-<uuid>`），见 host/tools.js 里的说明。
+     * 记录落盘到 `~/.dsh-zotero-reader/searched.json`，这样重启 DSH 后清单还在 ——
+     * 用户是把它当「我搜过的文献」用的，跨重启保留才有价值。
+     *
+     * 用「读-改-写」整份文件而不是追加日志：条目量小（几十个 key），
+     * 整份覆盖最不容易出现半行损坏。
      */
     onHits(sessionId, keys) {
-      if (!sessionId || keys.length === 0) return
-      const list = searched.get(sessionId) ?? []
+      const id = normalizeSessionId(sessionId)
+      /**
+       * 诊断：把「拿到的原始 sessionId / 归一化后的 key / 这批 hits 数」记进客户端日志。
+       *
+       * 为什么需要它：写入是静默的，一旦 key 算错，表现是右栏「本次搜索」永远空白，
+       * 而磁盘上确实有数据 —— 光看两边都「正常」，无法判断断在写入还是读取。
+       * 有了这条，就能把它和前端 `searched:query` 的 sid 直接对照。
+       */
+      reportHostDiag({ event: 'host:onHits', rawSessionId: String(sessionId ?? ''), key: id, hits: keys.length })
+      if (!id || keys.length === 0) return
+      const list = searched.get(id) ?? []
       for (const key of keys) {
         if (!list.includes(key)) list.push(key)
       }
-      searched.set(sessionId, list)
+      searched.set(id, list)
+      persistSearched()
     },
   }))
+
+  /**
+   * 把 searched 落盘。写失败不该影响搜索本身（工具已经返回结果了），
+   * 所以只记一条警告，不往外抛。
+   */
+  function persistSearched() {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true })
+      // Map → 普通对象再序列化；顺手把超过 500 条的旧会话裁掉，避免文件无限长
+      const obj = {}
+      for (const [id, list] of searched) obj[id] = list
+      fs.writeFileSync(searchedFile, JSON.stringify(obj, null, 2), 'utf8')
+    } catch (error) {
+      console.warn('[dsh-zotero-reader] 保存搜索记录失败:', error?.message ?? error)
+    }
+  }
   ctx.tools.register(readTool({ findItem, documentOf }))
   ctx.tools.register(askTool({ findItem, documentOf }))
 
   /* ---------------------------------------------------------------- 路由 */
 
+  /**
+   * Zotero 写入密钥的持久化位置。
+   *
+   * 放 dataDir 下，和 client-log 同级；宿主重启后能读回来复用，
+   * 避免每次启动都重新弹一次授权框（用户明确反馈过这个问题）。
+   */
+  try {
+    if (dataDir) setApiKeyStore(path.join(String(dataDir), 'zotero-api-key.json'))
+  } catch { /* 没有数据目录就不持久化，只保留内存缓存 */ }
+
   const deps = {
     findItem, documentOf, library, docs, searched, translating, settings, dataDir, cacheDir, ctx,
     saveSettings,
+    /**
+     * 把 searched 落盘的能力也交给 deps。
+     *
+     * handleRequest 是**模块顶层函数**，不在 applyInner 的闭包里 ——
+     * 那里直接写 `persistSearched()` 会 ReferenceError（实测就是这么炸的），
+     * 所以必须通过 deps 传进去。
+     */
+    persistSearched,
+    /**
+     * 诊断出口同理：它在 applyInner 闭包里，handleRequest 够不到。
+     * 已经有一处路由在用 reportHostDiag（/searched 相关），一并交给 deps。
+     */
+    reportHostDiag,
     // 设置里换了 Zotero 路径后，旧缓存必须作废，否则还按老路径读
     invalidateLibrary() {
       state.libraryCache = null
@@ -317,6 +400,43 @@ function applyInner(ctx, config = {}) {
 }
 
 /* ---------------------------------------------------------------- 配置 */
+
+/**
+ * 把会话 id 归一化成同一种写法。
+ *
+ * 两边来源不同：工具里拿到的是 `exec.agent.id`（形如 `session-<uuid>`），
+ * 而右栏 tab 的注入 prop 是 `sessionId`（可能不带前缀）。
+ * 不归一化就会「记在这个 key 下、去那个 key 里查」，清单永远是空的。
+ */
+function normalizeSessionId(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return ''
+  return raw.replace(/^session-/, '')
+}
+
+/**
+ * 宿主侧诊断：直接写进与客户端同一个 `client-log.jsonl`。
+ *
+ * 为什么需要：搜索记录这条链路横跨「宿主写」和「前端读」两侧，
+ * 而写入是静默的。两边各自看都正常，不把两侧的 key 摆在一起就没法判断
+ * 断在哪一头。写同一个文件，读一次日志就能对照。
+ *
+ * 任何异常都吞掉 —— 诊断绝不能影响业务（搜索本身已经成功了）。
+ */
+function makeHostDiag(getDataDir) {
+  return (payload) => {
+    try {
+      const dir = getDataDir()
+      if (!dir) return
+      fs.mkdirSync(dir, { recursive: true })
+      fs.appendFileSync(
+        path.join(dir, 'client-log.jsonl'),
+        `${JSON.stringify({ at: new Date().toISOString(), via: 'HOST', ...payload })}\n`,
+        'utf8',
+      )
+    } catch { /* 诊断失败不影响功能 */ }
+  }
+}
 
 function normalizeConfig(config) {
   return {
@@ -393,6 +513,15 @@ async function readJsonBody(req, limit = 1 << 20) {
 const VENDOR_FILES = {
   'pdf.mjs': ['build/pdf.min.mjs', 'application/javascript; charset=utf-8'],
   'pdf.worker.mjs': ['build/pdf.worker.min.mjs', 'application/javascript; charset=utf-8'],
+  /**
+   * 官方 viewer。
+   *
+   * 用它替代插件自己写的页循环：文本层排版、缩放、页间懒渲染都是官方实现，
+   * 我们只保留外层面板与批注浮层。`pdf_viewer.mjs` 是自足单文件（无顶层 import），
+   * 但它内部的版本校验要求与 pdf.mjs 同版本，所以两个文件必须来自同一个包。
+   */
+  'pdf_viewer.mjs': ['web/pdf_viewer.mjs', 'application/javascript; charset=utf-8'],
+  'pdf_viewer.css': ['web/pdf_viewer.css', 'text/css; charset=utf-8'],
   'pdf-legacy.mjs': ['legacy/build/pdf.min.mjs', 'application/javascript; charset=utf-8'],
 }
 
@@ -456,6 +585,56 @@ async function handleRequest(rctx, req, res, deps) {
       if (!res.headersSent) sendJson(res, 500, { error: `读取静态资源失败：${error.message}` })
       return undefined
     }
+  }
+
+  /**
+   * 客户端运行时诊断上报。
+   *
+   * 为什么放在**认证之前**：这一轮黑屏排查的根因之一就是「拿不到任何客户端证据」——
+   * 浏览器控制台的报错用户不方便抄，而如果问题恰恰出在认证/路径解析上，
+   * 放在认证之后就连日志都送不进来。这里只写诊断信息到本机文件，不含用户数据。
+   *
+   * 写到 ~/.dsh-zotero-reader/client-log.jsonl，一行一条，方便直接读。
+   */
+  if (subPath === '/client-log') {
+    const method = req.method ?? 'GET'
+    try {
+      /**
+       * POST 是首选（body 可以长），但实测在这个页面里 POST 一条都没落盘过：
+       * 页面基址是自定义 scheme，POST 可能连响应都拿不到就被丢掉了。
+       * 所以额外接受 `GET ?d=<json>` —— GET 在这个环境里已确认是通的。
+       * 「排查黑屏时拿不到任何客户端证据」这个障碍由它解掉。
+       */
+      const body = method === 'POST'
+        ? await readJsonBody(req, 256 * 1024)
+        : JSON.parse(parsed.searchParams.get('d') || '{}')
+      /**
+       * 必须用 `deps.dataDir`。
+       *
+       * 这里原来写的是裸 `dataDir` —— 它在 handleRequest 作用域里不存在（其它路由
+       * 一律走 deps.*），于是每次上报都抛 ReferenceError，又被静默 catch 吞掉：
+       * 接口回 200、文件一行没有。这就是「客户端日志永远收不到」的真正原因。
+       */
+      fs.mkdirSync(deps.dataDir, { recursive: true })
+      fs.appendFileSync(
+        path.join(deps.dataDir, 'client-log.jsonl'),
+        `${JSON.stringify({ at: new Date().toISOString(), via: method, ...body })}\n`,
+        'utf8',
+      )
+    } catch (error) {
+      /**
+       * 把失败原因回给调用方，而不是静默吞掉。
+       *
+       * 「日志一直没生成、接口却回 200」这种情况查了两轮才定位，代价太大：
+       * 诊断通道自己的故障必须能被看见，否则它就不是诊断通道。
+       */
+      return sendJson(res, 200, {
+        ok: false,
+        error: String(error?.message ?? error),
+        dataDir: String(deps.dataDir ?? ''),
+      })
+    }
+    return sendJson(res, 200, { ok: true })
   }
 
   // 插件路由不在宿主鉴权链上，必须自己判断
@@ -619,7 +798,7 @@ async function handleRequest(rctx, req, res, deps) {
      * 这次对话真正讨论过的文章，而不是又给一遍整个库。
      */
     if (sub === '/searched') {
-      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const sessionId = normalizeSessionId(url.searchParams.get('sessionId'))
       const keys = deps.searched.get(sessionId) ?? []
       if (keys.length === 0) return sendJson(res, 200, { items: [] })
       const lib = await deps.library()
@@ -638,9 +817,58 @@ async function handleRequest(rctx, req, res, deps) {
       return sendJson(res, 200, { items })
     }
 
+    /**
+     * 从「本次搜索」清单里移除指定文献（**只删这份记录，不删 Zotero 库里的文献**）。
+     *
+     * body: `{ sessionId, keys: [...] }`。
+     * 为什么不用 DELETE + query 传 keys：key 可能很多，塞进 URL 会破长度限制，
+     * 而且逗号分隔在 key 含逗号时会拆错。JSON body 更稳。
+     *
+     * 关键：必须 persistSearched() 落盘。只改内存的话，重启后
+     * 被删掉的条目会从 searched.json 里重新加载回来 —— 用户会认为「删除没生效」。
+     */
+    if (sub === '/searched/remove' && method === 'POST') {
+      const body = await readJsonBody(req)
+      const sessionId = normalizeSessionId(body.sessionId ?? url.searchParams.get('sessionId'))
+      if (!sessionId) return sendJson(res, 400, { error: '缺少 sessionId' })
+
+      const keys = Array.isArray(body.keys) ? body.keys : []
+      const wanted = new Set(keys.map((k) => String(k ?? '').trim()).filter(Boolean))
+      if (wanted.size === 0) return sendJson(res, 400, { error: '缺少要删除的 keys' })
+
+      const before = deps.searched.get(sessionId) ?? []
+      const after = before.filter((k) => !wanted.has(k))
+      // 删光了就整条会话删掉，别留一个空数组在文件里
+      if (after.length === 0) deps.searched.delete(sessionId)
+      else deps.searched.set(sessionId, after)
+
+      // 走 deps：handleRequest 在模块顶层，闭包里的 persistSearched 它看不见
+      deps.persistSearched()
+
+      deps.reportHostDiag({
+        event: 'host:searched-remove',
+        key: sessionId,
+        requested: wanted.size,
+        removed: before.length - after.length,
+        left: after.length,
+      })
+
+      return sendJson(res, 200, {
+        ok: true,
+        // 回传实际删掉的条数：前端据此判断「是不是真的删了什么」
+        removed: before.length - after.length,
+        left: after.length,
+      })
+    }
+
     if (sub === '/searched/clear' && method === 'POST') {
-      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const sessionId = normalizeSessionId(url.searchParams.get('sessionId'))
       deps.searched.delete(sessionId)
+      /**
+       * 清空同样要落盘 —— 原先这里只 delete 内存，重启后
+       * searched.json 里那份又会被读回来，「清空」等于没做。
+       */
+      deps.persistSearched()
       return sendJson(res, 200, { ok: true })
     }
 
@@ -732,8 +960,23 @@ async function handleRequest(rctx, req, res, deps) {
     if (sub === '/annotations' && method === 'POST') {
       const body = await readJsonBody(req)
       const itemKey = String(body.itemKey ?? '')
+      const kind = String(body.annotationKind ?? 'highlight').toLowerCase()
+      /**
+       * 只有高亮/下划线必须有选中文字。
+       * 便签是「点一个位置留个便条」，可以没有选中文本 —— 以前这里对 note 也强制
+       * 要求 text，导致便签根本走不到写入。
+       */
+      const needsText = kind !== 'note' && kind !== 'freetext' && kind !== 'ink'
       const text = String(body.text ?? '').trim()
-      if (!text) return sendJson(res, 400, { error: '没有选中文字' })
+      const hasRects = Array.isArray(body.rects) && body.rects.length > 0
+      if (needsText && !text) return sendJson(res, 400, { error: '没有选中文字' })
+      /**
+       * 便签允许是**空的**（只放一个位置标记，内容之后在 Zotero 里写）——
+       * 这正是 Zotero 阅读器便签工具的行为。只有连位置都没有时才拦。
+       */
+      if (!needsText && !text && !String(body.comment ?? '').trim() && !hasRects) {
+        return sendJson(res, 400, { error: '便签需要一个位置' })
+      }
       const item = await deps.findItem(itemKey)
 
       // 附件 key：前端可能已知（从 /annotations 拿到），否则现查一次
@@ -753,6 +996,9 @@ async function handleRequest(rctx, req, res, deps) {
         pageIndex: Number(body.pageIndex ?? 0),
         rects: Array.isArray(body.rects) ? body.rects : [],
         pageLabel: body.pageLabel,
+        // sortIndex 第三段要用页高算「距顶部距离」，前端拿得到 viewport 就传
+        pageHeightPt: Number(body.pageHeightPt) || undefined,
+        annotationKind: body.annotationKind,
       })
       if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
       return sendJson(res, 200, { ok: true, key: result.key })
@@ -765,6 +1011,25 @@ async function handleRequest(rctx, req, res, deps) {
       const result = await deleteAnnotation(key)
       if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
       return sendJson(res, 200, { ok: true })
+    }
+
+    /**
+     * 批注：修改已有批注（颜色 / 评论 / 标签，可同时传），同步到 Zotero。
+     *
+     * 向后兼容旧的 `{annotKey, color}` 调用（改色那条已经实测通过，不能弄坏）。
+     * 三个字段至少给一个，否则 updateAnnotation 会返回「没有要修改的字段」。
+     */
+    if (sub === '/annotations' && method === 'PATCH') {
+      const body = await readJsonBody(req)
+      const key = String(body.annotKey ?? url.searchParams.get('annotKey') ?? '')
+      if (!key) return sendJson(res, 400, { error: '缺少 annotKey' })
+      const result = await updateAnnotation(key, {
+        color: body.color,
+        comment: body.comment,
+        tags: body.tags,
+      })
+      if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
+      return sendJson(res, 200, { ok: true, patch: result.patch })
     }
 
     /** Zotero 本地 API 状态：设置面板里用它提示写入是否就绪。 */

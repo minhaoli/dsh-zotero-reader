@@ -90,8 +90,16 @@ export function searchTool(getLibrary, hooks = {}) {
       }
       const limit = args.limit ?? 20
       const picked = items.slice(0, limit)
-      // 记进本会话的「搜过的文章」清单（右侧栏那个 tab 读它）
-      hooks.onHits?.(exec?.sessionId, picked.map((item) => item.itemKey))
+      /**
+       * 记进本会话的「搜过的文章」清单（右侧栏那个 tab 读它）。
+       *
+       * 会话身份在 `exec.agent.id`，不是 `exec.sessionId` —— 后者不存在
+       * （实测 exec 的字段是 token/callId/rootCallId/name/signal/agent/…，
+       *  `sessionId` 为 undefined）。用错地方会让清单永远记在 undefined 下，
+       * 前端怎么查都是空的。
+       */
+      const sessionId = exec?.sessionId ?? exec?.agent?.id ?? exec?.agent?.session?.id
+      hooks.onHits?.(sessionId, picked.map((item) => item.itemKey))
       return {
         total: items.length,
         items: picked.map((item) => ({

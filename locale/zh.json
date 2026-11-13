@@ -14,6 +14,7 @@
     "zoomIn": "放大",
     "zoomOut": "缩小",
     "fitWidth": "适应宽度",
+    "reloadPdf": "刷新当前 PDF",
     "translateAll": "一键中文版",
     "translateAllRunning": "正在翻译 {{done}}/{{total}}",
     "modeOriginal": "原文",

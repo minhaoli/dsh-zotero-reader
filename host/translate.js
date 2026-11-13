@@ -134,11 +134,12 @@ async function translateOnce(ctx, text, target, signal) {
   if (!selection.provider || !selection.model) {
     throw new Error('没有可用的模型：宿主未配置默认模型，且插件设置里未指定翻译模型。')
   }
+  // 翻译本身不思考：固定 off（模型/provider 跟随当前会话默认）
   let out = ''
   const stream = ctx.llm.stream({
     provider: selection.provider,
     model: selection.model,
-    ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+    reasoningEffort: TRANSLATE_EFFORT,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [{ type: 'text', text }] }],
     signal,
@@ -149,12 +150,33 @@ async function translateOnce(ctx, text, target, signal) {
   return out.trim()
 }
 
-/** 决定用哪个模型：插件显式配置 > 宿主默认。 */
+/**
+ * 翻译/解读的思考程度：固定 off。
+ *
+ * 翻译是转写任务，思考只增加等待时间，不提升质量。
+ * 模型/provider 仍然跟随当前会话的默认选择（用户要求「其他的和当前模型一致」）。
+ */
+const TRANSLATE_EFFORT = 'off'
+
 export function pickSelection(ctx, override) {
   const fallback = () => {
     try {
       const sel = ctx.agentDefaultModel?.currentSelection?.()
-      if (sel && sel.provider && sel.model) return { provider: sel.provider, model: sel.model }
+      /**
+       * 连 reasoningEffort 一起带出来。
+       *
+       * `currentSelection()` 返回的是完整的 ModelSelection（provider/model +
+       * optional reasoning），这里原来只取 provider/model 就把推理等级丢了 ——
+       * 表现为「插件里的翻译/解读跑的是模型默认档（high），而不是用户当前选的档」。
+       * 用户明确要求「其他设置和当前模型一致」，所以必须透传。
+       */
+      if (sel && sel.provider && sel.model) {
+        return {
+          provider: sel.provider,
+          model: sel.model,
+          reasoningEffort: sel.reasoningEffort,
+        }
+      }
     } catch { /* 服务不在，交给下面报错 */ }
     return {}
   }
@@ -269,7 +291,7 @@ export async function translateSelection(ctx, text, options = {}) {
   const stream = ctx.llm.stream({
     provider: selection.provider,
     model: selection.model,
-    ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+    reasoningEffort: TRANSLATE_EFFORT,
     system,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     ...(options.signal ? { signal: options.signal } : {}),
