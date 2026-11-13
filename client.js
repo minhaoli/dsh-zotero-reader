@@ -437,6 +437,8 @@ window.__ModuleLoader__.load({
 
       let lastSummaryAt = 0
       const SUMMARY_MIN_GAP = 2000
+      /** 本轮累积的起点。首次汇总时由 startFrames/startLongTasks 设好，0 表示还没开始。 */
+      let periodStart = 0
       /** 按 label 分别限流：open / jump / scroll 互不挤占，各自最多每 2s 一条。 */
       const lastSummaryByLabel = new Map()
 
@@ -457,6 +459,8 @@ window.__ModuleLoader__.load({
         if (rafOn || typeof requestAnimationFrame !== 'function') return
         rafOn = true
         lastFrame = now()
+        // 采样开始即本轮计时的起点；未开始计时时 spanMs 无从谈起
+        if (!(periodStart > 0)) periodStart = lastFrame
         const tick = () => {
           if (!rafOn) return
           const t = now()
@@ -502,11 +506,116 @@ window.__ModuleLoader__.load({
        * 注意：包装会带来微小开销，但这是纯函数转发，量级远低于它要测的重排本身。
        */
       const layout = (() => {
+        /**
+         * 阅读器子树根节点。由组件在挂载后写入，用来区分「阅读器内的布局读」
+         * 和「DSH 主界面的布局读」。为 null 时全部算 outside —— 宁可少算，
+         * 也不能把别处的开销记到阅读器头上。
+         */
+        const layoutRootRef = { el: null }
+
         let calls = 0
         let costly = 0
         let totalMs = 0
         let maxMs = 0
         let installed = false
+        /** 阅读器子树内 / 外的累计耗时。两个都要，才能算出「账记在谁头上」。 */
+        let insideMs = 0
+        let insideCalls = 0
+        let outsideMs = 0
+        let outsideCalls = 0
+
+        /**
+         * 调用方归因。
+         *
+         * 光知道「布局读取吃掉 8.2 秒」没法改 —— 必须知道是谁在读。
+         * 按「元素特征」分组聚合：哪个类名/标签的元素被读了这么多次、
+         * 每次多贵。聚合完只在 summary 里给 top 5，日志量不增加。
+         */
+        const groups = new Map()
+        /** 慢读的调用栈样本（只留前 2 帧），用来回答「是谁在读」而不是「读的是什么」 */
+        const stacks = new Map()
+        function bucketOf(el) {
+          try {
+            if (!el || el.nodeType !== 1) return 'non-element'
+            const cls = typeof el.className === 'string' ? el.className : ''
+            const tag = (el.tagName || '?').toLowerCase()
+            // class 只取前两个，避免把动态样式名撑成无数个桶
+            const key = cls ? `${tag}.${cls.split(/\s+/).filter(Boolean).slice(0, 2).join('.')}` : tag
+            return key.length > 60 ? `${key.slice(0, 60)}…` : key
+          } catch {
+            return 'unknown'
+          }
+        }
+
+        /**
+         * 这个元素是否在阅读器子树里。
+         *
+         * 关键修正：`Element.prototype.getBoundingClientRect` 是**全局原型**，
+         * 包了它就会把 DSH 主界面（会话列表、消息流里的超链接、工具栏按钮）
+         * 的布局读取一并算进阅读器的账上 —— 实测榜上出现过
+         * `button.acoR2W_iconButton` 和 `a`（47 次 / 3.9 秒），都不属于阅读器。
+         * 不区分内外，`layoutMs` 就是全应用的数，不能用来判断阅读器慢不慢。
+         */
+        function isInsideReader(el) {
+          try {
+            const root = layoutRootRef.el
+            if (!root || !el) return false
+            return root === el || root.contains(el)
+          } catch {
+            return false
+          }
+        }
+        function note(el, d, kind) {
+          const inside = isInsideReader(el)
+          if (inside) { insideCalls += 1; insideMs += d } else { outsideCalls += 1; outsideMs += d }
+          // 分桶只统计阅读器内的慢读 —— 外面的（DSH 主界面）不该混进热点榜
+          if (!inside) return
+          const b = bucketOf(el)
+          let g = groups.get(b)
+          if (!g) { g = { n: 0, ms: 0, max: 0, kind }; groups.set(b, g) }
+          g.n += 1
+          g.ms += d
+          if (d > g.max) g.max = d
+        }
+
+        /**
+         * 慢读的调用栈，只对 >1ms 的调用取，且只留前 2 帧。
+         *
+         * 归因到元素只能回答「读的是什么」（一个 `<a>`），回答不了「谁在读」。
+         * 真正要改代码时必须知道调用方。栈取一次有成本，所以严格限定在慢调用上，
+         * 并对同一调用点去重计数，避免撑爆内存。
+         */
+        function noteStack(d) {
+          try {
+            const st = new Error().stack
+            if (!st) return
+            const frames = st.split('\n').slice(2, 4).map((s) => s.trim().replace(/^at\s+/, ''))
+            const key = frames.join(' <- ').slice(0, 160)
+            if (!key) return
+            let g = stacks.get(key)
+            if (!g) { g = { n: 0, ms: 0, max: 0 }; stacks.set(key, g) }
+            g.n += 1
+            g.ms += d
+            if (d > g.max) g.max = d
+          } catch { /* 取不到栈就算了，不影响主功能 */ }
+        }
+        function topStacks(limit = 5) {
+          return [...stacks.entries()]
+            .map(([k, g]) => ({ at: k, n: g.n, ms: Math.round(g.ms), max: round1(g.max) }))
+            .sort((a, b) => b.ms - a.ms)
+            .slice(0, limit)
+        }
+        function topGroups(limit = 5) {
+          return [...groups.entries()]
+            .map(([k, g]) => ({
+              el: k,
+              n: g.n,
+              ms: Math.round(g.ms),
+              max: round1(g.max),
+            }))
+            .sort((a, b) => b.ms - a.ms)
+            .slice(0, limit)
+        }
 
         function install() {
           if (installed || typeof Element === 'undefined') return
@@ -527,6 +636,12 @@ window.__ModuleLoader__.load({
                  * 一次真实重排至少在 1ms 量级，两者能分开。
                  */
                 if (d > 1) costly += 1
+                /**
+                 * 归因只在慢调用上做。快调用占绝大多数（98%），
+                 * 逐次分组会把这份开销本身变成可观测的噪声。
+                 * 栈也只在这类慢调用上取。
+                 */
+                if (d > 1) { note(this, d, 'rect'); noteStack(d) }
                 return r
               }
             }
@@ -534,7 +649,7 @@ window.__ModuleLoader__.load({
           try {
             const origGCS = window.getComputedStyle
             if (typeof origGCS === 'function') {
-              window.getComputedStyle = function patchedGCS() {
+              window.getComputedStyle = function patchedGCS(el) {
                 const s = now()
                 const r = origGCS.apply(this, arguments)
                 const d = now() - s
@@ -542,6 +657,7 @@ window.__ModuleLoader__.load({
                 totalMs += d
                 if (d > maxMs) maxMs = d
                 if (d > 1) costly += 1
+                if (d > 1) { note(el, d, 'style'); noteStack(d) }
                 return r
               }
             }
@@ -554,6 +670,14 @@ window.__ModuleLoader__.load({
             layoutForced: costly,
             layoutMs: Math.round(totalMs),
             layoutMax: round1(maxMs),
+            /** 阅读器子树内的读：这才是判断「阅读器卡不卡」该看的数 */
+            layoutInsideMs: Math.round(insideMs),
+            layoutInsideCalls: insideCalls,
+            /** 阅读器之外的读：DSH 主界面等，只作对照，不计入阅读器的账 */
+            layoutOutsideMs: Math.round(outsideMs),
+            layoutOutsideCalls: outsideCalls,
+            layoutTop: topGroups(5),
+            layoutStacks: topStacks(5),
           }
         }
         function reset() {
@@ -561,8 +685,14 @@ window.__ModuleLoader__.load({
           costly = 0
           totalMs = 0
           maxMs = 0
+          insideMs = 0
+          insideCalls = 0
+          outsideMs = 0
+          outsideCalls = 0
+          groups.clear()
+          stacks.clear()
         }
-        return { install, stats, reset }
+        return { install, stats, reset, setRoot: (el) => { layoutRootRef.el = el || null }, isInsideReader }
       })()
 
       /** 记录一个阶段的耗时（同步或异步都可以） */
@@ -577,19 +707,38 @@ window.__ModuleLoader__.load({
         if (phaseLog.length > 200) phaseLog = phaseLog.slice(-200)
       }
 
-      /** 页渲染计数：回答「15 页是不是一次性全画了」和「有没有重复画」 */
+      /**
+       * 页渲染计数：回答「15 页是不是一次性全画了」和「有没有重复画」。
+       *
+       * 这里有**两份**计数，缺一不可：
+       *   `painted`   —— 按汇总周期清零，回答「这一次操作里重复了几次」；
+       *   `lifePainted` —— 从页面加载起从不清零，回答「这页总共被画了几次」。
+       *
+       * 为什么必须分开：汇总周期一再切分，同一页被画 6 次可能分散在 3 个周期里，
+       * 每个周期各 2 次 —— 只看周期内计数会得出「没有重复」的错误结论。
+       * 反过来，长周期计数又会把用户几次独立打开叠加在一起。
+       * 两者放在同一条记录里，才能分清「一次操作内重复」和「多次打开各画一次」。
+       */
       const painted = new Map()
+      const lifePainted = new Map()
       function notePainted(pageNo) {
         painted.set(pageNo, (painted.get(pageNo) || 0) + 1)
+        lifePainted.set(pageNo, (lifePainted.get(pageNo) || 0) + 1)
       }
       function paintedStats() {
         const pages = [...painted.keys()]
         const dup = [...painted.entries()].filter(([, n]) => n > 1)
+        const lifeDup = [...lifePainted.entries()].filter(([, n]) => n > 1)
         return {
           paintedPages: pages.length,
           paintedList: pages.sort((a, b) => a - b).slice(0, 40),
           repaintPages: dup.length,
           repaintTimes: dup.reduce((a, [, n]) => a + (n - 1), 0),
+          /** 本页生命周期内被重复画的页数与多余次数（跨周期累加，不受限流切分影响） */
+          lifeRepaintPages: lifeDup.length,
+          lifeRepaintTimes: lifeDup.reduce((a, [, n]) => a + (n - 1), 0),
+          /** 明细，直接点名哪一页画了几次 */
+          lifePaintMap: Object.fromEntries([...lifePainted.entries()].sort((a, b) => a[0] - b[0])),
         }
       }
 
@@ -645,13 +794,46 @@ window.__ModuleLoader__.load({
         lastSummaryByLabel.set(label, t)
         lastSummaryAt = t
 
+        /**
+         * 本轮累积跨度 = 现在 - 上次清零的时刻。
+         *
+         * 早先这里写的是 `Math.round(t)`，直接把 performance.now() 的绝对值
+         * 当成跨度报了出去 —— 于是日志里出现 spanMs=728687（12 分钟）、
+         * 803776 这种荒唐数字，而实际每轮只有几秒。
+         * 绝对值和时长量纲一样、单位也一样，肉眼极难发现，
+         * 所以必须在日志里能自证：跨度应当 ≈ 各阶段耗时之和的量级。
+         */
+        const spanMs = periodStart > 0 ? Math.round(t - periodStart) : 0
+        periodStart = t
+
+        /**
+         * 自证断言：跨度必须是「这一段」的量级，不能是绝对时间戳。
+         *
+         * 判据用各阶段耗时之和（含长任务）作参照 —— 跨度远超它，说明
+         * periodStart 没被正确重置（比如又写回了 performance.now() 的绝对值）。
+         * 这类错误量纲相同、单位相同，肉眼看不出来，只能靠断言兜住。
+         */
+        const phaseSum = phaseLog.reduce((a, p) => a + (typeof p.ms === 'number' ? p.ms : 0), 0)
+        const ltSum = longTasks.reduce((a, x) => a + x.d, 0)
+        const ref = Math.max(phaseSum, ltSum, 1)
+        if (spanMs > ref * 3) {
+          reportDiag({
+            event: 'perf:suspect',
+            label,
+            spanMs,
+            phaseSum: Math.round(phaseSum),
+            longTaskMs: Math.round(ltSum),
+            reason: 'spanMs 远超本轮各阶段耗时之和，向上限流或计时起点可能被污染',
+          })
+        }
+
         const frames = frameSamples
         const lt = longTasks
         const ltTotal = lt.reduce((a, b) => a + b.d, 0)
         const rec = {
           event: 'perf:summary',
           label,
-          spanMs: Math.round(t),
+          spanMs,
           frames: frames.length,
           frameP50: round1(percentile(frames, 50)),
           frameP95: round1(percentile(frames, 95)),
@@ -680,7 +862,7 @@ window.__ModuleLoader__.load({
         return true
       }
 
-      return { now, startFrames, startLongTasks, phase, timed, summary, percentile, notePainted, paintedStats, windowOpen, attribute, installLayoutProbe: layout.install }
+      return { now, startFrames, startLongTasks, phase, timed, summary, percentile, notePainted, paintedStats, windowOpen, attribute, installLayoutProbe: layout.install, setLayoutRoot: layout.setRoot, periodStart: () => periodStart }
     })()
 
     async function importFromSource(pathname) {
@@ -2041,6 +2223,15 @@ window.__ModuleLoader__.load({
        */
       const paintSelectRef = useRef(null)
       /**
+       * 每页上一次画批注时的内容签名，用来跳过「内容没变也重建 DOM」。
+       *
+       * `decoratePage` 被调用得很频繁（每页画完、批注到货、选中变化……），
+       * 但多数时候这一页的批注没变。原来的实现每次都 `innerHTML = ''` 再
+       * 全量重建，白白写一堆 DOM，还顺带弄脏布局、逼出强制重排。
+       * 签名相同就整体跳过，见 decoratePage 里的用法。
+       */
+      const decorateSigRef = useRef(new Map())
+      /**
        * 批注三点菜单：`{ key, pageNo, kind }`。坐标由卡片自己算（贴着卡片右上角），
        * 所以这里不再存 x/y —— 菜单的锚点是面板，不是鼠标。
        *
@@ -2190,6 +2381,15 @@ window.__ModuleLoader__.load({
         annotationsRef.current = []
         setAnnotations([])
         setAnnotationCount(0)
+        /**
+         * 换文献必须清掉装饰签名。
+         *
+         * 签名里含页号与批注 key，按理不同文献不会撞 —— 但两篇文献停在
+         * 同一页、又都没有批注时，签名会完全一致（`页号#宽#高##`），
+         * 于是新文献的页面会因为是「相同签名」而被跳过重建。
+         * 清零最省事，也最不容易在以后改签名格式时踩坑。
+         */
+        decorateSigRef.current.clear()
         // 换文献时先抹掉上一批批注的图，再等新数据到货补画
         setAnnotVersion((v) => v + 1)
         loadAnnotationsFromZotero()
@@ -2251,6 +2451,15 @@ window.__ModuleLoader__.load({
           perf.startLongTasks()
           // 强制同步布局计数：必须在打开前装好，否则漏掉首屏最大的一段
           perf.installLayoutProbe()
+          /**
+           * 划定阅读器子树边界。
+           *
+           * 布局探针包的是全局 `Element.prototype`，不圈定范围就会把
+           * DSH 主界面的布局读取（消息流超链接、工具栏按钮）算进阅读器的账 ——
+           * 实测榜上出现过 47 次读取耗时 3.9 秒的 `<a>`，那根本不是阅读器的元素。
+           * 这里用 hostRef（阅读器宿主）作根，内外分开统计。
+           */
+          perf.setLayoutRoot(hostRef.current)
           /**
            * 计时窗口要跨两个 effect 用，所以存到 ref 上。
            *
@@ -2734,13 +2943,54 @@ window.__ModuleLoader__.load({
               reportDiag({
                 event: 'perf:paint',
                 page: e.pageNumber,
-                at: Math.round(perf.now()),
+                /**
+                 * 时间字段的语义必须写死，否则一定被误读。
+                 *
+                 * `relMs` = 距本轮计时起点的毫秒数（**单调递增的时长**，
+                 *           用来算「第 1 页到第 2 页花了多久」）。
+                 * `at`    = 标准 ISO 墙钟时间（**能和 pdf:start / perf:summary
+                 *           这类事件按时间对齐**），不是 performance.now()。
+                 *
+                 * 这里的 `at` 曾被写成 `performance.now()` 的绝对值（如 724219），
+                 * 看起来像 12 分钟，且与其他事件的 ISO `at` 完全对不上 ——
+                 * 直接导致过一次「22 毫秒内重画 7 次」的错误推断。
+                 * 绝对值和时长同单位，肉眼分不出，所以两个都给。
+                 */
+                relMs: Math.round(perf.now() - (perf.periodStart() || 0)),
+                at: new Date().toISOString(),
                 visibleAtPaint,
                 canvasCount,
               })
-              decoratePageRef.current?.(e.pageNumber)
-              // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
-              paintSelectRef.current?.(annotSelectedRef.current)
+              /**
+               * **不要在 pagerendered 回调里同步写 DOM。**
+               *
+               * 这里原来直接调 decoratePage 与 paintSelect，两者都会改 DOM
+               * （`layer.innerHTML = ''`＋逐个 append）。而这个回调的时刻恰好是
+               * pdf.js 刚画完 canvas、正要进入下一帧 —— 此时改 DOM 会让它判定
+               * 页面布局变了，于是**把同一页再渲染一遍**：
+               *
+               *   pagerendered → decoratePage 写 DOM → 布局脏 → pdf.js 重画
+               *   → pagerendered 再次触发 → 又写一遍 …… 直到收敛
+               *
+               * 实测证据（E3TYCEMB 14 页）：滑动过程中 page 7 与 page 8
+               * 各被画 2 次，且 canvas 计数不增长（重画的是同一个 canvas）。
+               * 每翻一页额外多一次全页渲染，与文本层排序叠加就是那 2–8 秒。
+               *
+               * 挪到下一帧再画：那时 pdf.js 的渲染周期已结束，我们的写入
+               * 只是贴着已完成的画面做叠加，不会反过来触发重渲染。
+               */
+              const pageNo = e.pageNumber
+              if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(() => {
+                  if (disposed) return
+                  decoratePageRef.current?.(pageNo)
+                  // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
+                  paintSelectRef.current?.(annotSelectedRef.current)
+                })
+              } else {
+                decoratePageRef.current?.(pageNo)
+                paintSelectRef.current?.(annotSelectedRef.current)
+              }
             })
 
             /**
@@ -3027,17 +3277,45 @@ window.__ModuleLoader__.load({
         const pageEl = host.querySelector(`.page[data-page-number="${pageNo}"]`)
         if (!pageEl) return
 
+        const pw = pageEl.clientWidth || pageEl.offsetWidth || 0
+        const ph = pageEl.clientHeight || pageEl.offsetHeight || 0
+        if (pw <= 0 || ph <= 0) return
+
+        /**
+         * **内容没变就别重建 DOM。**
+         *
+         * 原本每次调用都是 `layer.innerHTML = ''` 再全量重建。可这个函数被调得
+         * 很频繁（每页画完一次、批注数据到货一次、选中变化一次……），而
+         * **绝大多数时候这一页的批注根本没变** —— 于是每次都在做
+         * 「清空 + 重建 N 个 div」，白写一大堆 DOM。
+         *
+         * 写入的代价不只是创建节点：它会弄脏布局，紧跟着 pdf.js 或我们自己的
+         * 几何读取就要付一次强制重排。这跟文本层排序叠加起来，就是滑动时
+         * 每页卡好几秒的另一半原因。
+         *
+         * 用「页号 + 尺寸 + 缩放 + 高亮 + 批注快照」做签名，相同就整体跳过。
+         * 序号变化（新增/删除/改色）会改变签名，所以不会漏刷。
+         */
+        const sig = [
+          pageNo,
+          Math.round(pw),
+          Math.round(ph),
+          highlight && highlight.page === pageNo ? JSON.stringify(highlight.rects) : '',
+          annotationsRef.current
+            .filter((a) => a.pageIndex === pageNo - 1)
+            .map((a) => `${a.key}:${a.color}:${a.type}:${(a.rects || []).length}`)
+            .join('|'),
+        ].join('#')
+        if (decorateSigRef.current.get(pageNo) === sig) return
+
         let layer = pageEl.querySelector('.zr-annot-layer')
         if (!layer) {
           layer = document.createElement('div')
           layer.className = 'zr-annot-layer'
           pageEl.appendChild(layer)
         }
+        decorateSigRef.current.set(pageNo, sig)
         layer.innerHTML = ''
-
-        const pw = pageEl.clientWidth || pageEl.offsetWidth || 0
-        const ph = pageEl.clientHeight || pageEl.offsetHeight || 0
-        if (pw <= 0 || ph <= 0) return
 
         /**
          * 换算比例：**从官方 viewport 取**，不要自己用 clientWidth 算。

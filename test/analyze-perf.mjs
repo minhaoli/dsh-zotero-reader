@@ -80,6 +80,41 @@ for (const s of summaries) {
     console.log(
       `   布局    reads=${num(s.layoutReads)}  forced=${num(s.layoutForced)}  合计 ${num(s.layoutMs)}ms  max=${num(s.layoutMax)}ms`,
     )
+    /**
+     * 内外拆分是这一版最重要的修正。
+     *
+     * 探针包的是全局 Element.prototype，不拆分的话 DSH 主界面的布局读取
+     * 会被算进阅读器的账 —— 实测出现过 `<a>` 47 次读取 3.9 秒、
+     * `button.acoR2W_iconButton`（DSH 自己的按钮）上榜的情况。
+     * 只有 layoutInsideMs 才能代表阅读器自身的开销。
+     */
+    if ('layoutInsideMs' in s || 'layoutOutsideMs' in s) {
+      const inMs = num(s.layoutInsideMs)
+      const outMs = num(s.layoutOutsideMs)
+      const tot = inMs + outMs
+      const pctIn = tot > 0 ? Math.round((inMs / tot) * 100) : 0
+      console.log(
+        `           阅读器内 ${inMs}ms/${num(s.layoutInsideCalls)}次   阅读器外 ${outMs}ms/${num(s.layoutOutsideCalls)}次   (内占 ${pctIn}%)`,
+      )
+      if (pctIn < 30 && tot > 500) {
+        console.log('           注意：绝大部分布局开销在阅读器之外，不能归因给阅读器')
+      }
+    }
+    // 调用方归因：没有这段，只知道「布局慢」，不知道是谁在读
+    if (Array.isArray(s.layoutTop) && s.layoutTop.length) {
+      console.log('           布局热点（仅阅读器内）:')
+      for (const g of s.layoutTop) {
+        console.log(`             ${pad(g.el, 34)} ${pad(`${num(g.n)}次`, 8)} ${num(g.ms)}ms  max=${num(g.max)}ms`)
+      }
+    }
+    // 调用栈：回答「谁在读」，比「读的是什么」更能指到改哪一行
+    if (Array.isArray(s.layoutStacks) && s.layoutStacks.length) {
+      console.log('           慢读调用栈:')
+      for (const g of s.layoutStacks) {
+        console.log(`             ${num(g.n)}次 ${num(g.ms)}ms max=${num(g.max)}ms`)
+        console.log(`               ${g.at}`)
+      }
+    }
   }
   if ('paintedPages' in s) {
     console.log(
@@ -87,6 +122,18 @@ for (const s of summaries) {
     )
     if (Array.isArray(s.paintedList) && s.paintedList.length) {
       console.log(`           页序: ${s.paintedList.join(',')}`)
+    }
+    // 生命周期计数：跨汇总周期累加，周期内计数看不见的重复在这里能看见
+    if ('lifeRepaintTimes' in s) {
+      const lt2 = num(s.lifeRepaintTimes)
+      const flag = lt2 > 0 ? `  <<< 同一页被重复画 ${lt2} 次` : ''
+      console.log(`           生命周期内重复 ${num(s.lifeRepaintPages)} 页 / 多余 ${lt2} 次${flag}`)
+    }
+    if (s.lifePaintMap && typeof s.lifePaintMap === 'object') {
+      const perPage = Object.entries(s.lifePaintMap)
+        .filter(([, n]) => num(n) > 1)
+        .map(([p, n]) => `page${p}×${n}`)
+      if (perPage.length) console.log(`           重复页: ${perPage.join('  ')}`)
     }
   }
   if (Array.isArray(s.phases) && s.phases.length) {

@@ -80,5 +80,61 @@ const paintTimes = [120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720, 780, 
 const span = paintTimes[paintTimes.length - 1] - paintTimes[0]
 ok(span < 2000, `15 页在 ${span}ms 内画完 → 判定为一次性渲染（这正是要抓的模式）`)
 
+/* 7. 重复渲染计数器必须真能检出重复 —— 构造人为重复，验证它会涨 */
+/**
+ * 这条是回应一个反复出现的教训：计数器「看起来没发现重复」可能是坏的，
+ * 而不是真的没重复。所以不能只测「正常情况返回 0」，必须人为制造重复，
+ * 确认它确实会涨、且涨到正确数字。验证不了等于没有。
+ */
+const makePainted = () => {
+  const painted = new Map()
+  const lifePainted = new Map()
+  const notePainted = (n) => {
+    painted.set(n, (painted.get(n) || 0) + 1)
+    lifePainted.set(n, (lifePainted.get(n) || 0) + 1)
+  }
+  const stats = () => {
+    const dup = [...painted.entries()].filter(([, n]) => n > 1)
+    const lifeDup = [...lifePainted.entries()].filter(([, n]) => n > 1)
+    return {
+      paintedPages: painted.size,
+      repaintPages: dup.length,
+      repaintTimes: dup.reduce((a, [, n]) => a + (n - 1), 0),
+      lifeRepaintPages: lifeDup.length,
+      lifeRepaintTimes: lifeDup.reduce((a, [, n]) => a + (n - 1), 0),
+    }
+  }
+  return { notePainted, stats, clearPeriod: () => painted.clear() }
+}
+
+// 场景 A：同一次打开里第 3 页画了两次 —— 必须报出来
+const A = makePainted()
+A.notePainted(1); A.notePainted(2); A.notePainted(3); A.notePainted(3)
+const sa = A.stats()
+ok(sa.repaintPages === 1, `人为重复一次 → repaintPages=1（实际 ${sa.repaintPages}）`)
+ok(sa.repaintTimes === 1, `人为重复一次 → repaintTimes=1（实际 ${sa.repaintTimes}）`)
+
+// 场景 B：一页画 6 次 —— 多余次数应当是 5
+const B = makePainted()
+for (let i = 0; i < 6; i += 1) B.notePainted(9)
+const sb = B.stats()
+ok(sb.repaintTimes === 5, `画 6 次 → 多余 5 次（实际 ${sb.repaintTimes}）`)
+
+// 场景 C：真实踩过的坑 —— 6 次被拆到 3 个汇总周期，周期内计数看不见
+const C = makePainted()
+for (let i = 0; i < 3; i += 1) {
+  C.notePainted(1); C.notePainted(1)
+  C.clearPeriod() // 每个周期汇总后清零
+}
+const sc = C.stats()
+ok(sc.repaintTimes === 0, `周期内计数确实看不见跨周期重复（${sc.repaintTimes}）—— 所以必须另外记生命周期计数`)
+ok(sc.lifeRepaintTimes === 5, `生命周期计数能看见跨周期重复（期望 5，实际 ${sc.lifeRepaintTimes}）`)
+
+// 场景 D：正常无重复时不能误报
+const D = makePainted()
+D.notePainted(1); D.notePainted(2); D.notePainted(3)
+const sd = D.stats()
+ok(sd.repaintTimes === 0 && sd.lifeRepaintTimes === 0, '无重复时不误报')
+
 console.log(fail === 0 ? '\n探针逻辑自测全部通过' : `\n${fail} 项失败`)
 process.exit(fail === 0 ? 0 : 1)
