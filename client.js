@@ -3311,21 +3311,32 @@ window.__ModuleLoader__.load({
               const resumeOffset = savedPos?.offset ?? 0
 
               /**
-               * **先别急着设页码，等页视图建出来再设。**
+               * **立刻把页码告诉 viewer，但先别滚动。**
                *
-               * 原来这里立刻 `viewer.currentPageNumber = resumePage`，
-               * 但那一刻 `domPages` 还是 0 —— pdf.js 的页视图尚未创建，
-               * 赋值内部读 `this._pages[i]` 拿到 undefined 后**静默丢弃**，
-               * 视图就停在默认的第 1 页。
+               * 这里经历过两次矫枉过正，值得记下来：
                *
-               * 120ms 后 applyResume 重试才真正跳过去，于是用户看到
-               * 「先在第 1 页 → 闪到第 1 页 → 再闪到目标页」的抖动。
-               * 中间那次「闪到第 1 页」还是 scrollPageIntoView 按第 1 页的
-               * 几何算了一次滚动造成的。
+               *  ① 最初：setDocument 之后立刻 `currentPageNumber = resumePage`，
+               *     同时立刻做几何滚动。但那一刻 domPages 还是 0，赋值被静默
+               *     丢弃，滚动按第 1 页几何算了一次 —— 用户看到「闪到第 1 页
+               *     再弹回目标页」。
                *
-               * 现在把首跳也交给 applyResume：它本身会重试到页视图就绪，
-               * 并且在真正设页码之前不做任何几何滚动。
+               *  ② 于是改成完全不设页码，等页视图建好再设。结果更糟：等待
+               *     期间 pdf.js 按默认从第 1 页开始渲染，实测目标页是第 7 页时
+               *     第 1 页先画出来（01:19:45.987），3 秒后才画第 7 页
+               *     （01:19:49.080）—— 就是「先闪到第一页」。
+               *
+               * 两个极端都错。正解是**把「告诉 viewer 目标页」和「几何滚动」
+               * 拆开**：页码立刻设（它便宜，且能让 pdf.js 朝目标页建视图、
+               * 优先渲染那一页），滚动交给 applyResume 等页就绪后再做。
+               *
+               * 赋值在页视图未建好时可能被丢弃，所以 applyResume 里仍要重试，
+               * 这里是「尽早给出方向」，不是「保证生效」。
                */
+              try {
+                viewer.currentPageNumber = resumePage
+                viewer.update?.()
+              } catch { /* 早期版本没有 update，忽略 */ }
+
               setVisiblePage(resumePage)
               setJumpPage(resumePage)
               lastSavedPageRef.current = resumePage
