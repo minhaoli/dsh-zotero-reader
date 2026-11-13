@@ -117,7 +117,13 @@ const okRes = await callHandler('/zotero-reader/annotations', {
   method: 'PATCH', body: { annotKey: key, color: nextColor },
 })
 const okBody = okRes.json
-check('改色 → 200 {ok:true,color}', okRes.statusCode === 200 && okBody?.ok === true && okBody?.color === nextColor,
+/**
+ * 断言要跟着路由的真实响应走：PATCH /annotations 现在统一返回
+ * `{ok:true, patch:{...}}`（因为同一个端点还承担改评论、改标签），
+ * 不再是早期的 `{ok:true, color}`。真实生效与否由下面第 5 步复读 Zotero 验证。
+ */
+check('改色 → 200 {ok:true, patch}',
+  okRes.statusCode === 200 && okBody?.ok === true && okBody?.patch?.annotationColor === nextColor,
   `status=${okRes.statusCode} body=${okRes.text.slice(0, 120)}`)
 
 // 5) 复读确认 Zotero 真改了

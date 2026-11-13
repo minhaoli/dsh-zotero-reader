@@ -1631,6 +1631,17 @@ window.__ModuleLoader__.load({
       const [pageCount, setPageCount] = useState(0)
       const [visiblePage, setVisiblePage] = useState(1)
       const [jumpPage, setJumpPage] = useState(1)
+      /**
+       * 页码输入框的**编辑缓冲**：允许为空、允许是「1」「12」这种半截输入。
+       *
+       * 为什么不能直接把 jumpPage 绑给 input：删光内容时 Number('') 得 0，
+       * 一旦被 ||1 兜成 1，受控 input 立刻被回填成「1」，光标也跳走 ——
+       * 表现为「删不干净，删完自己变成 1，没法重新输入」。
+       * 所以输入期间只有这个字符串在变，回车/失焦才解析成页码并走 gotoPage。
+       *
+       * null 表示「没在编辑」，此时显示 jumpPage 的值。
+       */
+      const [pageDraft, setPageDraft] = useState(null)
       const [scale, setScale] = useState(1.15)
       const [outlineOpen, setOutlineOpen] = useState(false)
       const [settingsOpen, setSettingsOpen] = useState(false)
@@ -4376,9 +4387,40 @@ window.__ModuleLoader__.load({
         h('div', { className: 'zr-bar' },
           h('button', { className: 'zr-btn', onClick: () => gotoPage(jumpPage - 1), disabled: jumpPage <= 1, title: t('prevPage') }, '‹'),
           h('input', {
-            type: 'number', value: jumpPage, min: 1, max: pageCount || 1,
-            onChange: (e) => setJumpPage(Number(e.target.value) || 1),
-            onKeyDown: (e) => { if (e.key === 'Enter') gotoPage(Number(e.target.value) || 1) },
+            type: 'number', min: 1, max: pageCount || 1,
+            /**
+             * 显示的是编辑缓冲；没在编辑时跟随 jumpPage。
+             *
+             * input 的 value 必须是字符串：传数字会让 React 在清空瞬间
+             * 把值写回「1」，用户看到的就是删不掉。
+             */
+            value: pageDraft ?? String(jumpPage),
+            onChange: (e) => {
+              // 只更新缓冲，不解析、不跳转 —— 允许中间态为空
+              setPageDraft(e.target.value)
+            },
+            onBlur: () => {
+              // 失焦才提交：空输入视为放弃编辑，回到当前页
+              const raw = String(pageDraft ?? '').trim()
+              setPageDraft(null)
+              if (!raw) return
+              const n = Number(raw)
+              if (!Number.isFinite(n)) return
+              const target = Math.trunc(n)
+              if (target < 1) { gotoPage(1); return }
+              gotoPage(target)
+            },
+            onKeyDown: (e) => {
+              if (e.key === 'Escape') { setPageDraft(null); e.target?.blur?.(); return }
+              if (e.key !== 'Enter') return
+              // 回车提交后结束编辑，让输入框回到跟随 jumpPage 的状态
+              const raw = String(pageDraft ?? '').trim()
+              setPageDraft(null)
+              if (!raw) return
+              const n = Number(raw)
+              if (!Number.isFinite(n)) return
+              gotoPage(Math.max(1, Math.trunc(n)))
+            },
             style: { width: 52, background: 'transparent', color: 'inherit', border: '1px solid var(--dsh-border,#3a3a3a)', borderRadius: 6, padding: '2px 4px', fontSize: 12 },
           }),
           h('span', { style: { fontSize: 11, opacity: .7, whiteSpace: 'nowrap' } }, '/ ' + (pageCount || '?')),
