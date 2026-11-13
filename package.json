@@ -25,6 +25,9 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "dsh": {
+    "engines": {
+      "dsh": ">=0.2.1"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
