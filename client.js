@@ -865,24 +865,55 @@ window.__ModuleLoader__.load({
       return { now, startFrames, startLongTasks, phase, timed, summary, percentile, notePainted, paintedStats, windowOpen, attribute, installLayoutProbe: layout.install, setLayoutRoot: layout.setRoot, periodStart: () => periodStart }
     })()
 
+    /**
+     * vendor 模块的 blob URL 缓存。
+     *
+     * 为什么要缓存：importFromSource 每次都会 fetch 整个文件、再造一个
+     * 新的 blob URL 交给 import()。而 pdf.js 这几个文件不小 ——
+     * pdf.min.mjs 463KB、pdf.worker.min.mjs 1.2MB、pdf_viewer.mjs 315KB，
+     * 合计约 2MB。**每打开一篇文献都要重来一遍**：重新下载、重新解析、
+     * 重新编译。实测单次打开里 pdfjs:worker-mode 要 175ms、
+     * viewer:before-setdoc 要 425ms —— 这 600ms 全花在这里，
+     * 而真正读 PDF 只要 59ms、解析只要 15ms。
+     *
+     * 缓存之后，同一个 URL 在页面生命周期内只下载编译一次。第二篇起
+     * 直接命中，import() 也走模块缓存，几乎瞬时。
+     *
+     * 用 Map 而非单例变量：三个模块各自缓存，互不影响。
+     * 存的是 Promise 而不是 URL —— 并发调用时（首屏要同时准备 pdf.mjs
+     * 与 worker）能共享同一次下载，不会各拉一份。
+     */
+    const vendorModuleCache = new Map()
+
     async function importFromSource(pathname) {
-      const res = await fetch(pathname, { credentials: 'same-origin' })
-      if (!res.ok) {
-        /**
-         * 必须把响应体读出来带上。
-         * 只报 `HTTP 400` 的话，服务端到底说了「未知路径」「unauthorized」还是某条异常
-         * 全都看不见 —— 这次排查在这一点上绕了好几圈（实测教训）。
-         */
-        let detail = ''
-        try {
-          const body = await res.text()
-          detail = body ? `：${body.slice(0, 200)}` : ''
-        } catch { /* 读不出来就只报状态码 */ }
-        throw new Error(`HTTP ${res.status} ${pathname}${detail}`)
-      }
-      const code = await res.text()
-      const blob = new Blob([code], { type: 'text/javascript' })
-      return URL.createObjectURL(blob)
+      const cached = vendorModuleCache.get(pathname)
+      if (cached) return cached
+      const pending = (async () => {
+        const res = await fetch(pathname, { credentials: 'same-origin' })
+        if (!res.ok) {
+          /**
+           * 必须把响应体读出来带上。
+           * 只报 `HTTP 400` 的话，服务端到底说了「未知路径」「unauthorized」还是某条异常
+           * 全都看不见 —— 这次排查在这一点上绕了好几圈（实测教训）。
+           */
+          let detail = ''
+          try {
+            const body = await res.text()
+            detail = body ? `：${body.slice(0, 200)}` : ''
+          } catch { /* 读不出来就只报状态码 */ }
+          throw new Error(`HTTP ${res.status} ${pathname}${detail}`)
+        }
+        const code = await res.text()
+        const blob = new Blob([code], { type: 'text/javascript' })
+        return URL.createObjectURL(blob)
+      })()
+      /**
+       * 失败**不能**留在缓存里：否则一次网络抖动会让这条路径永久坏掉，
+       * 直到用户重启页面。所以失败时把它删掉，下次重试。
+       */
+      vendorModuleCache.set(pathname, pending)
+      pending.catch(() => vendorModuleCache.delete(pathname))
+      return pending
     }
 
     function getPdfjs() {
@@ -2705,8 +2736,17 @@ window.__ModuleLoader__.load({
 
         ;(async () => {
           try {
+            /**
+             * 把「加载 viewer 模块」与「构造 viewer」分开计时。
+             *
+             * 这两个成本性质完全不同：前者是下载 + 编译 315KB（可缓存、
+             * 第二次起近乎免费），后者是 pdf.js 自己的初始化（每次打开
+             * 都要付）。混在一起就看不出加缓存到底省了多少。
+             */
+            const modWin = perf.windowOpen()
             const modUrl = await importFromSource(`${API}/vendor/pdf_viewer.mjs`)
             const viewerMod = await import(/* @vite-ignore */ modUrl)
+            perf.attribute('load-viewer-module', modWin)
             const { PDFViewer, EventBus, PDFLinkService } = viewerMod
             if (!PDFViewer) throw new Error('官方 viewer 模块里没有 PDFViewer')
             if (disposed) return
@@ -2743,6 +2783,8 @@ window.__ModuleLoader__.load({
             })
             linkService.setViewer(viewer)
             viewerRef.current = viewer
+            // 构造开销：与上面的模块加载分开算，两者优化手段不同
+            perf.attribute('construct-viewer', modWin)
 
             /**
              * 视口顶部「落在当前页的百分之几」。
