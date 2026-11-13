@@ -1855,8 +1855,29 @@ window.__ModuleLoader__.load({
           : { display: 'none' },
       }, h(PapersView, { t, ctx, sessionId, paneActive: tab === 'papers' })), [tab === 'papers', t, ctx, sessionId])
 
+      /**
+       * **所有分支必须共用同一个外层结构。**
+       *
+       * 这里原来每个分支都各自 `return h('div', {key:'zr-lib'}, header, papersPane, ...)`
+       * —— 看起来 key 相同、papersPane 也是同一个对象，但 React 的对账是基于
+       * 「父容器下 children 数组的第几个位置」：不同分支里 papersPane 后面的
+       * 兄弟节点数量和内容都不同，一旦切换分支，papersPane 的位置或相邻关系变了，
+       * React 就认为那是另一棵树，**把 PapersView 整个卸载重建**。
+       *
+       * 后果非常贵：PapersView 里每篇 PaperView 都持有 pdf.js 文档、已建好的
+       * 页面 DOM 与画布，卸载即全丢。重建时会重新 /pdf、重新 getDocument、
+       * 重新 setDocument、重新画页 —— 这就是「切一下 tab 回来，PDF 又要加载一遍」。
+       * 日志里 `<reader:mount>` 之后 0.1 秒内紧跟 `pdf:start` 出现了 42 次，
+       * 全是这个原因。
+       *
+       * 所以改成：外层 `zr-lib > header + papersPane + content` 恒定不变，
+       * 各分支只决定最后的 `content` 是什么。papersPane 永远在第 2 个位置、
+       * 前后邻居固定，React 才会复用它而不是重建。
+       */
+      const shell = (...content) => h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane, ...content)
+
       if (state.error) {
-        return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane, h('div', { className: 'zr-err' }, state.error))
+        return shell(h('div', { className: 'zr-err' }, state.error))
       }
 
       /**
@@ -1868,20 +1889,18 @@ window.__ModuleLoader__.load({
        * 与文献库是否加载成功无关）。
        */
       if (tab === 'papers') {
-        return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane)
+        return shell(null)
       }
 
       if (state.loading && state.items.length === 0) {
-        return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane,
-          h('div', { className: 'zr-note' }, h('span', { className: 'zr-spin' }), ' ', t('loading')))
+        return shell(h('div', { className: 'zr-note' }, h('span', { className: 'zr-spin' }), ' ', t('loading')))
       }
 
       if (tab === 'searched') {
         if (state.items.length === 0) {
-          return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane,
-            h('div', { className: 'zr-empty' }, t('searchedEmpty')))
+          return shell(h('div', { className: 'zr-empty' }, t('searchedEmpty')))
         }
-        return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane,
+        return shell(
           /**
            * 工具栏：平时只有一个「移除记录」入口；点进去才展开全选与删除。
            *
@@ -1933,8 +1952,7 @@ window.__ModuleLoader__.load({
 
       // 全部文献库：按 Zotero 专题分组
       if (state.items.length === 0) {
-        return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane,
-          h('div', { className: 'zr-empty' }, debounced ? t('searchNoResult') : t('empty')))
+        return shell(h('div', { className: 'zr-empty' }, debounced ? t('searchNoResult') : t('empty')))
       }
 
       /**
@@ -2004,7 +2022,7 @@ window.__ModuleLoader__.load({
         )
       }
 
-      return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane,
+      return shell(
         h('div', { className: 'zr-list' },
           h('div', { className: 'zr-lib-stat' }, t('libStat').replace('{{total}}', String(state.total))),
           ...[...tree.children.values()]
