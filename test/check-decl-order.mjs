@@ -54,7 +54,16 @@ for (let i = 0; i < lines.length; i += 1) {
 
 // 这些是宿主/浏览器全局或函数参数，不参与本文件的声明顺序判定
 const IGNORED = new Set([
+  /**
+   * 组件函数的**形参**也要列在这里：它们在 `function X({ a, b })` 的参数位声明，
+   * 不经过 `const/let`，所以进不了 declaredAt 表。若某个形参名恰好在后文
+   * 别处又以 `const` 形式出现过，静态检查就会把它误判成「用了后面才声明的变量」。
+   *
+   * 亲历：给 PaperView 加了 `active` 形参后，依赖数组 `[itemKey, reloadToken, active]`
+   * 被报「active 声明在 4842 行」—— 那只是同一名字在别处的 const 而已，不是 TDZ bug。
+   */
   'props', 'ctx', 'sessionId', 'itemKey', 't', 'bound', 'tab', 'setTab',
+  'active', 'paneActive', 'bare', 'topError', 'onBack', 'onError', 'onClose',
   'document', 'window', 'globalThis', 'Math', 'Number', 'String', 'Object', 'Array',
   'JSON', 'Promise', 'Map', 'Set', 'React', 'require', 'console', 'fetch', 'URL',
   'setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame',

@@ -951,6 +951,9 @@ window.__ModuleLoader__.load({
             t,
             ctx: props.ctx,
             sessionId: props.sessionId,
+            // 隐藏态（mode 为 browse）不加载 PDF：容器宽高为 0 会让 pdf.js 建不出页，
+            // 页码恢复随之失效。见 PaperView 里加载 effect 的说明。
+            active: mode === 'read',
             onBack: () => setMode('browse'),
             onError: (message) => setErr(message),
             topError: err,
@@ -1279,7 +1282,7 @@ window.__ModuleLoader__.load({
         style: tab === 'papers'
           ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }
           : { display: 'none' },
-      }, h(PapersView, { t, ctx, sessionId })), [tab === 'papers', t, ctx, sessionId])
+      }, h(PapersView, { t, ctx, sessionId, paneActive: tab === 'papers' })), [tab === 'papers', t, ctx, sessionId])
 
       if (state.error) {
         return h('div', { key: 'zr-lib', className: 'zr-root' }, header, papersPane, h('div', { className: 'zr-err' }, state.error))
@@ -1616,7 +1619,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------- 论文视图 */
 
-    function PaperView({ itemKey, t, onBack, topError, ctx, sessionId, bare }) {
+    function PaperView({ itemKey, t, onBack, topError, ctx, sessionId, bare, active = true }) {
       const hostRef = useRef(null)
       const scrollRef = useRef(null)
       const pdfRef = useRef(null)          // { doc, pdfjs }
@@ -1787,6 +1790,14 @@ window.__ModuleLoader__.load({
        * viewer 的 effect 重建时按同一把钥匙读回来。
        */
       const [reloadToken, setReloadToken] = useState(0)
+      /**
+       * 因「容器零尺寸」而自动重来的次数。
+       *
+       * 为什么需要它：零尺寸时我们会退回 loading 并自增 reloadToken 重来，
+       * 但如果容器始终拿不到尺寸（例如这篇确实被隐藏着），就会无限自旋。
+       * 所以限次；用完后不再自动重试，等 active 变化或用户手动刷新。
+       */
+      const zeroSizeRetryRef = useRef(0)
 
       /* ---------- 加载文档元信息 ---------- */
       useEffect(() => {
@@ -1847,6 +1858,24 @@ window.__ModuleLoader__.load({
       /* ---------- 加载 PDF ---------- */
       useEffect(() => {
         let alive = true
+        /**
+         * **隐藏时不要加载。**
+         *
+         * 这一层 tab 用 `display:none` 保活（切走不卸载，切回来瞬时），
+         * 但副作用是：元素在但宽高为 0。原先这里是直接开跑的，
+         * 于是加载链路走进 `waitForSize()` 的死等 —— 实测
+         * `viewer:before-setdoc` 连续三次都是 `sized:false, {w:0,h:0}`，
+         * pdf:ready 到 before-setdoc 之间白耗 4.8 秒。
+         *
+         * 更糟的是等在 0×0 后面照常 setDocument：pdf.js 在零尺寸容器里
+         * 建不出页视图，`viewer.currentPageNumber = n` 全部被静默丢弃，
+         * 12 次重试都失败（日志 `want:3 got:1 attempts:13 ok:false`），
+         * 用户看到的就是「重启后加载很久，然后跳回第 1 页」。
+         *
+         * 所以：不可见就什么都不做，等 active 变 true 再整条重来。
+         * 依赖里带上 active，隐藏→显示会自然触发一次完整加载。
+         */
+        if (!active) return undefined
         /**
          * **必须先把状态压回 loading。**
          *
@@ -1968,7 +1997,7 @@ window.__ModuleLoader__.load({
           pdfRef.current = null
           pageElsRef.current.clear()
         }
-      }, [itemKey, reloadToken])
+      }, [itemKey, reloadToken, active])
 
       /* ---------- 官方 PDFViewer 接管渲染 ---------- */
       /**
@@ -2189,7 +2218,14 @@ window.__ModuleLoader__.load({
                 const h = container.clientHeight
                 if (w > 0 && h > 0) { resolve(true); return }
                 frames += 1
-                if (frames > 180) { resolve(false); return }   // ~3 秒后放弃
+                /**
+                 * 上限从 180 帧（~3 秒）收到 90 帧（~1.5 秒）。
+                 *
+                 * 原来白等 3 秒是因为零尺寸也硬着头皮 setDocument，
+                 * 只能靠等碰运气。现在零尺寸会退回 loading 重来（见下方守卫），
+                 * 所以这里只需要给别人「一帧就好」的机会，不必长等。
+                 */
+                if (frames > 90) { resolve(false); return }
                 requestAnimationFrame(tick)
               }
               tick()
@@ -2207,6 +2243,36 @@ window.__ModuleLoader__.load({
               viewerSize: { w: viewerEl.clientWidth, h: viewerEl.clientHeight },
               hostSize: { w: host.clientWidth, h: host.clientHeight },
             })
+            /**
+             * **零尺寸就别往下走。**
+             *
+             * 原先即便 sized 为 false 也照常 setDocument，后果很隐蔽：
+             * pdf.js 在 0×0 容器里把每页 viewport 算成 0 高，`.page` 元素建不出来，
+             * 于是 `viewer.currentPageNumber = n` 全部被静默丢弃 ——
+             * 页码恢复 12 次重试全失败（日志 want:3 got:1 attempts:13 ok:false），
+             * 表现为「加载很久，然后停在第一页」。
+             *
+             * 现在改为：容器真的没尺寸时退回 loading 并排队重来，
+             * 由 active（切到可见）或 reloadToken 触发下一轮，绝不带病 setDocument。
+             */
+            if (!sized || container.clientWidth === 0 || container.clientHeight === 0) {
+              reportDiag({
+                event: 'viewer:defer-zero-size',
+                containerW: container.clientWidth,
+                containerH: container.clientHeight,
+                attempt: zeroSizeRetryRef.current,
+              })
+              // 限次自旋：容器始终拿不到尺寸时不要无限重来
+              if (zeroSizeRetryRef.current < 8) {
+                zeroSizeRetryRef.current += 1
+                requestAnimationFrame(() => {
+                  if (!disposed) setReloadToken((v) => v + 1)
+                })
+              }
+              return
+            }
+            // 拿到真实尺寸了，计数归零，下次零尺寸重新从头允许
+            zeroSizeRetryRef.current = 0
             viewer.setDocument(pdf.doc)
             linkService.setDocument(pdf.doc, null)
             reportDiag({ event: 'viewer:doc-set', pages: pdf.doc.numPages })
@@ -4767,7 +4833,7 @@ window.__ModuleLoader__.load({
      * 之所以能这样收在一栏里：宿主只认得已注册的 tab 类型，复合 key 开不出新 tab
      * （实测 `openTab('zotero-reader:ABCD')` 静默失败），所以「多篇」只能在栏内做。
      */
-    function PapersView({ t, ctx, sessionId }) {
+    function PapersView({ t, ctx, sessionId, paneActive = true }) {
       useStyle()
       const [, setTick] = useState(0)
       useEffect(() => openedSubscribe(() => setTick((n) => n + 1)), [])
@@ -4819,6 +4885,11 @@ window.__ModuleLoader__.load({
           t,
           ctx,
           sessionId,
+          /**
+           * 只有「这是当前选中的那篇」且「整个 papers 栏可见」时才加载。
+           * 两个条件缺一都会让容器是 0×0，pdf.js 建不出页、页码恢复失效。
+           */
+          active: key === active && paneActive,
           bare: true,
           onBack: () => openedRemove(key),
           topError: null,
