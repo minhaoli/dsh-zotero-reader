@@ -3199,16 +3199,36 @@ window.__ModuleLoader__.load({
                * 只是贴着已完成的画面做叠加，不会反过来触发重渲染。
                */
               const pageNo = e.pageNumber
+              /**
+               * 量「画完一页之后，我们的装饰工作要占多久」。
+               *
+               * 滚动卡顿定位了很久，是因为只知道 annot:scale 显示 1.5 秒，
+               * 而那条日志打在 decoratePage 中部，分不清是函数慢还是调用处慢。
+               * 这里直接量整段（decorate + 选中框重绘），才是滚动时真正付出的成本。
+               *
+               * 只记 >8ms 的：滚动时每页都会触发一次，全记会把日志撑爆。
+               */
+              const decorateCost = (fn) => {
+                const t0 = perf.now()
+                try { fn() } finally {
+                  const dt = perf.now() - t0
+                  if (dt > 8) {
+                    reportDiag({ event: 'decorate:slow', pageNo, ms: Math.round(dt) })
+                  }
+                }
+              }
+              const runDecorate = () => {
+                decoratePageRef.current?.(pageNo)
+                // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
+                paintSelectRef.current?.(annotSelectedRef.current)
+              }
               if (typeof requestAnimationFrame === 'function') {
                 requestAnimationFrame(() => {
                   if (disposed) return
-                  decoratePageRef.current?.(pageNo)
-                  // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
-                  paintSelectRef.current?.(annotSelectedRef.current)
+                  decorateCost(runDecorate)
                 })
               } else {
-                decoratePageRef.current?.(pageNo)
-                paintSelectRef.current?.(annotSelectedRef.current)
+                decorateCost(runDecorate)
               }
             })
 
