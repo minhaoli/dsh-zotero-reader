@@ -43,14 +43,33 @@ check('找得到加载 PDF 的 effect', loadEffectStart > 0)
  */
 const loadEffect = loadEffectStart > 0 ? src.slice(loadEffectStart, loadEffectStart + 3000) : ''
 check('加载 effect 区块已定位（负向断言的前提）', loadEffect.length > 600)
-check('effect 开头就有 if (!active) 守卫（在 setStatus 之前）',
+/**
+ * 守卫生效，但**只管首次加载**。
+ *
+ * 原断言要求 `if (!active) return` 原样存在，并且 active 必须在依赖里。
+ * 后来发现那个组合会造成「切 tab → cleanup 销毁 pdf → 切回来重新下载」，
+ * 用户看到先黑屏再刷新（日志：25 秒内 pdf:start 六次，reader:mount 一次）。
+ * 所以两条断言都必须改，否则它们反而在保护 bug。
+ *
+ * 现在的正确形态：
+ *   · 守卫是 `!active && !pdfRef.current` —— 没加载过才等可见；
+ *   · active **不在**依赖里 —— 已加载的切走不销毁；
+ *   · 补跑由单独的 wasActive 监听 effect 负责。
+ */
+check('effect 开头有守卫，且只在「未加载过」时拦（不销毁已加载的）',
   loadEffect.length > 600 && (() => {
-    const guard = loadEffect.indexOf('if (!active) return')
+    const guard = loadEffect.indexOf('if (!active && !pdfRef.current) return')
     const setLoading = loadEffect.indexOf("setStatus('loading')")
     return guard > 0 && setLoading > 0 && guard < setLoading
   })())
-check('active 在依赖数组里（隐藏→显示会重新加载）',
-  /\},\s*\[itemKey,\s*reloadToken,\s*active\]/.test(src))
+
+check('active 不在加载 effect 的依赖里（切 tab 不得销毁重建）',
+  !/\},\s*\[itemKey,\s*reloadToken,\s*active\]/.test(src),
+  '把 active 放回依赖会让切 tab 触发 cleanup：销毁 pdf 文档 + 清空 DOM，表现为黑屏后重新加载')
+
+check('有 wasActive 监听负责「首次可见时补跑」',
+  /wasActiveRef/.test(src) && /setReloadToken\(\(v\) => v \+ 1\)/.test(src),
+  'active 移出依赖后，必须有人负责在首次可见时触发加载，否则一直是空的')
 
 /* ---------- 3. 两个调用点都传了 active ---------- */
 check('readPane 传 active: mode === \'read\'',

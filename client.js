@@ -2490,8 +2490,20 @@ window.__ModuleLoader__.load({
          *
          * 所以：不可见就什么都不做，等 active 变 true 再整条重来。
          * 依赖里带上 active，隐藏→显示会自然触发一次完整加载。
+         *
+         * **但「不可见就不加载」只该管首次加载，不该管已加载的文档。**
+         *
+         * 把 active 放进依赖的副作用是：切走 tab 时 active 变 false，
+         * cleanup 就销毁 pdf.js 文档、清空 DOM；切回来 effect 重跑，
+         * 重新 /pdf、getDocument、setDocument —— 用户看到「先黑屏再刷新」。
+         * 日志证据：00:32:10~00:32:35 的 25 秒里 pdf:start 出现 6 次，
+         * 而 reader:mount 只有 1 次 —— 组件没重挂，是 effect 在反复跑。
+         *
+         * 真正的诉求只是「别在 0×0 里白跑第一趟」。已经拿到过文档的，
+         * 隐藏时保持原样即可（DOM 还在、画布还在，切回来瞬时），
+         * 这正是当初把 PaperView 常驻的意义。
          */
-        if (!active) return undefined
+        if (!active && !pdfRef.current) return undefined
         /**
          * **必须先把状态压回 loading。**
          *
@@ -2645,7 +2657,34 @@ window.__ModuleLoader__.load({
           pdfRef.current = null
           pageElsRef.current.clear()
         }
-      }, [itemKey, reloadToken, active])
+        /**
+         * **依赖里不再放 active。**
+         *
+         * 放了它，切 tab 就销毁重建（黑屏 + 重新下载解析）。
+         * 去掉之后，让它在「从未可见 → 现在可见」时补跑一次，
+         * 由下面的 activeRef 监听 effect 负责，不参与本次加载的清理逻辑。
+         */
+      }, [itemKey, reloadToken])
+
+      /**
+       * 首次「由不可见变为可见」时补跑加载。
+       *
+       * 上一个 effect 在 `!active && 还没有文档` 时直接返回，为的是避免在
+       * 0×0 容器里白跑一趟（那会让 pdf.js 建不出页、页码恢复全失效）。
+       * 既然它不再依赖 active，就得有人负责在容器真正可见时叫醒它 ——
+       * 就是这里，靠 reloadToken 触发一次重跑。
+       *
+       * 已经加载过的（pdfRef 有值）不响应：那正是「切回来不该重载」的诉求。
+       */
+      const wasActiveRef = useRef(active)
+      useEffect(() => {
+        const was = wasActiveRef.current
+        wasActiveRef.current = active
+        if (active && !was && !pdfRef.current) {
+          zeroSizeRetryRef.current = 0
+          setReloadToken((v) => v + 1)
+        }
+      }, [active])
 
       /* ---------- 官方 PDFViewer 接管渲染 ---------- */
       /**
