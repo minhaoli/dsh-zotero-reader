@@ -344,3 +344,51 @@ export function summarizeItem(item) {
   if (item.pdfMissing) out.missingPdf = true
   return out
 }
+
+/**
+ * 只查一条文献——给「打开某篇 PDF」这类只需要 pdfPath 的场景用。
+ *
+ * 为什么不复用 loadLibrary：那个要跑整库查询（实测 588 条 226ms），
+ * 而打开一篇 PDF 时我们只需要一行记录。`findItem` 原来无条件走
+ * `library()`，于是每打开一篇就白付一次整库成本，库越大越慢。
+ *
+ * 这里直接按 key 精确查询，只取附件路径与标题。用同一套快照，
+ * 所以不会读到比 loadLibrary 更旧的数据。
+ */
+export async function loadOneItem(config, cacheDir, itemKey) {
+  const key = String(itemKey ?? '').trim()
+  if (!key) return null
+  const dataDir = await detectZoteroDataDir(config.zoteroDataDir)
+  const snapshot = await snapshotDatabase(dataDir, cacheDir)
+  const db = await openSqlite(snapshot, { readOnly: true })
+  try {
+    /**
+     * PDF 附件挂在父条目上，所以先按父条目查；也兼容直接传附件 key
+     * （调用方有时拿到的是附件 key）。
+     */
+    const row = db.prepare(`
+      SELECT p.key AS itemKey, i2.key AS attachKey, a.path AS attPath,
+             t.value AS title, a.contentType AS contentType
+      FROM itemAttachments a
+      JOIN items i2 ON i2.itemID = a.itemID
+      JOIN items p ON p.itemID = COALESCE(a.parentItemID, a.itemID)
+      LEFT JOIN itemData d ON d.itemID = p.itemID AND d.fieldID = (
+        SELECT fieldID FROM fieldsCombined WHERE fieldName = 'title' LIMIT 1
+      )
+      LEFT JOIN itemDataValues t ON t.valueID = d.valueID
+      WHERE (p.key = ? OR i2.key = ?) AND a.contentType = 'application/pdf'
+      LIMIT 1
+    `).get(key, key)
+    if (!row?.attPath) return null
+    const absPath = resolveAttachmentPath(dataDir, row.attachKey, row.attPath)
+    if (!absPath || !fs.existsSync(absPath)) return null
+    return {
+      itemKey: row.itemKey,
+      attachmentKey: row.attachKey,
+      title: row.title ?? '(无标题)',
+      pdfPath: absPath,
+    }
+  } finally {
+    try { db.close() } catch { /* ignore */ }
+  }
+}
