@@ -845,6 +845,39 @@ window.__ModuleLoader__.load({
       return null
     }
 
+    /**
+     * 把某一页滚到视野顶部，返回是否真的滚到位。
+     *
+     * 为什么不能只设 `viewer.currentPageNumber`：pdf.js 的 setter 内部按
+     * **它自己的 container** 与页元素的 `offsetParent` 链滚动画布。侧栏这层
+     * 容器是 overflow:hidden、`scrollHeight === clientHeight`，那条链落在
+     * 一个永远不滚的节点上 —— 滚动被静默丢弃，不抛错、不生效。
+     * 现场日志：hasScroller 为真，但 scrollerTop 恒为 0、716/716。
+     *
+     * 从 `gotoPage` 里提取出来，因为**加载时恢复阅读位置**走的是另一条路径，
+     * 之前只设了页码、没做这层滚动，于是出现「页码显示第 4 页、视图停在第 1 页」
+     * ——而且判据只看 currentPageNumber，还误报 ok:true。
+     *
+     * 做法：先 scrollIntoView 让浏览器把所有该滚的祖先一起滚开（不必猜是哪一层），
+     * 再按**视口矩形差值**精确定位。不能用 offsetTop 直接相减：offsetTop 的
+     * 参照系是 offsetParent，与滚动容器的 scrollTop 不同源。
+     */
+    function scrollPageIntoView(hostEl, pageNo, offset = 0) {
+      try {
+        const pageEl = hostEl?.querySelector(`.page[data-page-number="${pageNo}"]`)
+        if (!pageEl) return false
+        try { pageEl.scrollIntoView({ block: 'start', inline: 'nearest' }) } catch { /* 老内核忽略选项 */ }
+        const scroller = findScrollParent(pageEl)
+        if (!scroller) return true
+        const pageH = pageEl.clientHeight || 0
+        // 页首 + 页内偏移（offset 是 0..1 的比例，落在两页之间时用）
+        const pageTop = pageEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+        const target = pageTop - 8 + pageH * Math.min(0.98, Math.max(0, offset))
+        if (Math.abs(scroller.scrollTop - target) > 2) scroller.scrollTop = target
+        return Math.abs(scroller.scrollTop - target) <= 2
+      } catch { return false }
+    }
+
     function measureScrollOffset(scrollEl, hostEl, pageNo) {
       try {
         if (!scrollEl || !hostEl || !pageNo) return 0
@@ -2166,23 +2199,16 @@ window.__ModuleLoader__.load({
             /**
              * 按「页 + 页内偏移」把视图滚到该位置。
              *
-             * 优先直接设容器的 scrollTop（像素级精确，能落在两页之间），
-             * 而不是只用 `currentPageNumber` —— 后者只能对齐到页首。
+             * **已废弃，保留说明以免重蹈覆辙。**
+             *
+             * 它直接设 `scrollRef.current.scrollTop`，而 `scrollRef` 挂在 `.zr-page` 上 ——
+             * 那个节点并不是真正的滚动容器（真正滚的是 pdf.js 在 `.zr-pdfviewer-host`
+             * 里建的 `.pdfViewer`）。于是写法看着正确、实际写在一个不滚的节点上，
+             * 表现为「页码对了、视图没动」。
+             *
+             * 现在统一走模块级的 `scrollPageIntoView()`：它按几何找真正可滚的祖先，
+             * 并用视口矩形差值定位。`gotoPage` 与加载时的位置恢复共用同一条路径。
              */
-            function applyScrollOffset(pageNo, offset) {
-              try {
-                const el = scrollRef.current
-                const host2 = hostRef.current
-                if (!el || !host2) return false
-                const pageEl = host2.querySelector(`.page[data-page-number="${pageNo}"]`)
-                if (!pageEl) return false
-                const h = pageEl.clientHeight || 0
-                if (h <= 0) return false
-                const target = (pageEl.offsetTop || 0) + h * Math.min(0.98, Math.max(0, offset))
-                el.scrollTop = target
-                return true
-              } catch { return false }
-            }
 
             /**
              * 把文档交给 viewer —— **这一步绝对不能少**。
@@ -2451,13 +2477,19 @@ window.__ModuleLoader__.load({
                     setJumpPage(resumePage)
                   }
                   /**
-                   * 页号对上之后，再按偏移把视图滚到「两页之间」那个位置。
-                   * 要在页号生效**之后**做：页元素的位置随页号确定，顺序反了就白调。
+                   * **必须真的滚。**
+                   *
+                   * 只设 currentPageNumber 时，pdf.js 自己那条滚动链在侧栏里是断的，
+                   * 页码写对了、视图却纹丝不动 —— 用户看到「显示第 4 页、实际停在
+                   * 第 1 页」。而旧判据只看 currentPageNumber 是否相等，于是
+                   * 这种情况还会打出 ok:true，把问题藏起来。
+                   *
+                   * 所以这里改走和 gotoPage 同一条几何滚动路径，并把
+                   * 「视图是否真的到位」纳入判据。
                    */
-                  const offsetOk = resumeOffset > 0.001
-                    ? applyScrollOffset(resumePage, resumeOffset)
-                    : true
-                  const ok = viewer.currentPageNumber === resumePage
+                  const scrolled = scrollPageIntoView(host, resumePage, resumeOffset)
+                  const pageOk = viewer.currentPageNumber === resumePage
+                  const ok = pageOk && (scrolled || attempt >= 12)
                   if (!ok && attempt < 12) {
                     setTimeout(() => applyResume(attempt + 1), 120)
                     return
@@ -2468,7 +2500,7 @@ window.__ModuleLoader__.load({
                     want: resumePage,
                     got: viewer.currentPageNumber,
                     offset: resumeOffset,
-                    offsetOk,
+                    scrolled,
                     attempts: attempt + 1,
                     ok,
                   })
@@ -3124,20 +3156,12 @@ window.__ModuleLoader__.load({
          *    用户看到的就是「输入页码回车没反应」。
          * 2) 自己把页元素滚到视野顶部：只依赖 DOM 几何，绕开上面那条链。
          */
-        const scrollToPage = () => {
-          try {
-            const pageEl = hostRef.current?.querySelector(`.page[data-page-number="${target}"]`)
-            if (!pageEl) return false
-            // 让浏览器把「所有需要滚的祖先」一起滚开，不必猜是哪一层
-            try { pageEl.scrollIntoView({ block: 'start', inline: 'nearest' }) } catch { /* 老内核忽略选项 */ }
-            const scroller = findScrollParent(pageEl)
-            if (!scroller) return true
-            // offsetTop 与 scrollTop 不同源，按视口矩形差值定位；-8 消掉页间距
-            const top = pageEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 8
-            if (Math.abs(scroller.scrollTop - top) > 2) scroller.scrollTop = top
-            return Math.abs(scroller.scrollTop - top) <= 2
-          } catch { return false }
-        }
+        /**
+         * 滚到目标页。实现已抽到模块级 `scrollPageIntoView()`，
+         * 因为加载时恢复阅读位置也要走同一条几何路径 —— 之前两处各写一份，
+         * 恢复那条漏了滚动，于是出现「页码显示第 4 页、视图停在第 1 页」。
+         */
+        const scrollToPage = () => scrollPageIntoView(hostRef.current, target, 0)
 
         try { viewer.currentPageNumber = target } catch { /* 非整数页码等，忽略 */ }
         scrollToPage()
