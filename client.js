@@ -826,6 +826,25 @@ window.__ModuleLoader__.load({
      *
      * 拿不到几何信息时返回 0（等价于「停在页首」）—— 那是安全值。
      */
+    /**
+     * 找页元素真正在滚的那个祖先。
+     *
+     * 不能假定某个固定节点就是滚动容器：侧栏里叠着若干层 overflow:hidden，
+     * pdf.js 又把页元素包在 .pdfViewer / .pdfViewerContainer 里，
+     * 实际吃滚动的是哪一层只能按几何判定（overflow 为 auto/scroll 且内容高于自身）。
+     */
+    function findScrollParent(node) {
+      let el = node?.parentElement ?? null
+      let guard = 0
+      while (el && guard++ < 12) {
+        const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null
+        const overflowY = style?.overflowY ?? ''
+        if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 2) return el
+        el = el.parentElement
+      }
+      return null
+    }
+
     function measureScrollOffset(scrollEl, hostEl, pageNo) {
       try {
         if (!scrollEl || !hostEl || !pageNo) return 0
@@ -1955,6 +1974,8 @@ window.__ModuleLoader__.load({
        *   · 缩放与页码跳转（转成官方 viewer 的 currentScale / currentPageNumber）
        */
       const viewerRef = useRef(null)
+      /** 页码跳转的序号：新一轮跳转作废上一轮还在重试的旧跳转。 */
+      const jumpSeqRef = useRef(0)
       const eventBusRef = useRef(null)
       /**
        * decoratePage 的 ref 镜像。
@@ -3010,15 +3031,53 @@ window.__ModuleLoader__.load({
         const target = Math.max(1, Math.min(pageNo, pageCount || pageNo))
         setJumpPage(target)
         setHighlight(rects ? { page: target, rects } : null)
-        /**
-         * 跳页交给官方 viewer：设置 currentPageNumber 它会自己滚动到该页，
-         * 并按需渲染周围页面。我们只负责把高亮数据记下来，
-         * 页面渲染完成时（pagerendered 事件）会调 decoratePage 叠上去。
-         */
+
         const viewer = viewerRef.current
-        if (viewer) {
-          viewer.currentPageNumber = target
+        if (!viewer) return
+
+        /**
+         * 跳页有两条路，缺一条就会静默失败。
+         *
+         * 1) 官方 viewer 的 currentPageNumber：更新内部页码、按需渲染周围页。
+         *    它内部按自己的 container 与页元素的 offsetParent 链滚动；
+         *    侧栏里外层容器 overflow:hidden、scrollHeight === clientHeight，
+         *    那条链落在一个永远不滚的节点上，滚动被静默丢弃（不抛错、不生效）。
+         *    实测日志：hasScroller 为真，但 scrollerTop 恒为 0、
+         *    scrollHeight === clientHeight === 716，页面纹丝不动，
+         *    用户看到的就是「输入页码回车没反应」。
+         * 2) 自己把页元素滚到视野顶部：只依赖 DOM 几何，绕开上面那条链。
+         */
+        const scrollToPage = () => {
+          try {
+            const pageEl = hostRef.current?.querySelector(`.page[data-page-number="${target}"]`)
+            if (!pageEl) return false
+            // 让浏览器把「所有需要滚的祖先」一起滚开，不必猜是哪一层
+            try { pageEl.scrollIntoView({ block: 'start', inline: 'nearest' }) } catch { /* 老内核忽略选项 */ }
+            const scroller = findScrollParent(pageEl)
+            if (!scroller) return true
+            // offsetTop 与 scrollTop 不同源，按视口矩形差值定位；-8 消掉页间距
+            const top = pageEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 8
+            if (Math.abs(scroller.scrollTop - top) > 2) scroller.scrollTop = top
+            return Math.abs(scroller.scrollTop - top) <= 2
+          } catch { return false }
         }
+
+        try { viewer.currentPageNumber = target } catch { /* 非整数页码等，忽略 */ }
+        scrollToPage()
+
+        /**
+         * 布局未落定时页元素刚建出来、位置还会变，一次写不进去就重试几次。
+         * 带令牌停止：连按回车只有最后一次生效，成功即停，不和用户手动滚动抢位置。
+         */
+        const token = ++jumpSeqRef.current
+        let tries = 0
+        const retry = () => {
+          if (token !== jumpSeqRef.current) return
+          if (tries++ >= 10) return
+          try { if (viewer.currentPageNumber !== target) viewer.currentPageNumber = target } catch { /* 忽略 */ }
+          if (!scrollToPage()) requestAnimationFrame(() => setTimeout(retry, 120))
+        }
+        requestAnimationFrame(() => setTimeout(retry, 60))
       }, [pageCount])
 
       /* ---------- 全局跳转请求（来自会话里的页码点击） ---------- */
