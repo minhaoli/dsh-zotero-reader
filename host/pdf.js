@@ -54,8 +54,54 @@ function splitPage(text, limit) {
 }
 
 /**
+ * 读 PDF 自带书签（大纲），把 dest 解析成真实页码。
+ *
+ * 为什么要用它：书签是出版方写好的目录，标题、页码、层级都现成。
+ * 只靠字号猜标题在两种常见 PDF 上必错：
+ *   · 标题与正文同字号、只加粗（Elsevier/APA 的期刊排版）→ 一条真实章节都提不出来；
+ *   · 几百页的手册/教材（多级标题、字号相近）→ 标题互相混淆，正文被大量收进来。
+ * 所以有书签就先翻书签，没有才退回字号启发式。
+ */
+async function readBookmarks(doc) {
+  let raw
+  try {
+    raw = await doc.getOutline()
+  } catch {
+    return []
+  }
+  if (!Array.isArray(raw) || raw.length === 0) return []
+
+  const resolvePage = async (item) => {
+    try {
+      let dest = item?.dest
+      if (typeof dest === 'string') dest = await doc.getDestination(dest)
+      if (!Array.isArray(dest) || dest.length === 0) return 0
+      const ref = dest[0]
+      if (typeof ref === 'number') return Math.max(1, Math.trunc(ref) + 1)
+      if (ref && typeof ref === 'object') return (await doc.getPageIndex(ref)) + 1
+      return 0
+    } catch {
+      return 0
+    }
+  }
+
+  const out = []
+  const walk = async (items, depth) => {
+    for (const item of items) {
+      // 只有硬性保护上限，没有业务截断：手册/教材的目录本来就有上千条
+      if (!item || out.length >= 2000) return
+      const title = String(item.title ?? '').replace(/\s+/g, ' ').trim()
+      if (title) out.push({ depth, title, page: await resolvePage(item) })
+      if (Array.isArray(item.items) && item.items.length > 0) await walk(item.items, depth + 1)
+    }
+  }
+  await walk(raw, 0)
+  return out
+}
+
+/**
  * 提取 PDF 文本层。
- * @returns {{pages: string[], chunks: {page:number, text:string}[], charCount:number, scanned:boolean}}
+ * @returns {{pages: string[], chunks: {page:number, text:string}[], charCount:number, scanned:boolean, bookmarks: {depth:number,title:string,page:number}[]}}
  */
 export async function extractText(absPath, options = {}) {
   const pdfjs = await getPdfjs()
@@ -123,7 +169,8 @@ export async function extractText(absPath, options = {}) {
     // 扫描件判定：平均每页字符数极低
     const scanned = pages.length > 0 && charCount / pages.length < 40
 
-    return { pages, chunks, charCount, scanned, pageCount: limit, truncated: limit < total, pageLines }
+    // 书签一并带出去：大纲优先用它，命中不了才退回字号启发式
+    return { pages, chunks, charCount, scanned, pageCount: limit, truncated: limit < total, pageLines, bookmarks: await readBookmarks(doc) }
   } finally {
     await doc.destroy?.()
   }
@@ -170,13 +217,28 @@ export function searchChunks(chunks, query, limit = 8) {
  *      判定用「去掉数字后的行」做归一化计数 —— 页码逐页不同，但去掉数字后相同。
  *   2. 断句行：以 and/or/with 等连词结尾的短行，是正文折行不是标题。
  */
-export function outlineOf(pages, pageLines) {
+export function outlineOf(pages, pageLines, bookmarks) {
   const SECTION_WORDS = [
     'abstract', 'introduction', 'related work', 'background', 'method', 'methods',
     'materials and methods', 'results', 'result', 'experiments', 'experiment',
     'evaluation', 'discussion', 'conclusion', 'conclusions', 'future work',
     'references', 'acknowledgments', 'acknowledgements', 'acknowledgment', 'acknowledgement',
   ]
+
+  /**
+   * 有书签就用书签，这一步在启发式之前。
+   *
+   * 只丢两种条目：解析不出页码的（dest 坏了）和空标题。
+   * 「Cover / Contents / Contributors」这类不滤 —— 它们是这本书真实的目录部分，
+   * 少一条比多一条更容易让人误以为漏了章节。
+   */
+  if (Array.isArray(bookmarks) && bookmarks.length > 0) {
+    const fromBookmarks = bookmarks
+      .filter((b) => b && b.title && Number(b.page) > 0)
+      .slice(0, 2000)
+      .map((b) => ({ page: b.page, title: b.title, depth: b.depth ?? 0 }))
+    if (fromBookmarks.length > 0) return fromBookmarks
+  }
 
   const citationRe = new RegExp(
     '^(?:\\d+\\.\\s+|\\[\\d+\\]\\s*)?(?:'
@@ -246,6 +308,24 @@ export function outlineOf(pages, pageLines) {
   // 论文大标题的阈值：远大于正文（20.9 / 11.0 ≈ 1.9），单独排除
   const TITLE_RATIO = 1.7
 
+  /**
+   * 跨页重复的行 = 页眉/页脚（期刊名、作者缩写、页码），不是章节。
+   * 判据：数字归一化成 #、空白压平、转小写之后，同一行出现在 ≥3 页上。
+   * 章节标题不会在每页顶部重复，所以这个信号比字号更干净。
+   */
+  const seen = new Map()
+  const norm = (t) => t.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().toLowerCase()
+  for (const lines of pageLines) {
+    const uniq = new Set()
+    for (const l of lines) {
+      const k = norm(l.text)
+      if (!k || uniq.has(k)) continue
+      uniq.add(k)
+      seen.set(k, (seen.get(k) ?? 0) + 1)
+    }
+  }
+  const isRunning = (t) => (seen.get(norm(t)) ?? 0) >= 3
+
   const out = []
   let inReferences = false
 
@@ -272,8 +352,37 @@ export function outlineOf(pages, pageLines) {
     for (const b of blocks) {
       const text = b.text.trim()
       if (!text) continue
-      if (b.size < bodySize * HEADING_RATIO) continue          // 正文
-      if (b.size >= bodySize * TITLE_RATIO) continue           // 论文大标题
+
+      /**
+       * 编号标题与固定章节词：不靠字号也能认。
+       *
+       * Elsevier/APA 期刊的章节标题常与正文同字号，只加粗 —— 整页量下来全是 8.0，
+       * 只按字号筛的结果是「一条真实章节都提不出来，反倒把首页的刊名/标题/作者收了进去」。
+       * 编号（1. / 1.1. / 1.1.1.）与章节词是比字号更硬的信号，允许它们绕过字号门槛。
+       *
+       * 编号判据要挡两类误伤：
+       *   · 页码开头的页眉（"1230 R. C. O'Reilly et al. ⁄ Cognitive Science 38 (2014)"）
+       *     —— 章节号不会到三位数；
+       *   · 以数字开头的正文（"36 years old) and an additional student..."）
+       *     —— 编号后面紧跟的是大写字母或汉字。
+       */
+      const numbered = /^[1-9]\d?(?:\.\d{1,2}){0,3}\.?\s+[A-Z\u4e00-\u9fa5]/.test(text)
+        && text.length <= 80 && !endsLikeSentence(text)
+      const bareText = text.replace(/^\d+(?:\.\d+)*\.?\s+/, '').toLowerCase().replace(/[.:：]\s*$/, '')
+      const keyword = SECTION_WORDS.includes(bareText)
+      const bySize = b.size >= bodySize * HEADING_RATIO
+
+      if (!bySize && !numbered && !keyword) continue           // 正文
+      if (isRunning(text) && !keyword) continue                // 页眉/页脚
+      if (b.size >= bodySize * TITLE_RATIO && !numbered && !keyword) continue   // 论文大标题
+
+      /**
+       * 首页只认编号与章节词。
+       *
+       * 期刊首页顶部挤着刊名、卷期、文章标题、作者、栏目名，字号都比正文大，
+       * 光凭字号必然误收（实测一篇 Acta Psychologica 论文，大纲四条全是首页元信息）。
+       */
+      if (index === 0 && !numbered && !keyword) continue
       if (endsLikeSentence(text)) continue                     // 正文折行被误标大字号
       if (citationRe.test(text)) continue
       if (isFrontMatter(text)) continue

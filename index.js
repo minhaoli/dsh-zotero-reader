@@ -242,7 +242,7 @@ function applyInner(ctx, config = {}) {
         pages: e.pages,
         chunks: e.chunks,
         // pageLines 带每行字号：大纲靠字号判标题层级，比词表/行长可靠得多
-        outline: outlineOf(e.pages, e.pageLines),
+        outline: outlineOf(e.pages, e.pageLines, e.bookmarks),
         source: 'pdf-text',
         scanned: e.scanned,
         pageCount: e.pageCount,
@@ -931,7 +931,13 @@ async function handleRequest(rctx, req, res, deps) {
         source: doc.source,
         approxPages: Boolean(doc.approxPages),
         scanned: Boolean(doc.scanned),
-        outline: doc.outline.slice(0, 40),
+        /**
+         * 大纲不在路由层截断。
+         *
+         * 原来这里是 slice(0, 40)，而书签型大纲（手册/教材）常有几百上千条，
+         * 用户看到的是「大纲只显示前面几条」。条数上限交给 outlineOf 统一控制。
+         */
+        outline: doc.outline,
         ...(doc.mineruError ? { mineruError: doc.mineruError } : {}),
       })
       return

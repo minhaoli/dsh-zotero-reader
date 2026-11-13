@@ -4543,6 +4543,8 @@ window.__ModuleLoader__.load({
               info.outline.map((o, i) => h('div', {
                 key: i,
                 className: 'zr-outline-row',
+                // 书签带层级：按 depth 缩进，和 Zotero 里看到的结构一致
+                style: o.depth ? { paddingLeft: 12 + Math.min(6, o.depth) * 10 } : undefined,
                 onClick: () => { gotoPage(o.page) },
               }, `${info.approxPages ? '≈' : ''}p${o.page}  ${o.title}`)))
             : null,
