@@ -1150,6 +1150,24 @@ window.__ModuleLoader__.load({
       .zr-pdfviewer-container{position:absolute;inset:0;overflow:auto}
       .zr-pdfviewer-container .pdfViewer{position:relative;padding-bottom:8px}
       /*
+       * 把每一页的排版影响关在页内。
+       *
+       * 为什么需要：pdf.js 建文本层时会对整页 span 排序，每次比较都调
+       * getBoundingClientRect。一旦布局是「脏」的，每次读都会触发一次
+       * **全文档**重排 —— 我们这里有 14 个页容器，一次重排要把它们全算一遍，
+       * 实测单次最高 149ms、累计 3.9 秒，就是滑动卡顿的主因。
+       *
+       * contain:layout 告诉浏览器：页内元素的变化不会影响页外布局，
+       * 于是重排被限制在单个 .page 内，不再波及整个文档。.page 自身有
+       * 明确的 width/height（pdf.js 按 viewport 写死），所以收缩尺寸计算
+       * 是安全的，不会让页面塌掉。
+       *
+       * 这里刻意**不用** contain:strict / size：那会把 .page 的高度改成
+       * 由内容决定，而 pdf.js 依赖它写死的 1056px 来做滚动定位，
+       * 一旦塌成 0 高，翻页与恢复阅读位置全都会失效（踩过一次）。
+       */
+      .zr-pdfviewer-container .pdfViewer .page{contain:layout}
+      /*
        * 批注浮层：只负责显示 Zotero 里已有的批注色块。
        *
        * 关键约束：**不能影响官方编辑器层的布局**。
