@@ -937,24 +937,114 @@ window.__ModuleLoader__.load({
            */
           try {
             /**
-             * 主线程模式（pdf.js 的 fake worker），不创建真 Worker。
+             * **先试真 Worker，不成再退回主线程。**
              *
-             * 为什么：页面基址是自定义 scheme（`dsh-app://app/`）。在这种页面里
-             * `new Worker(blobUrl, { type: 'module' })` 能创建，但 worker 不会回执，
-             * 于是 `getDocument` 永远挂着 —— 客户端日志里只有 `pdf:start` 和 `pdf:bytes`，
-             * 30 秒后报「解析 PDF 超时」，连一个错误都没有。
+             * 为什么值得试：主线程模式下 pdf.js 的解析、字体、流解码全在 UI
+             * 线程上跑，和渲染抢同一条线程。Zotero 用真 worker，解析在独立
+             * 线程，界面不受影响 —— 这是两者体感差距的一个来源。
              *
-             * pdf.js 支持不碰 Worker API：`PDFWorker.#mainThreadWorkerMessageHandler`
-             * 读的就是 `globalThis.pdfjsWorker.WorkerMessageHandler`，存在时它会用
-             * LoopbackPort 在主线程跑 worker 代码。代价是大文件解析时界面会顿一下。
+             * 之前直接放弃了真 worker，因为「能创建但不回执，getDocument
+             * 永久挂起，30 秒后超时，连错误都没有」。但那次的探针不够细：
+             * 没有区分「构造失败」「postMessage 失败」「worker 脚本报错」
+             * 三种情况，所以只知道坏、不知道为什么坏。
+             *
+             * 现在改成带**明确的握手超时**：worker 建好后必须在 4 秒内回一个
+             * 消息，否则判定不可用、回退主线程。四种建法依次尝试，每种都记录
+             * 结果，下次能直接看出是哪一环断的。
+             *
+             * 关键：`globalThis.pdfjsWorker` **只在回退分支里设置**。
+             * 一旦设置，pdf.js 的 #initialize() 会直接走 #setupFakeWorker，
+             * 真 worker 就永远没机会了（见 pdf.mjs 的 PDFWorker.#initialize）。
              */
             const workerUrl = await importFromSource(`${API}/vendor/pdf.worker.mjs`)
-            const workerLib = await import(/* @vite-ignore */ workerUrl)
-            const Handler = workerLib?.WorkerMessageHandler ?? workerLib?.default?.WorkerMessageHandler
-            if (!Handler) throw new Error('worker 模块里没有 WorkerMessageHandler')
-            globalThis.pdfjsWorker = { WorkerMessageHandler: Handler }
-            lib.GlobalWorkerOptions.workerPort = null
-            reportDiag({ event: 'pdfjs:worker-mode', mode: 'main-thread' })
+
+            /**
+             * 探测这个环境到底能不能跑「会回执」的 worker。
+             *
+             * **不能直接往 pdf.worker.mjs 里 post 一条消息等它回**：那个模块
+             * 只认自己的协议（MessageHandler 的 action），收到不认识的消息
+             * 不会回话 —— 用它做探针会把「可用」误判成「不可用」。
+             *
+             * 正确做法：用一段 wrapper 脚本，让 worker **自己报告**
+             * 「我起来了」和「vendor 模块能不能 import」。这样一次探测同时
+             * 覆盖两件事：blob worker 能不能建、模块能不能在 worker 里加载。
+             *
+             * 用绝对地址而不是相对路径：worker 里的相对路径基准是 worker 自身
+             * 的 blob URL，解析不出 /zotero-reader/... 这种页面路径。
+             */
+            const absWorker = new URL(`${API}/vendor/pdf.worker.mjs`, document.baseURI).href
+            const wrapperCode = `
+              try {
+                await import(${JSON.stringify(absWorker)})
+                self.postMessage({ zr: 'ok' })
+              } catch (e) {
+                self.postMessage({ zr: 'import-failed', message: String(e && e.message || e) })
+              }
+            `
+
+            const canWorkerReply = () =>
+              new Promise((resolve) => {
+                let w = null
+                let settled = false
+                const finish = (ok, reason) => {
+                  if (settled) return
+                  settled = true
+                  try { w?.terminate() } catch { /* ignore */ }
+                  resolve({ ok, reason })
+                }
+                /**
+                 * 8 秒窗口。worker 要 import 的是 1.2MB 的 min 版 worker 文件，
+                 * 模块求值本身需要时间；这个数字给得宽是因为**超时的代价**是
+                 * 退回主线程（功能正常、只是慢），而**误判可用的代价**是
+                 * getDocument 永久挂起（打不开）。宁可等久一点。
+                 */
+                const timer = setTimeout(() => finish(false, 'no-reply-8s'), 8000)
+                try {
+                  const blob = new Blob([wrapperCode], { type: 'text/javascript' })
+                  w = new Worker(URL.createObjectURL(blob), { type: 'module' })
+                } catch (e) {
+                  clearTimeout(timer)
+                  return finish(false, `construct:${e?.message ?? e}`)
+                }
+                w.onmessage = (ev) => {
+                  clearTimeout(timer)
+                  const d = ev?.data ?? {}
+                  if (d.zr === 'ok') finish(true, 'module-loaded')
+                  else finish(false, `import-failed:${String(d.message ?? '').slice(0, 120)}`)
+                }
+                w.onerror = (e) => { clearTimeout(timer); finish(false, `onerror:${e?.message ?? 'unknown'}`) }
+                w.onmessageerror = () => { clearTimeout(timer); finish(false, 'messageerror') }
+              })
+
+            const probe = await canWorkerReply()
+            reportDiag({ event: 'pdfjs:worker-probe', ok: probe.ok, reason: probe.reason })
+
+            if (probe.ok) {
+              /**
+               * 真 worker 可用 → 用 workerSrc 让 pdf.js 自己建实例。
+               *
+               * 不给 workerPort：它要求传一个我们 new 出来的 Worker，而探测阶段
+               * 那个实例已经 terminate（一个 port 只能配一个 PDFWorker，见
+               * pdf.mjs 的 #workerPorts WeakMap）。workerSrc 让 pdf.js 建自己的。
+               *
+               * 另外 pdf.js 对 workerSrc 这条路自带兜底：worker 触发 error 时
+               * 会自动 #setupFakeWorker()，所以我们不用担心它彻底打不开。
+               */
+              lib.GlobalWorkerOptions.workerSrc = absWorker
+              lib.GlobalWorkerOptions.workerPort = null
+              reportDiag({ event: 'pdfjs:worker-mode', mode: 'dedicated-worker' })
+            } else {
+              /**
+               * 回退主线程。设 `globalThis.pdfjsWorker` 会让 pdf.js 的
+               * #initialize() 直接走 #setupFakeWorker —— 这正是我们想要的。
+               */
+              const workerLib = await import(/* @vite-ignore */ workerUrl)
+              const Handler = workerLib?.WorkerMessageHandler ?? workerLib?.default?.WorkerMessageHandler
+              if (!Handler) throw new Error('worker 模块里没有 WorkerMessageHandler')
+              globalThis.pdfjsWorker = { WorkerMessageHandler: Handler }
+              lib.GlobalWorkerOptions.workerPort = null
+              reportDiag({ event: 'pdfjs:worker-mode', mode: 'main-thread' })
+            }
           } catch (error) {
             reportDiag({ event: 'pdfjs:worker-fallback', message: String(error?.message ?? error) })
           }
