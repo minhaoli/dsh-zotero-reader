@@ -2675,7 +2675,27 @@ window.__ModuleLoader__.load({
             perf.attribute('fetch-bytes', openWin)
 
             const docWin = perf.windowOpen()
-            const doc = await withTimeout(pdfjs.getDocument({ data: bytes }).promise, 30000, '解析 PDF')
+            /**
+             * `wasmUrl` 必须给 —— 否则 CCITT / JBIG2 / JPEG2000 的图全是空白。
+             *
+             * pdf.js 6.5 把这些图像解码器搬进了 WASM，运行时按
+             * `wasmUrl + 文件名` 去取。默认值是 null，拼出来就是
+             * "nulljbig2.wasm"，必然 404，而失败是**静默**的（只有一条
+             * warning，图直接不画）。
+             *
+             * 实测：2001 年那篇 Seeing Sets 有 3 张 /CCITTFaxDecode 图，
+             * 阅读器里整块空白，Zotero 却能显示 —— 差别就在这里。
+             *
+             * 末尾必须带斜杠：pdf.js 是直接字符串拼接（`${wasmUrl}${filename}`），
+             * 漏了斜杠会拼成 ".../vendorjbig2.wasm"。用绝对地址而不是相对路径，
+             * 因为页面基址是 dsh-app:// 自定义 scheme，相对路径容易被解析歪。
+             */
+            const wasmBase = new URL(`${API}/vendor/`, document.baseURI).href
+            const doc = await withTimeout(
+              pdfjs.getDocument({ data: bytes, wasmUrl: wasmBase }).promise,
+              30000,
+              '解析 PDF',
+            )
             perf.attribute('getDocument', docWin)
             if (!alive) { doc.destroy?.(); return }
             pdfRef.current = { doc, pdfjs }
@@ -3179,6 +3199,14 @@ window.__ModuleLoader__.load({
                 at: new Date().toISOString(),
                 visibleAtPaint,
                 canvasCount,
+                /**
+                 * 带上 itemKey，否则无法按文献分组对比。
+                 *
+                 * 之前排查「哪篇 PDF 渲染慢」时卡在这里：paint 事件里没有
+                 * itemKey，跨文献的统计只能混在一起算，分不清是「某篇特别慢」
+                 * 还是「所有篇都慢」——而这两者的改法完全不同。
+                 */
+                itemKey,
               })
               /**
                * **不要在 pagerendered 回调里同步写 DOM。**

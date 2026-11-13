@@ -545,6 +545,26 @@ const VENDOR_FILES = {
   'pdf_viewer.mjs': ['web/pdf_viewer.mjs', 'application/javascript; charset=utf-8'],
   'pdf_viewer.css': ['web/pdf_viewer.css', 'text/css; charset=utf-8'],
   'pdf-legacy.mjs': ['legacy/build/pdf.min.mjs', 'application/javascript; charset=utf-8'],
+  /**
+   * 图像解码用的 WASM。
+   *
+   * 为什么必须提供：pdf.js 6.5 把 CCITT G3/G4、JBIG2、JPEG2000 的解码器
+   * 搬进了 WASM，运行时按 `wasmUrl + 文件名` 去 fetch。
+   * 默认 `wasmUrl` 是 null，拼出来就是 "nulljbig2.wasm"，必然 404 ——
+   * 于是那张图静默变成空白，控制台只有一条 warning。
+   *
+   * 实测症状：2001 年前后的扫描版论文里有 3 张 /CCITTFaxDecode 图，
+   * 阅读器里该位置一片空白，而 Zotero 自己能显示（它带了 wasm）。
+   *
+   * CCITT 与 JBIG2 共用 jbig2.wasm（见 pdf.worker.mjs 的
+   * JBig2CCITTFaxImage._filename），所以这一个文件就够本问题。
+   * 另外补上 JS 兜底版：WASM 加载失败时 pdf.js 会退到它。
+   */
+  'jbig2.wasm': ['wasm/jbig2.wasm', 'application/wasm'],
+  'jbig2_nowasm_fallback.js': ['wasm/jbig2_nowasm_fallback.js', 'application/javascript; charset=utf-8'],
+  'openjpeg.wasm': ['wasm/openjpeg.wasm', 'application/wasm'],
+  'openjpeg_nowasm_fallback.js': ['wasm/openjpeg_nowasm_fallback.js', 'application/javascript; charset=utf-8'],
+  'qcms_bg.wasm': ['wasm/qcms_bg.wasm', 'application/wasm'],
 }
 
 async function serveVendorAsset(res, subPath) {
