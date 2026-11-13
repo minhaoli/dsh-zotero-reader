@@ -3149,8 +3149,22 @@ window.__ModuleLoader__.load({
               const resumePage = savedPos?.page ?? 1
               const resumeOffset = savedPos?.offset ?? 0
 
-              viewer.currentPageNumber = resumePage
-              viewer.update?.()
+              /**
+               * **先别急着设页码，等页视图建出来再设。**
+               *
+               * 原来这里立刻 `viewer.currentPageNumber = resumePage`，
+               * 但那一刻 `domPages` 还是 0 —— pdf.js 的页视图尚未创建，
+               * 赋值内部读 `this._pages[i]` 拿到 undefined 后**静默丢弃**，
+               * 视图就停在默认的第 1 页。
+               *
+               * 120ms 后 applyResume 重试才真正跳过去，于是用户看到
+               * 「先在第 1 页 → 闪到第 1 页 → 再闪到目标页」的抖动。
+               * 中间那次「闪到第 1 页」还是 scrollPageIntoView 按第 1 页的
+               * 几何算了一次滚动造成的。
+               *
+               * 现在把首跳也交给 applyResume：它本身会重试到页视图就绪，
+               * 并且在真正设页码之前不做任何几何滚动。
+               */
               setVisiblePage(resumePage)
               setJumpPage(resumePage)
               lastSavedPageRef.current = resumePage
@@ -3166,6 +3180,23 @@ window.__ModuleLoader__.load({
               const applyResume = (attempt) => {
                 if (disposed) return
                 try {
+                  /**
+                   * **页视图没就绪之前什么都不做。**
+                   *
+                   * 两个动作都依赖 `.page[data-page-number=N]` 真的存在：
+                   * 设页码（pdf.js 内部按 _pages 索引）与几何滚动（要量元素矩形）。
+                   * 在它存在之前动手，只会被静默丢弃或量到 0，
+                   * 既浪费时间又会让视图先落到第 1 页再弹回来。
+                   *
+                   * 所以先探一次，没建好就等下一拍，别做无用功。
+                   */
+                  const ready = Boolean(
+                    host.querySelector(`.page[data-page-number="${resumePage}"]`),
+                  )
+                  if (!ready && attempt < 24) {
+                    setTimeout(() => applyResume(attempt + 1), 60)
+                    return
+                  }
                   if (viewer.currentPageNumber !== resumePage) {
                     viewer.currentPageNumber = resumePage
                     viewer.update?.()
@@ -3185,8 +3216,17 @@ window.__ModuleLoader__.load({
                    */
                   const scrolled = scrollPageIntoView(host, resumePage, resumeOffset)
                   const pageOk = viewer.currentPageNumber === resumePage
-                  const ok = pageOk && (scrolled || attempt >= 12)
-                  if (!ok && attempt < 12) {
+                  /**
+                   * 判据必须诚实：**页码对 且 真的滚到了**才算成功。
+                   *
+                   * 早先写成 `pageOk && (scrolled || attempt >= 12)`，
+                   * 那个 `attempt >= N` 会在重试用尽后无条件放行 ——
+                   * 于是「页码对了、视图没动」也会被记成 ok:true，
+                   * 把问题藏起来（踩过一次）。
+                   * 现在超限就如实记 ok:false，日志里能一眼看出失败。
+                   */
+                  const ok = pageOk && scrolled
+                  if (!ok && attempt < 24) {
                     setTimeout(() => applyResume(attempt + 1), 120)
                     return
                   }

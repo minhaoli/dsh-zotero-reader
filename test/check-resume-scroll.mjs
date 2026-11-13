@@ -52,7 +52,21 @@ check('它按视口矩形差值定位（不用 offsetTop 相减）',
 /* ---------- 2. applyResume 必须走滚动 ---------- */
 const resumeStart = src.indexOf('const applyResume = (attempt) =>')
 check('找得到 applyResume', resumeStart > 0)
-const resumeBlock = resumeStart > 0 ? src.slice(resumeStart, resumeStart + 2400) : ''
+/**
+ * 区块边界不能按固定字符数取。
+ *
+ * 这里原来写 `slice(start, start + 2400)`，而 applyResume 内的注释后来
+ * 因为解释闪烁问题变长了，`scrolled,` 就被挤到窗口之外 ——
+ * 断言随即假失败（代码其实是对的）。
+ * 改成取到「下一个顶层 setTimeout 挂载点」为止，跟着结构走而不是跟着字数走。
+ */
+const resumeBlock = (() => {
+  if (resumeStart <= 0) return ''
+  const tail = src.slice(resumeStart)
+  // applyResume 之后紧跟 `setTimeout(() => applyResume(0), 120)`，以此为终点
+  const endMarker = tail.indexOf('setTimeout(() => applyResume(0)')
+  return endMarker > 0 ? tail.slice(0, endMarker + 60) : tail.slice(0, 6000)
+})()
 check('applyResume 区块已定位（负向断言的前提）', resumeBlock.length > 500)
 check('applyResume 调用了 scrollPageIntoView',
   resumeBlock.length > 500 && /scrollPageIntoView\(/.test(resumeBlock))
