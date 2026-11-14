@@ -585,23 +585,63 @@ window.__ModuleLoader__.load({
          * 真正要改代码时必须知道调用方。栈取一次有成本，所以严格限定在慢调用上，
          * 并对同一调用点去重计数，避免撑爆内存。
          */
-        function noteStack(d) {
+        function noteStack(d, reReadMs = -1) {
           try {
             const st = new Error().stack
             if (!st) return
-            const frames = st.split('\n').slice(2, 4).map((s) => s.trim().replace(/^at\s+/, ''))
-            const key = frames.join(' <- ').slice(0, 160)
+            /**
+             * **两帧要分开截断，不能先 join 再截。**
+             *
+             * 原来写的是 `frames.join(' <- ').slice(0, 160)`，而第一帧是
+             * 我们自己的 patchedGBCR，路径长 + 行号列号，160 字符正好把
+             * 第一帧占满 —— 真正要看的调用方（第二帧）一个字都留不下。
+             *
+             * 实测后果：日志里只有 `patchedGBCR ... client.js:644:53`，
+             * 完全看不出是谁在读布局，排查停在原地。
+             *
+             * 现在各自压到 90 字符并去掉重复的插件路径前缀，两帧都留得下。
+             */
+            const tidy = (s) =>
+              s
+                .trim()
+                .replace(/^at\s+/, '')
+                .replace(/dsh-app:\/\/app\/plugins\/\?\?[^)]*$/, '(plugin)')
+                .replace(/\(dsh-app:\/\/app\/[^)]*\)/, '(app)')
+                .slice(0, 90)
+            const frames = st.split('\n').slice(2, 4).map(tidy)
+            const key = frames.join(' <- ')
             if (!key) return
             let g = stacks.get(key)
-            if (!g) { g = { n: 0, ms: 0, max: 0 }; stacks.set(key, g) }
+            if (!g) { g = { n: 0, ms: 0, max: 0, reReads: 0, reReadMax: 0 }; stacks.set(key, g) }
             g.n += 1
             g.ms += d
             if (d > g.max) g.max = d
+            /**
+             * 收下「紧跟着再读一次」的耗时。
+             *
+             * 判读方式：
+             *   · reReadMax 很小（几毫秒） → 刚才那笔开销是**前面 DOM 写入
+             *     积压**的，布局已被第一次读取冲干净。要去改那个写入方。
+             *   · reReadMax 和 max 一个量级 → 这个元素本身就贵，读取真慢。
+             *
+             * 没有这个字段就只能看着 173ms 猜，方向全凭运气。
+             */
+            if (reReadMs >= 0) {
+              g.reReads += 1
+              if (reReadMs > g.reReadMax) g.reReadMax = reReadMs
+            }
           } catch { /* 取不到栈就算了，不影响主功能 */ }
         }
         function topStacks(limit = 5) {
           return [...stacks.entries()]
-            .map(([k, g]) => ({ at: k, n: g.n, ms: Math.round(g.ms), max: round1(g.max) }))
+            .map(([k, g]) => ({
+              at: k,
+              n: g.n,
+              ms: Math.round(g.ms),
+              max: round1(g.max),
+              // 紧跟着的第二次读取：小 = 前面写入积压；大 = 读取本身贵
+              reReadMax: round1(g.reReadMax || 0),
+            }))
             .sort((a, b) => b.ms - a.ms)
             .slice(0, limit)
         }
@@ -637,11 +677,31 @@ window.__ModuleLoader__.load({
                  */
                 if (d > 1) costly += 1
                 /**
+                 * 只对**已经慢了**的调用做二次判断：刚才那 d 毫秒里，
+                 * 有多少是「替前面某次 DOM 写入还债」。
+                 *
+                 * 做法：紧接着再读一次同样的 rect。若这次极快，说明布局已经
+                 * 干净 —— 那么刚才那笔开销就是前面写入积压的，该去查写入方；
+                 * 若这次还是慢，说明这个元素本身就贵（比如超长文本层）。
+                 *
+                 * 为什么不在每次调用前都探一次：那会让探针自己变成主要开销
+                 * （强制布局发生在每一次读取上），测出来的数就不可信了。
+                 * 只在慢调用上多付一次，代价可以忽略。
+                 */
+                let reReadMs = -1
+                if (d > 4) {
+                  try {
+                    const s2 = now()
+                    origRect.apply(this, arguments)
+                    reReadMs = now() - s2
+                  } catch { /* 失败就不给这个字段 */ }
+                }
+                /**
                  * 归因只在慢调用上做。快调用占绝大多数（98%），
                  * 逐次分组会把这份开销本身变成可观测的噪声。
                  * 栈也只在这类慢调用上取。
                  */
-                if (d > 1) { note(this, d, 'rect'); noteStack(d) }
+                if (d > 1) { note(this, d, 'rect'); noteStack(d, reReadMs) }
                 return r
               }
             }
