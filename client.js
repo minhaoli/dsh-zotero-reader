@@ -6423,7 +6423,7 @@ window.__ModuleLoader__.load({
     /* -------------------------------------------------------- 插件体 */
 
     return {
-      inject: ['slots', 'locale', 'layout', 'uiWorkspace'],
+      inject: ['slots', 'locale'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }))
         const bound = ctx.locale.bind(NS)
