@@ -134,12 +134,13 @@ async function translateOnce(ctx, text, target, signal) {
   if (!selection.provider || !selection.model) {
     throw new Error('没有可用的模型：宿主未配置默认模型，且插件设置里未指定翻译模型。')
   }
-  // 翻译的思考档位固定为 TRANSLATE_EFFORT（模型/provider 跟随当前会话默认）
+  // 文档翻译按段并发，每段都做回退链代价太高，只用首选档位
+  const reasoningEffort = TRANSLATE_EFFORTS[0]
   let out = ''
   const stream = ctx.llm.stream({
     provider: selection.provider,
     model: selection.model,
-    reasoningEffort: TRANSLATE_EFFORT,
+    reasoningEffort,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [{ type: 'text', text }] }],
     signal,
@@ -151,14 +152,16 @@ async function translateOnce(ctx, text, target, signal) {
 }
 
 /**
- * 翻译/解读的思考程度：固定 low。
+ * 翻译/解读的推理档位尝试序列，按「最省时 → 最宽容」排列。
  *
- * 原来是 off —— 翻译是转写任务，思考只增加等待时间。但 off 并不是所有模型
- * 都公布的档位，不认时可能被拒、也可能静默回空串（界面上就是一片空白）。
- * 用户明确要求改成 low：仍是最轻的一档，又落在绝大多数模型公布的取值里。
- * 模型/provider 仍然跟随当前会话的默认选择（用户要求「其他的和当前模型一致」）。
+ *   off  —— 翻译是转写任务，不思考最省时间，首选
+ *   low  —— off 并非所有模型都公布（不认时可能被拒，也可能静默回空串），退一档
+ *   null —— 两档都不认，就不传这个参数，交给模型默认
+ *
+ * 为什么是序列而不是单个值：档位只是省时间的优化，不该成为整条链路的前提。
+ * 模型/provider 仍跟随当前会话的默认选择（用户要求「其他的和当前模型一致」）。
  */
-const TRANSLATE_EFFORT = 'low'
+const TRANSLATE_EFFORTS = ['off', 'low', null]
 
 export function pickSelection(ctx, override) {
   const fallback = () => {
@@ -315,11 +318,11 @@ export async function translateSelection(ctx, text, options = {}) {
   const prompt = mode === 'explain' ? text : text
 
   /**
-   * 两次尝试：先按设定档位，不行再退回模型默认档。
+   * 逐级回退：off → low → 模型默认档。
    *
    * 推理档位只是省时间的优化，但它依赖该模型公布过这个取值。不公布时请求
    * 可能被上层拒绝，也可能回一个空串 —— 后者在界面上就是「浮窗里什么都没有」。
-   * 档位不该成为整条链路的前提，所以失败或空结果都退回默认档重来一次。
+   * 所以从最省时的一档开始试，抛错或返回空都退一档，最后一档不传参数。
    */
   const base = {
     provider: selection.provider,
@@ -329,23 +332,21 @@ export async function translateSelection(ctx, text, options = {}) {
   }
   const diag = options.onDiag
   let lastError = null
-  for (const attempt of [
-    { label: TRANSLATE_EFFORT, params: { ...base, reasoningEffort: TRANSLATE_EFFORT } },
-    { label: 'default', params: base },
-  ]) {
+  for (const effort of TRANSLATE_EFFORTS) {
+    const label = effort ?? 'default'
     try {
-      diag?.({ event: 'selection:attempt', effort: attempt.label, model: selection.model })
-      const out = await streamText(ctx, attempt.params)
+      diag?.({ event: 'selection:attempt', effort: label, model: selection.model })
+      const out = await streamText(ctx, effort ? { ...base, reasoningEffort: effort } : base)
       if (out) {
-        diag?.({ event: 'selection:ok', effort: attempt.label, chars: out.length })
+        diag?.({ event: 'selection:ok', effort: label, chars: out.length })
         return out
       }
-      diag?.({ event: 'selection:empty', effort: attempt.label })
+      diag?.({ event: 'selection:empty', effort: label })
     } catch (error) {
       lastError = error
       diag?.({
         event: 'selection:attempt-error',
-        effort: attempt.label,
+        effort: label,
         message: String(error?.message ?? error).slice(0, 200),
       })
     }

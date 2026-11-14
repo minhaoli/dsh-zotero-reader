@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * 划词翻译的降级与超时。
+ * 划词翻译的降级链与超时。
  *
  * 锁的是「浮窗打开了但里面什么都没有」这个症状。它的成因不止一种，
  * 但这几种都不该让用户看到空白：
  *
- *   1. 推理档位（现为 low）是硬编码的优化。若当前模型没公布这个取值，
- *      请求可能被拒，也可能静默回空串 —— 后者在界面上就是一片空白。
+ *   1. 推理档位是硬编码的优化。模型不公布某个取值时，请求可能被拒，
+ *      也可能静默回空串 —— 后者在界面上就是一片空白。
  *   2. 上游不回包时，`for await` 会一直挂着，浮窗无限转圈。
  *
- * 所以：档位失败或空结果都要退回模型默认档重来一次；并且必须有总时长上限。
+ * 所以档位按 off → low → 模型默认 逐级回退，并且有总时长上限。
  * 这里用假 ctx 直接跑 translateSelection，断言的是行为，不是源码长相。
  *
  * 跑法：node test/check-selection-fallback.mjs
@@ -24,7 +24,10 @@ function check(label, ok, detail) {
 
 const selection = { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
 
-/** 记录每次调用的参数，按次数决定返回什么。 */
+/**
+ * 记录每次调用的参数，按次数决定这一次返回什么。
+ * behave(n, params) 返回 'ok' | 'empty' | 'throw'。
+ */
 function makeCtx(behave) {
   const calls = []
   return {
@@ -48,51 +51,58 @@ function makeCtx(behave) {
   }
 }
 
-/* ---------- 1. 第一次空结果 → 退回默认档重试 ---------- */
+/* ---------- 1. off 回空 → 退到 low 成功 ---------- */
 {
   const { ctx, calls } = makeCtx((n) => (n === 1 ? 'empty' : 'ok'))
   const diag = []
   const out = await translateSelection(ctx, 'Some English text.', { onDiag: (e) => diag.push(e) })
 
-  check('空结果后会重试', calls.length === 2, `实际调用 ${calls.length} 次`)
-  check('首次尝试带 reasoningEffort=low', calls[0]?.reasoningEffort === 'low',
+  check('off 空结果后退到低一档', calls.length === 2, `实际调用 ${calls.length} 次`)
+  check('首选档是 off', calls[0]?.reasoningEffort === 'off',
     `实际 ${JSON.stringify(calls[0]?.reasoningEffort)}`)
-  check('重试不再指定档位（交给模型默认）', calls[1] && !('reasoningEffort' in calls[1]))
-  check('返回的是重试的文本', out === '这是译文。', `实际拿到 ${JSON.stringify(out)}`)
-  check('只取 text-delta，不混入 reasoning',
-    !out.includes('思考内容'), '推理增量不能当译文')
-  check('诊断里能读出「第一次是空」', diag.some((d) => d.event === 'selection:empty'))
-  check('诊断里能读出「哪一档成功」', diag.some((d) => d.event === 'selection:ok' && d.effort === 'default'))
+  check('第二档是 low', calls[1]?.reasoningEffort === 'low',
+    `实际 ${JSON.stringify(calls[1]?.reasoningEffort)}`)
+  check('返回的是 low 档拿到的文本', out === '这是译文。', `实际拿到 ${JSON.stringify(out)}`)
+  check('只取 text-delta，不混入 reasoning', !out.includes('思考内容'))
+  check('诊断里能读出「哪一档空、哪一档成功」',
+    diag.some((d) => d.event === 'selection:empty' && d.effort === 'off') &&
+    diag.some((d) => d.event === 'selection:ok' && d.effort === 'low'))
 }
 
-/* ---------- 2. 第一次抛错 → 同样退回默认档 ---------- */
+/* ---------- 2. off / low 都被拒 → 退到模型默认档 ---------- */
 {
-  const { ctx, calls } = makeCtx((n) => (n === 1 ? 'throw' : 'ok'))
+  const { ctx, calls } = makeCtx((n) => (n <= 2 ? 'throw' : 'ok'))
   const diag = []
   const out = await translateSelection(ctx, 'Some English text.', { onDiag: (e) => diag.push(e) })
 
-  check('档位被拒后也会重试', calls.length === 2)
-  check('被拒后仍能拿到译文', out === '这是译文。')
-  check('诊断里记下了拒绝原因', diag.some((d) => d.event === 'selection:attempt-error'))
+  check('两档被拒后仍会试第三档', calls.length === 3, `实际调用 ${calls.length} 次`)
+  check('第三档不再指定档位（交给模型默认）',
+    calls[2] && !('reasoningEffort' in calls[2]))
+  check('三档链路仍能拿到译文', out === '这是译文。')
+  check('每次被拒都留下诊断',
+    diag.filter((d) => d.event === 'selection:attempt-error').length === 2)
 }
 
-/* ---------- 3. 两次都空 → 不抛错，返回空串（前端据此提示） ---------- */
+/* ---------- 3. 三档都回空 → 不抛错，返回空串（前端据此提示） ---------- */
 {
   const { ctx, calls } = makeCtx(() => 'empty')
   const diag = []
   const out = await translateSelection(ctx, 'text', { onDiag: (e) => diag.push(e) })
 
-  check('两次都空时返回空串而不是抛错', out === '')
-  check('两次都空时确实试了两档', calls.length === 2)
-  check('两条空结果都有诊断', diag.filter((d) => d.event === 'selection:empty').length === 2)
+  check('三档都空时返回空串而不是抛错', out === '')
+  check('三档都空时确实走完三级', calls.length === 3, `实际调用 ${calls.length} 次`)
+  check('三条空结果都有诊断',
+    diag.filter((d) => d.event === 'selection:empty').length === 3)
 }
 
-/* ---------- 4. 两次都失败 → 抛出最后一次错误 ---------- */
+/* ---------- 4. 三档都失败 → 抛出最后一次错误 ---------- */
 {
-  const { ctx } = makeCtx(() => 'throw')
+  const { ctx, calls } = makeCtx(() => 'throw')
   let message = ''
   try { await translateSelection(ctx, 'text', {}) } catch (e) { message = String(e?.message ?? e) }
-  check('两次都失败时抛出错误（前端会显示原因）', message.includes('unsupported reasoning effort'))
+  check('三档都失败时抛出错误（前端会显示原因）',
+    message.includes('unsupported reasoning effort'))
+  check('失败路径也试满了三档', calls.length === 3)
 }
 
 /* ---------- 5. 没有可用模型时给出可操作的话 ---------- */
@@ -103,12 +113,14 @@ function makeCtx(behave) {
   check('缺模型时报「没有可用的模型」', /没有可用的模型/.test(message), `实际：${message}`)
 }
 
-/* ---------- 6. 超时上限存在（源码断言，行为测试要等 60 秒不划算） ---------- */
+/* ---------- 6. 超时上限存在（行为测试要等 60 秒不划算） ---------- */
 {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../host/translate.js', import.meta.url), 'utf8')
   check('划词请求有总时长上限', /SELECTION_TIMEOUT_MS\s*=\s*60_000/.test(src))
   check('超时通过 AbortController 生效', /ctrl\.abort\(\)/.test(src) && /signal: ctrl\.signal/.test(src))
+  check('回退序列写在一处（off → low → 默认）',
+    /TRANSLATE_EFFORTS\s*=\s*\['off',\s*'low',\s*null\]/.test(src))
 }
 
 console.log(failed === 0 ? '\n===== 全部通过 =====' : `\n===== ${failed} 项失败 =====`)
