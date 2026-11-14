@@ -37,8 +37,24 @@ check('存在 scrollPageIntoView()', /function scrollPageIntoView\(/.test(src))
  * 注释误当成实现（这里踩过：注释中的「先 scrollIntoView」让断言假通过/假失败）。
  */
 const fnStart = src.indexOf('function scrollPageIntoView(')
-const fnBody = fnStart > 0 ? src.slice(fnStart, fnStart + 1400) : ''
+/**
+ * 边界按**结构**取，不按字符数。
+ *
+ * 原来写 `slice(fnStart, fnStart + 1400)`，后来函数里加了一段解释
+ * target 夹取的注释，`scroller.scrollTop =` 就被挤出窗口，
+ * 「先 scrollIntoView 再精调」这条断言随即假失败（代码其实是对的）。
+ * 这类固定窗口的坑已经踩过多次，统一改成取到下一个函数声明为止。
+ */
+const fnBody = (() => {
+  if (fnStart <= 0) return ''
+  const tail = src.slice(fnStart)
+  const next = tail.indexOf('\n    function ', 10)
+  return next > 0 ? tail.slice(0, next) : tail.slice(0, 6000)
+})()
 check('函数体已定位（负向断言的前提）', fnBody.length > 300)
+check('函数体边界完整（含末尾的 return 判据）',
+  fnBody.includes('Math.abs(scroller.scrollTop - target)'),
+  '切片不完整时下面的位置类断言会集体误报')
 check('它用 findScrollParent 找真正的滚动祖先', /findScrollParent\(pageEl\)/.test(fnBody))
 check('它先 scrollIntoView 再精调',
   (() => {

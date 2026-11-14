@@ -68,9 +68,28 @@ check('置位不依赖成功分支', !/if\s*\(\s*ok\s*\)/.test(between),
 
 /* ---- 4. 保底闸 ---- */
 
-check('有保底闸（3 秒后强制放行）',
-  /setTimeout\(\(\) => \{ if \(!disposed\) resumeDoneRef\.current = true \}, 3000\)/.test(src),
+/**
+ * 保底闸必须是「有条件的兜底」，不能无条件放行。
+ *
+ * 最初写成 `setTimeout(() => { if (!disposed) resumeDoneRef.current = true }, 3000)`，
+ * 断言也就按那行字面量写。后来发现无条件放行会让恢复期抛的
+ * pagechanging(1) 漏进来、位置又被写成第 1 页 —— 正是「闪回第一页」复发的路径。
+ * 现在改成先判 `disposed || resumeDoneRef.current` 再放行，并留一条
+ * viewer:resume-timeout 日志便于现场判断是否真的超时过。
+ *
+ * 断言跟着行为走：既要求存在兜底（否则保存会永久失效），
+ * 也要求它不无条件放行（否则会覆盖位置）。
+ */
+const guardTimeout = /setTimeout\(\(\) => \{[\s\S]{0,200}?resumeDoneRef\.current = true[\s\S]{0,80}?\},\s*\d+\)/.test(src)
+check('有保底闸（恢复卡住时不会让保存永久失效）', guardTimeout,
   'applyResume 若因异常没置位，保存会永久失效 —— 那比回第一页更糟')
+
+check('保底闸不是无条件放行',
+  /if \(disposed \|\| resumeDoneRef\.current\) return/.test(src),
+  '无条件放行会让恢复期的 pagechanging(1) 漏进来，位置又被覆盖成第 1 页')
+
+check('超时时留了日志（能判断是否真触发过）',
+  /event: 'viewer:resume-timeout'/.test(src))
 
 /* ---- 5. 不该顺手破坏的 ---- */
 

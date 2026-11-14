@@ -1557,7 +1557,26 @@ window.__ModuleLoader__.load({
         const pageH = pageEl.clientHeight || 0
         // 页首 + 页内偏移（offset 是 0..1 的比例，落在两页之间时用）
         const pageTop = pageEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
-        const target = pageTop - 8 + pageH * Math.min(0.98, Math.max(0, offset))
+        /**
+         * 目标位置要夹在滚动区间内。
+         *
+         * 原来直接写 `pageTop - 8`，而第 1 页的 pageTop 是 0，算出来 -8。
+         * `scrollTop` 最小是 0，永远差 8 像素 —— 于是下面那句
+         * `Math.abs(scrollTop - target) <= 2` 对第 1 页**恒为 false**。
+         *
+         * 后果不是「第 1 页滚不动」这么简单：恢复流程拿 scrolled=false
+         * 当失败，白白重试 25 次（日志 attempts=25 ok=False），
+         * 期间 resumeDoneRef 一直不置位，用户这段时间的翻页全不被记录，
+         * 而 pdf.js 在 setDocument 后抛的 pagechanging(1) 恰好在这时漏进来 ——
+         * 位置就被覆盖成第 1 页，形成「刷新后总是回第一页」的循环。
+         *
+         * 夹住之后，第 1 页的 target 就是 0，滚到位即判定成功。
+         */
+        const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+        const target = Math.min(
+          maxTop,
+          Math.max(0, pageTop - 8 + pageH * Math.min(0.98, Math.max(0, offset))),
+        )
         if (Math.abs(scroller.scrollTop - target) > 2) scroller.scrollTop = target
         return Math.abs(scroller.scrollTop - target) <= 2
       } catch { return false }
@@ -3630,6 +3649,19 @@ window.__ModuleLoader__.load({
                    * 失败也要置位：如果一直不置位，用户后续的手动翻页都不会
                    * 被记住，那比「恢复到第一页」更糟。
                    */
+                  /**
+                   * **置位之前先把"当前页"校正成恢复目标。**
+                   *
+                   * 恢复期间的 pagechanging 都被守卫挡掉了，所以
+                   * lastSavedPageRef 还停在旧值（可能是 0）。
+                   * 如果直接置位，下一次 pagechanging 之前若发生 cleanup，
+                   * 写进 localStorage 的就是那个旧值 —— 位置再次丢失。
+                   *
+                   * 这里主动对齐到 resumePage，等于把「我确实停在这一页」
+                   * 这件事落定，之后的翻页再正常覆盖。
+                   */
+                  lastSavedPageRef.current = resumePage
+                  lastSavedOffsetRef.current = resumeOffset
                   resumeDoneRef.current = true
                   reportDiag({
                     event: 'viewer:resume-applied',
@@ -3644,16 +3676,23 @@ window.__ModuleLoader__.load({
                 } catch { /* 忽略单次失败，下轮再试 */ }
               }
               /**
-               * 保底闸：无论如何 3 秒后都允许写盘。
+               * 保底闸：3 秒后如果恢复仍未落地，就放行写盘。
                *
-               * applyResume 内部整体包着 try/catch（单次失败下一拍再试），
-               * 万一它因为 dispose、异常或某条早期 return 没走到置位那一步，
-               * resumeDoneRef 就会一直是 false —— 后果是用户之后翻页**全部
-               * 不被记住**，比「恢复到第一页」更糟。
+               * 为什么需要：applyResume 内部整体包着 try/catch，
+               * 万一因 dispose、异常或某条早期 return 没走到置位那一步，
+               * resumeDoneRef 会一直是 false —— 用户之后翻页**全部不被记住**，
+               * 那比「恢复到第一页」更糟。
                *
-               * 宁可让一次不完美的恢复参与保存，也不能让保存永久失效。
+               * 但**不能无条件放行**：如果恢复还在重试中就把闸开了，
+               * pdf.js 期间抛的 pagechanging(1) 会漏进来，位置又被写成第 1 页
+               * （这正是「闪回第一页」复发的路径）。所以只在「还没落地」时兜底，
+               * 而且兜底只做一次。
                */
-              setTimeout(() => { if (!disposed) resumeDoneRef.current = true }, 3000)
+              setTimeout(() => {
+                if (disposed || resumeDoneRef.current) return
+                reportDiag({ event: 'viewer:resume-timeout', itemKey })
+                resumeDoneRef.current = true
+              }, 3000)
               // 首帧之后开始补：给 pdf.js 建页视图留时间
               setTimeout(() => applyResume(0), 120)
             } catch { /* 早期版本没有 update，忽略 */ }
