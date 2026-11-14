@@ -3000,7 +3000,12 @@ window.__ModuleLoader__.load({
             const modUrl = await importFromSource(`${API}/vendor/pdf_viewer.mjs`)
             const viewerMod = await import(/* @vite-ignore */ modUrl)
             perf.attribute('load-viewer-module', modWin)
-            const { PDFViewer, EventBus, PDFLinkService } = viewerMod
+            /**
+             * `PDFPageView` 一起解构出来：它用于关掉文本层的无障碍排序
+             * （见下面 viewer:a11y-disabled 那段）。它是 pdf_viewer.mjs
+             * 公开导出的类，不是私有实现。
+             */
+            const { PDFViewer, EventBus, PDFLinkService, PDFPageView } = viewerMod
             if (!PDFViewer) throw new Error('官方 viewer 模块里没有 PDFViewer')
             if (disposed) return
 
@@ -3038,6 +3043,73 @@ window.__ModuleLoader__.load({
             viewerRef.current = viewer
             // 构造开销：与上面的模块加载分开算，两者优化手段不同
             perf.attribute('construct-viewer', modWin)
+
+            /**
+             * **关掉 pdf.js 的文本层无障碍排序。**
+             *
+             * 这是目前最大的单点开销：实测一次打开里
+             * `#compareElementPositions` 被调 113 次、累计 14.7 秒，
+             * 占 longTask 的 53%（单次最高 168ms）。
+             *
+             * 它做的事在 TextAccessibilityManager.enable() 里：
+             *   this.#textChildren.sort(#compareElementPositions)
+             * 对整页文本 span 排序，而**每次比较要读 2 次
+             * getBoundingClientRect** —— 一页上百个 span，比较上千次，
+             * 每次读取都可能触发全文档重排（日志 reReadMax≈0 说明读取
+             * 本身极快，代价全在「还前面 DOM 写入的债」）。
+             *
+             * 排序的**唯一用途**是给文本层 span 设 `aria-owns`，让屏幕
+             * 阅读器按视觉顺序朗读（见 #addIdToAriaOwns）。它不影响
+             * canvas 画面、选词、高亮、批注定位、复制粘贴。
+             *
+             * 做法：包住 `PDFPageView.prototype.draw`，在调用前把该页视图的
+             * `_accessibilityManager` 换成空壳。两条弯路记下来：
+             *   · 传 null 不行 —— pdf.js 写的是 `||= new TextAccessibilityManager()`，
+             *     null 会被覆盖成真对象，必须传空壳才挡得住
+             *   · 遍历 viewer._pages 也不可靠 —— 那个数组会被整体重新赋值
+             *     （见 pdf_viewer.mjs L8720/8738/8792），覆盖 push 会失效。
+             *     改原型则与数组生命周期无关，新页老页都覆盖得到
+             *
+             * 空壳要满足 pdf.js 的六处调用，且 enable 不能抛 ——
+             * 真实现在重复调用时会抛 "already enabled"。
+             */
+            const noopAccessibility = {
+              setTextMapping() {},
+              enable() {},
+              disable() {},
+              addPointerInTextLayer() { return null },
+              removePointerInTextLayer() {},
+              moveElementInDOM() {},
+            }
+            let a11yPatched = false
+            try {
+              /**
+               * `PDFPageView` 是 pdf_viewer.mjs 公开导出的（见其末尾 export 列表），
+               * 所以直接改它的原型最可靠 —— 不用猜实例字段、也不受
+               * viewer._pages 数组被整体重建的影响（见 L8720/8738/8792）。
+               *
+               * 之前试过两条弯路：
+               *   · 遍历 viewer._pages 逐个覆盖 → 构造 PDFViewer 时那个数组还是空的
+               *   · 覆盖 _pages.push → 数组会被重新赋值，覆盖即失效
+               */
+              if (PDFPageView && PDFPageView.prototype
+                  && typeof PDFPageView.prototype.draw === 'function'
+                  && !PDFPageView.prototype.__zrA11yPatched) {
+                const origDraw = PDFPageView.prototype.draw
+                PDFPageView.prototype.draw = function patchedDraw(...args) {
+                  if (this && this._accessibilityManager == null) {
+                    this._accessibilityManager = noopAccessibility
+                  }
+                  return origDraw.apply(this, args)
+                }
+                PDFPageView.prototype.__zrA11yPatched = true
+                a11yPatched = true
+              }
+              reportDiag({ event: 'viewer:a11y-disabled', patched: a11yPatched })
+            } catch (e) {
+              // 覆盖失败不影响阅读，只是会慢回去
+              reportDiag({ event: 'viewer:a11y-disable-failed', message: String(e?.message ?? e) })
+            }
 
             /**
              * 视口顶部「落在当前页的百分之几」。
