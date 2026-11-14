@@ -5400,17 +5400,37 @@ window.__ModuleLoader__.load({
         const text = selbar?.text
         if (!text) return
         setSelbar(null)
+        const mode = kind === 'explain' ? 'explain' : 'translate'
         // 浮窗沿用原来的近似摆位（选区下方 42px），只是坐标改从锚点取
         setPop({ x: popXFromAnchor(selbar), y: popYFromAnchor(selbar), text: '', loading: true, title: kind === 'explain' ? t('explainSelection') : t('translateSelection') })
+        /**
+         * **三态诊断 + 超时兜底。**
+         *
+         * 「没有返回任何翻译内容」在界面上只剩一片空白，而空白有两种完全不同的
+         * 成因：HTTP 200 但 `text` 是空串（模型没吐 text-delta），或者请求根本没
+         * 回来（浮窗永远转圈）。两种改法相反，所以把开始 / 完成 / 失败都记进日志。
+         *
+         * 90 秒兜底同理：没有它，请求挂住时浮窗会无限转圈，看不出是"没返回"。
+         */
+        reportDiag({ event: 'selection:start', mode, chars: text.length })
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => { try { ctrl.abort() } catch { /* ignore */ } }, 90000)
         try {
           const data = await fetchJson(`${API}/selection`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, mode: kind === 'explain' ? 'explain' : 'translate' }),
+            body: JSON.stringify({ text, mode }),
+            signal: ctrl.signal,
           })
-          setPop((prev) => (prev ? { ...prev, text: data.text ?? '', loading: false } : prev))
+          const out = typeof data.text === 'string' ? data.text : ''
+          reportDiag({ event: 'selection:done', mode, chars: out.length, head: out.slice(0, 80) })
+          setPop((prev) => (prev ? { ...prev, text: out || '模型没有返回内容', loading: false } : prev))
         } catch (e) {
-          setPop((prev) => (prev ? { ...prev, text: e.message || String(e), loading: false } : prev))
+          const message = e?.name === 'AbortError' ? '翻译超时：90 秒内没有返回' : (e.message || String(e))
+          reportDiag({ event: 'selection:error', mode, message: String(message).slice(0, 300), aborted: e?.name === 'AbortError' })
+          setPop((prev) => (prev ? { ...prev, text: message, loading: false } : prev))
+        } finally {
+          clearTimeout(timer)
         }
       }, [selbar, t])
 
