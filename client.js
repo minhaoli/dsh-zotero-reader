@@ -737,7 +737,21 @@ window.__ModuleLoader__.load({
             layoutOutsideMs: Math.round(outsideMs),
             layoutOutsideCalls: outsideCalls,
             layoutTop: topGroups(5),
-            layoutStacks: topStacks(5),
+            layoutStacks: topStacks(10),
+            /**
+             * 全部慢读的**总量**，不受 top-N 截断影响。
+             *
+             * 只给榜单会漏：榜单按单条累计耗时排序取前十，若慢读很分散
+             * （每条都只占一点），前十加起来远小于实际总量，看着像「没热点」，
+             * 实际上是「到处都是」——这两种情况的改法完全不同。
+             * layoutStackTotal 与 layoutMs 的比值能直接告诉我们是哪一种。
+             */
+            layoutStackTotal: (() => {
+              let n = 0
+              let ms = 0
+              for (const g of stacks.values()) { n += g.n; ms += g.ms }
+              return { n, ms: Math.round(ms) }
+            })(),
           }
         }
         function reset() {
