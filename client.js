@@ -2941,6 +2941,15 @@ window.__ModuleLoader__.load({
       const fitModeRef = useRef(false)
       /** 上一次已经写进 localStorage 的页码（去重用，避免同页重复写）。 */
       const lastSavedPageRef = useRef(0)
+      /**
+       * 本次打开的「阅读位置恢复」是否已经落地。
+       *
+       * 在它变 true 之前，pagechanging 只更新界面、**不写盘**。
+       * 原因见 eventBus.on('pagechanging') 里的说明：pdf.js 在 setDocument
+       * 之后会先抛一次 pageNumber=1，若照单全收就会把用户真实位置覆盖成第 1 页，
+       * 下次打开就真的从第一页开始 —— 这是个会自我强化的循环。
+       */
+      const resumeDoneRef = useRef(false)
       /** 上一次保存的页内偏移（0..1）。与页号一起构成「阅读位置」。 */
       const lastSavedOffsetRef = useRef(0)
       /** 页码写入的 debounce 定时器。组件/effect 卸载时要清掉，否则会写到已切走的文献上。 */
@@ -3105,7 +3114,21 @@ window.__ModuleLoader__.load({
                 PDFPageView.prototype.__zrA11yPatched = true
                 a11yPatched = true
               }
-              reportDiag({ event: 'viewer:a11y-disabled', patched: a11yPatched })
+              reportDiag({
+                event: 'viewer:a11y-disabled',
+                patched: a11yPatched,
+                /**
+                 * 带上诊断字段。第一次上线时只打了 patched=false，
+                 * 无法判断是「没导出」「没有 draw」还是「已经打过补丁」——
+                 * 三种情况的修法完全不同。这次一次说清。
+                 */
+                hasClass: Boolean(PDFPageView),
+                hasProto: Boolean(PDFPageView && PDFPageView.prototype),
+                hasDraw: Boolean(PDFPageView && PDFPageView.prototype
+                  && typeof PDFPageView.prototype.draw === 'function'),
+                alreadyPatched: Boolean(PDFPageView && PDFPageView.prototype
+                  && PDFPageView.prototype.__zrA11yPatched),
+              })
             } catch (e) {
               // 覆盖失败不影响阅读，只是会慢回去
               reportDiag({ event: 'viewer:a11y-disable-failed', message: String(e?.message ?? e) })
@@ -3232,6 +3255,12 @@ window.__ModuleLoader__.load({
             }
             // 拿到真实尺寸了，计数归零，下次零尺寸重新从头允许
             zeroSizeRetryRef.current = 0
+            /**
+             * 新一轮加载开始：在阅读位置恢复落地之前，禁止把页码写盘。
+             * 必须放在 setDocument **之前** —— 它一执行，pdf.js 就会先抛
+             * 一次 pageNumber=1 的 pagechanging（见下方监听的说明）。
+             */
+            resumeDoneRef.current = false
             viewer.setDocument(pdf.doc)
             linkService.setDocument(pdf.doc, null)
             reportDiag({ event: 'viewer:doc-set', pages: pdf.doc.numPages })
@@ -3242,6 +3271,25 @@ window.__ModuleLoader__.load({
               if (disposed) return
               setVisiblePage(e.pageNumber)
               setJumpPage(e.pageNumber)
+              /**
+               * **恢复完成前不要记录位置。**
+               *
+               * 这里是「刷新后先回第一页」的根源，一个自我强化的循环：
+               *   ① setDocument 之后 pdf.js 把 currentPageNumber 置为 1，
+               *      并立刻抛一次 pagechanging(pageNumber=1)；
+               *   ② 本回调把它记进 lastSavedPageRef 并 debounce 写盘，
+               *      于是 localStorage 里那篇文献的位置被改成了 1；
+               *   ③ 紧接着 resume-page 去读，读到的就是 1 —— 目标页变成第 1 页；
+               *   ④ cleanup 再把 1 写回去，下次打开还是 1。
+               *
+               * 实测日志的规律正是如此：目标=1 的那些打开，
+               * resume-applied 全是 attempts=25 ok=False
+               * （第 1 页已在顶部，scrollPageIntoView 判不出位移）。
+               *
+               * 用 resumeDoneRef 卡住：恢复真正落地之前，pagechanging
+               * 只用来更新界面显示，不参与持久化。
+               */
+              if (!resumeDoneRef.current) return
               /**
                * 记住读到哪儿 —— 记的是**位置**，不是页号。
                *
@@ -3576,6 +3624,13 @@ window.__ModuleLoader__.load({
                     setTimeout(() => applyResume(attempt + 1), 120)
                     return
                   }
+                  /**
+                   * 恢复落地（无论成败）——从这个时刻起才允许把页码写盘。
+                   *
+                   * 失败也要置位：如果一直不置位，用户后续的手动翻页都不会
+                   * 被记住，那比「恢复到第一页」更糟。
+                   */
+                  resumeDoneRef.current = true
                   reportDiag({
                     event: 'viewer:resume-applied',
                     itemKey,
@@ -3588,6 +3643,17 @@ window.__ModuleLoader__.load({
                   })
                 } catch { /* 忽略单次失败，下轮再试 */ }
               }
+              /**
+               * 保底闸：无论如何 3 秒后都允许写盘。
+               *
+               * applyResume 内部整体包着 try/catch（单次失败下一拍再试），
+               * 万一它因为 dispose、异常或某条早期 return 没走到置位那一步，
+               * resumeDoneRef 就会一直是 false —— 后果是用户之后翻页**全部
+               * 不被记住**，比「恢复到第一页」更糟。
+               *
+               * 宁可让一次不完美的恢复参与保存，也不能让保存永久失效。
+               */
+              setTimeout(() => { if (!disposed) resumeDoneRef.current = true }, 3000)
               // 首帧之后开始补：给 pdf.js 建页视图留时间
               setTimeout(() => applyResume(0), 120)
             } catch { /* 早期版本没有 update，忽略 */ }
