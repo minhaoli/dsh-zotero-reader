@@ -1335,6 +1335,33 @@ window.__ModuleLoader__.load({
        * 设成 inset:0 会塌成零高度，页面就画不出来（实测：日志 viewer:ready 但一片空白）。
        */
       .zr-pdfviewer-host{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
+      /*
+       * 恢复阅读位置期间遮住画布。
+       *
+       * 为什么需要：pdf.js 在 setDocument 之后**总会先渲染第 1 页** ——
+       * 那时页容器刚建出来、尺寸还没量准，无法滚动；而目标页要等 1.2–1.6 秒
+       * 才画好。这段窗口里用户看到的就是第 1 页，随后才跳到目标页，
+       * 表现为「先闪回第一页再回到当前页」。
+       *
+       * 实测时序（日志）：
+       *   viewer:doc-set      → 目标=6
+       *   +320ms  paint page=1   ← 用户在这里看到第 1 页
+       *   +1522ms paint page=6   ← 这时才到正确位置
+       *
+       * 用 visibility 而不是 display:none —— 后者会让容器塌成 0 高，
+       * pdf.js 立刻算不出页尺寸，反而更糟（这个坑项目里踩过）。
+       * visibility 不改变布局，只是不画，隐藏期间 pdf.js 照常建页渲染，
+       * 等目标页真的画好了再揭开。
+       */
+      .zr-pdfviewer-host[data-restoring="1"] .zr-pdfviewer-container{visibility:hidden}
+      /*
+       * 提示文字用伪元素，不额外插 DOM ——
+       * host.innerHTML 会被反复清空重建，普通子元素得跟着一起管，
+       * 伪元素则完全跟着 data-restoring 走，没有生命周期问题。
+       */
+      .zr-pdfviewer-host[data-restoring="1"]::after{content:"正在恢复阅读位置…";
+        position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+        font-size:12px;color:var(--dsh-text-tertiary,#8a9096);pointer-events:none}
       /* 工具条里阅读控件与批注工具之间的分隔线 */
       .zr-sep{width:1px;height:18px;background:var(--dsh-border,#3a3a3a);margin:0 2px;flex:0 0 auto}
       /* 调色板：八个小色块，当前颜色加描边 */
@@ -2969,6 +2996,14 @@ window.__ModuleLoader__.load({
        * 下次打开就真的从第一页开始 —— 这是个会自我强化的循环。
        */
       const resumeDoneRef = useRef(false)
+      /**
+       * 本次要恢复到的目标页（0 表示不需要恢复或还没算出来）。
+       *
+       * 用 ref 而不是闭包变量：`pagerendered` 监听注册在 resumePage 算出来
+       * **之前**（setDocument 之后立刻注册，而页码要等 readSavedPos），
+       * 直接闭包引用会踩 TDZ。ref 则随时可读，且回调触发时一定已赋值。
+       */
+      const resumeTargetRef = useRef(0)
       /** 上一次保存的页内偏移（0..1）。与页号一起构成「阅读位置」。 */
       const lastSavedOffsetRef = useRef(0)
       /** 页码写入的 debounce 定时器。组件/effect 卸载时要清掉，否则会写到已切走的文献上。 */
@@ -3275,6 +3310,56 @@ window.__ModuleLoader__.load({
             // 拿到真实尺寸了，计数归零，下次零尺寸重新从头允许
             zeroSizeRetryRef.current = 0
             /**
+             * **在 setDocument 之前就把目标页算出来，并挂好 pagesinit。**
+             *
+             * 这是「第一页先被渲染」的根治办法。看 pdf.js 的 setDocument 末尾：
+             *   eventBus.dispatch("pagesinit")            ← 页容器已进 DOM、高度已撑开
+             *   if (this.defaultRenderingQueue) this.update()   ← 这里才决定渲染哪些页
+             * 两句在同一个微任务里，pagesinit 在前。
+             *
+             * 所以在 pagesinit 里把 scrollTop 设到目标页，`update()` 第一次
+             * 算可见页得到的就是目标页 —— pdf.js 压根不会去渲染第 1 页。
+             *
+             * 之前三次都没成，因为时机全都不对：
+             *   ① setDocument 之后同步设 currentPageNumber
+             *      → 页视图还没建，赋值被静默丢弃
+             *   ② 等 120ms 用 setTimeout 再设
+             *      → 那时 pdf.js 早在 update() 里决定了画第 1 页
+             *   ③ 完全不设，等页就绪
+             *      → pdf.js 按默认从第 1 页开始渲染
+             * 只有 pagesinit 这个点同时满足「页已就位」和「渲染还没决策」。
+             */
+            const savedPos = readSavedPos(itemKey, pdf.doc.numPages)
+            const resumePage = savedPos?.page ?? 1
+            const resumeOffset = savedPos?.offset ?? 0
+            resumeTargetRef.current = resumePage
+
+            eventBus.on(
+              'pagesinit',
+              () => {
+                if (disposed || resumePage <= 1) return
+                /**
+                 * pagesinit 时页容器刚进 DOM，个别情况下高度还没最终确定，
+                 * 量出来的 pageTop 会偏。重试几帧再放弃 —— 每帧都重新量，
+                 * 一旦滚到位就停。
+                 */
+                let tries = 0
+                const land = () => {
+                  if (disposed) return
+                  const ok = scrollPageIntoView(host, resumePage, resumeOffset)
+                  tries += 1
+                  if (!ok && tries < 6) {
+                    requestAnimationFrame(land)
+                    return
+                  }
+                  reportDiag({ event: 'viewer:pagesinit-land', page: resumePage, ok, tries })
+                }
+                land()
+              },
+              { once: true },
+            )
+
+            /**
              * 新一轮加载开始：在阅读位置恢复落地之前，禁止把页码写盘。
              * 必须放在 setDocument **之前** —— 它一执行，pdf.js 就会先抛
              * 一次 pageNumber=1 的 pagechanging（见下方监听的说明）。
@@ -3364,6 +3449,25 @@ window.__ModuleLoader__.load({
             })
             eventBus.on('pagerendered', (e) => {
               if (disposed) return
+              /**
+               * **目标页画好的这一刻，才揭开恢复期的遮罩。**
+               *
+               * 判据必须是「目标页真的画出来」，不能是「跳转成功」：
+               * applyResume 在 180ms 左右就报告 scrolled=true，
+               * 但那时目标页的 canvas 还没画（要等到 1.2–1.6 秒）。
+               * 提前揭开会让用户看到一片空白，反而更像坏了。
+               *
+               * 用 pagerendered 而不是定时器：它是 canvas 真正画完的锚点，
+               * 不受主线程排队影响。
+               */
+              try {
+                const want = resumeTargetRef.current
+                if (want > 0 && host?.dataset?.restoring === '1' && e.pageNumber === want) {
+                  delete host.dataset.restoring
+                  resumeTargetRef.current = 0
+                  reportDiag({ event: 'viewer:restore-mask', on: false, page: e.pageNumber })
+                }
+              } catch { /* 揭不开最多是多遮一会儿，由下面的兜底收尾 */ }
               /**
                * 性能锚点：pagerendered 在 canvas 真正画完时触发，
                * 不受 setTimeout 排队影响，是「这一页到底什么时候画好」的可信时刻。
@@ -3547,9 +3651,54 @@ window.__ModuleLoader__.load({
                * 页视图没建出来时赋值会被静默丢弃（不报错、不生效）——
                * 所以要重试并用读回值校验。
                */
-              const savedPos = readSavedPos(itemKey, pdf.doc.numPages)
-              const resumePage = savedPos?.page ?? 1
-              const resumeOffset = savedPos?.offset ?? 0
+              // resumePage / resumeOffset 已在 setDocument 之前算好（见 pagesinit 那段），
+              // 这里直接复用 —— 重复声明会报 SyntaxError，而且两处算的值可能不一致。
+
+              /**
+               * **恢复期间先把画布遮起来（目标页不是第 1 页时）。**
+               *
+               * 这是「闪回第一页再回到当前页」的最终解法，原因在实测数据里：
+               *   viewer:doc-set      目标=6
+               *   +320ms  paint page=1    ← 用户此刻看到第 1 页
+               *   +1522ms paint page=6    ← 这才到正确位置
+               *
+               * pdf.js 在 setDocument 之后**必定先渲染第 1 页**：那会儿页容器
+               * 刚建出来、尺寸还没量准，滚不动；而目标页要等 1.2–1.6 秒才画好。
+               * 中间这段窗口无法通过「更早地设页码」消掉 —— 页视图不存在时
+               * 赋值会被静默丢弃（这个行为已经验证过两次）。
+               *
+               * 所以换个思路：不跟 pdf.js 的渲染顺序较劲，而是**不让用户看到
+               * 中间态**。等目标页真正画好的那一刻再揭开（见 pagerendered）。
+               *
+               * 目标页是第 1 页时不遮 —— 那时本来就不用跳，遮一下反而多此一举。
+               */
+              try {
+                if (resumePage > 1 && host) {
+                  host.dataset.restoring = '1'
+                  resumeTargetRef.current = resumePage
+                  reportDiag({ event: 'viewer:restore-mask', on: true, target: resumePage })
+                  /**
+                   * 兜底：4 秒后无论目标页画没画出来都揭开。
+                   *
+                   * 目标页画不出来的情况是存在的（加密页、损坏页、或者 pdf.js
+                   * 判定它不在视口所以不画）。一直遮着等于让阅读器变砖，
+                   * 那比"看到第 1 页"严重得多。
+                   */
+                  setTimeout(() => {
+                    try {
+                      if (disposed) return
+                      if (host?.dataset?.restoring === '1') {
+                        delete host.dataset.restoring
+                        resumeTargetRef.current = 0
+                        reportDiag({ event: 'viewer:restore-mask', on: false, timeout: true })
+                      }
+                    } catch { /* ignore */ }
+                  }, 4000)
+                } else {
+                  delete host?.dataset?.restoring
+                  resumeTargetRef.current = 0
+                }
+              } catch { /* 遮罩失败不影响阅读，最多是能看到中间态 */ }
 
               /**
                * **立刻把页码告诉 viewer，但先别滚动。**
