@@ -1362,6 +1362,22 @@ window.__ModuleLoader__.load({
       .zr-pdfviewer-host[data-restoring="1"]::after{content:"正在恢复阅读位置…";
         position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
         font-size:12px;color:var(--dsh-text-tertiary,#8a9096);pointer-events:none}
+      /*
+       * PDF 内链接的悬停预览。
+       *
+       * 用 position:fixed 而不是 absolute：宿主 .zr-pdfviewer-host 是
+       * overflow:hidden，absolute 定位的提示在贴边时会被裁掉。
+       * fixed 相对视口，直接吃 getBoundingClientRect() 的值，不会被裁剪。
+       * 代价是滚动时位置不会跟着动 —— 但鼠标移出链接就会隐藏，
+       * 实际不会在滚动中停留。
+       */
+      .zr-link-tip{position:fixed;z-index:2147483000;max-width:min(520px,80vw);
+        padding:5px 9px;border-radius:6px;background:var(--dsh-bg-elevated,#2b2b2b);
+        border:1px solid var(--dsh-border,#3f3f3f);box-shadow:0 4px 14px rgba(0,0,0,.35);
+        font-size:11.5px;line-height:1.5;color:var(--dsh-text-primary,#e6e6e6);
+        pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+        opacity:0;transition:opacity .12s}
+      .zr-link-tip[data-on="1"]{opacity:1}
       /* 工具条里阅读控件与批注工具之间的分隔线 */
       .zr-sep{width:1px;height:18px;background:var(--dsh-border,#3a3a3a);margin:0 2px;flex:0 0 auto}
       /* 调色板：八个小色块，当前颜色加描边 */
@@ -3004,6 +3020,15 @@ window.__ModuleLoader__.load({
        * 直接闭包引用会踩 TDZ。ref 则随时可读，且回调触发时一定已赋值。
        */
       const resumeTargetRef = useRef(0)
+      /**
+       * PDF 内链接的监听清理函数。
+       *
+       * 监听器建在 viewer 的 effect 里（那里才拿到 host 与 linkService），
+       * 而那个 effect 的 cleanup 写在很后面、且会被多次触发（切文献、
+       * reloadToken 变化）。用 ref 存一份，cleanup 里直接调，
+       * 避免每次都要把监听器变量再搬一遍。
+       */
+      const disposeLinkHandlersRef = useRef(null)
       /** 上一次保存的页内偏移（0..1）。与页号一起构成「阅读位置」。 */
       const lastSavedOffsetRef = useRef(0)
       /** 页码写入的 debounce 定时器。组件/effect 卸载时要清掉，否则会写到已切走的文献上。 */
@@ -3369,6 +3394,156 @@ window.__ModuleLoader__.load({
             linkService.setDocument(pdf.doc, null)
             reportDiag({ event: 'viewer:doc-set', pages: pdf.doc.numPages })
             perf.attribute('setDocument-total', openWinRef.current)
+
+            /**
+             * **PDF 内链接的点击与悬停预览。**
+             *
+             * 为什么点击不跳转：pdf.js 把 PDF 里的链接渲染成
+             *   <a href="https://..." target="" rel="...">
+             * （见 PDFLinkService.addLinkAttributes，target 取自
+             * externalLinkTarget，我们没传，默认 NONE → 空 target）。
+             * 空 target 等于「当前窗口导航」，而这个页面基址是
+             * `dsh-app://app/` —— Electron 会把这种跨 scheme 导航拦下来，
+             * 于是点了没反应，连错误都没有。
+             *
+             * 内部链接（PDF 里指向本文档某一页的书签）同样是 `<a href="#...">`，
+             * 它依赖 pdf.js 自己那条滚动画布容器的链路 —— 而那条链在侧栏里
+             * 本来就是断的（本项目为此专门实现过 scrollPageIntoView）。
+             * 所以内部跳转也要我们自己接。
+             *
+             * 用 capture 阶段监听并在命中时 stopPropagation：
+             * pdf.js 的处理器挂在 <a> 自身的 onclick 上，事件从 host 往
+             * target 走，capture 先到、能把它拦下来。
+             */
+            const onPdfLinkClick = (event) => {
+              const anchor = event.target?.closest?.('a[href]')
+              if (!anchor || !host.contains(anchor)) return
+              const href = anchor.getAttribute('href') || ''
+              if (!href) return
+
+              // ---- 内部跳转：-#page=N 或 -#<具名目标> ----
+              if (href.startsWith('#')) {
+                event.preventDefault()
+                event.stopPropagation()
+                const pageMatch = /^#page=(\d+)/i.exec(href)
+                if (pageMatch) {
+                  const n = Number(pageMatch[1])
+                  if (Number.isFinite(n) && n > 0) {
+                    try {
+                      viewer.currentPageNumber = n
+                      viewer.update?.()
+                      setVisiblePage(n)
+                      setJumpPage(n)
+                    } catch { /* 页视图未建好时赋值会被丢弃，下面滚动兜住 */ }
+                    scrollPageIntoView(host, n, 0)
+                  }
+                  return
+                }
+                /**
+                 * 具名目标（PDF 里的命名 dest）：交给 pdf.js 自己解析，
+                 * 它会走到我们的 scrollPageIntoView 之外 —— 失败也不致命，
+                 * 至少不会把整个页面导航走。
+                 */
+                try { linkService.navigateTo(href.slice(1)) } catch { /* 忽略 */ }
+                return
+              }
+
+              // ---- 外部链接：开系统浏览器，绝不在这里导航 ----
+              if (/^(https?|mailto|tel):/i.test(href)) {
+                event.preventDefault()
+                event.stopPropagation()
+                try {
+                  /**
+                   * `_blank` + noopener：让宿主按 setWindowOpenHandler 处理。
+                   *
+                   * 宿主的实际规则（已从 app.asar 里确认）：
+                   *   setWindowOpenHandler(({ url }) => {
+                   *     if (destination.protocol === "https:" && !username && !password)
+                   *       shell.openExternal(url)
+                   *     return { action: "deny" }
+                   *   })
+                   *   will-navigate → 非本 origin 一律 preventDefault
+                   *
+                   * 两条都读过，结论是：
+                   *   · https 链接 → 转交系统浏览器，正中预期
+                   *   · http  / mailto / tel → 宿主直接 deny 且不转交，
+                   *     点了仍然没反应（但至少不会把应用导航走）
+                   *
+                   * http 的情况无法在这里解决 —— 宿主只认 https，而我们没有
+                   * shell 权限。悬停预览会显示完整地址，用户可手动复制打开。
+                   * 实际 PDF 里的链接绝大多数是 https（DOI、期刊站），
+                   * 老论文偶尔有 http，属于可接受的边界。
+                   */
+                  window.open(href, '_blank', 'noopener,noreferrer')
+                } catch { /* 被拦就什么都不做，链接仍可从悬停预览里读到 */ }
+                return
+              }
+              // 其余协议（如 zotero://）交给全局拦截器处理，这里不干预
+            }
+
+            /**
+             * 悬停预览。
+             *
+             * 显示完整地址 —— 小标题里被省略的中段只有完整 URL 才看得见，
+             * 这也是判断「这个链接值不值得点」最直接的信息。
+             * 内部跳转则显示目标页号，不然用户只看到 "#page=12" 这种片段。
+             *
+             * 提示节点挂在 document.body 且 position:fixed：
+             * 宿主的 .zr-pdfviewer-host 是 overflow:hidden，
+             * 挂在里面贴边时会被裁掉。
+             */
+            let linkTip = null
+            const ensureTip = () => {
+              if (linkTip && linkTip.isConnected) return linkTip
+              linkTip = document.createElement('div')
+              linkTip.className = 'zr-link-tip'
+              linkTip.setAttribute('data-on', '0')
+              document.body.appendChild(linkTip)
+              return linkTip
+            }
+            const onPdfLinkOver = (event) => {
+              const anchor = event.target?.closest?.('a[href]')
+              if (!anchor || !host.contains(anchor)) return
+              const href = anchor.getAttribute('href') || ''
+              if (!href) return
+              const pageMatch = /^#page=(\d+)/i.exec(href)
+              const label = pageMatch
+                ? `文档内跳转 · 第 ${pageMatch[1]} 页`
+                : href.startsWith('#')
+                  ? `文档内跳转 · ${href.slice(1)}`
+                  : href
+              const tip = ensureTip()
+              tip.textContent = label
+              tip.setAttribute('data-on', '1')
+              /**
+               * 定位：优先放在链接上方；上方空间不够（贴近视口顶部）就放下方。
+               * 左右夹在视口内，避免长 URL 把提示顶出屏幕。
+               */
+              const r = anchor.getBoundingClientRect()
+              const tipW = Math.min(tip.offsetWidth || 240, window.innerWidth - 16)
+              let left = Math.max(8, Math.min(r.left, window.innerWidth - tipW - 8))
+              let top = r.top - 30
+              if (top < 8) top = r.bottom + 8
+              tip.style.left = `${Math.round(left)}px`
+              tip.style.top = `${Math.round(top)}px`
+            }
+            const onPdfLinkOut = (event) => {
+              const anchor = event.target?.closest?.('a[href]')
+              if (!anchor) return
+              if (linkTip) linkTip.setAttribute('data-on', '0')
+            }
+
+            host.addEventListener('click', onPdfLinkClick, true)
+            host.addEventListener('mouseover', onPdfLinkOver)
+            host.addEventListener('mouseout', onPdfLinkOut)
+            const disposeLinkHandlers = () => {
+              try { host.removeEventListener('click', onPdfLinkClick, true) } catch { /* ignore */ }
+              try { host.removeEventListener('mouseover', onPdfLinkOver) } catch { /* ignore */ }
+              try { host.removeEventListener('mouseout', onPdfLinkOut) } catch { /* ignore */ }
+              try { linkTip?.remove() } catch { /* ignore */ }
+              linkTip = null
+            }
+            disposeLinkHandlersRef.current = disposeLinkHandlers
 
             // 官方 viewer 把页码/缩放变化通过 eventBus 广播，转成我们自己的 state
             eventBus.on('pagechanging', (e) => {
@@ -3922,6 +4097,16 @@ window.__ModuleLoader__.load({
 
         return () => {
           disposed = true
+          /**
+           * 先撤掉 PDF 内链接的监听与悬停提示。
+           *
+           * host 会被下一次加载复用（`host.innerHTML = ''` 只清子节点，
+           * host 本身还在），监听器若不清就会**累积**：切三篇文献后
+           * 一次点击会触发三遍，越用越慢。清理函数在 effect 里创建，
+           * 通过 ref 传到这里。
+           */
+          try { disposeLinkHandlersRef.current?.() } catch { /* ignore */ }
+          disposeLinkHandlersRef.current = null
           /**
            * **切走之前先把当前页同步落盘，再清定时器。**
            *
