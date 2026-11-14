@@ -5,7 +5,7 @@
  * 锁的是「浮窗打开了但里面什么都没有」这个症状。它的成因不止一种，
  * 但这几种都不该让用户看到空白：
  *
- *   1. `reasoningEffort: 'off'` 是硬编码的优化。若当前模型没公布这个档位，
+ *   1. 推理档位（现为 low）是硬编码的优化。若当前模型没公布这个取值，
  *      请求可能被拒，也可能静默回空串 —— 后者在界面上就是一片空白。
  *   2. 上游不回包时，`for await` 会一直挂着，浮窗无限转圈。
  *
@@ -55,7 +55,8 @@ function makeCtx(behave) {
   const out = await translateSelection(ctx, 'Some English text.', { onDiag: (e) => diag.push(e) })
 
   check('空结果后会重试', calls.length === 2, `实际调用 ${calls.length} 次`)
-  check('首次尝试带 reasoningEffort=off', calls[0]?.reasoningEffort === 'off')
+  check('首次尝试带 reasoningEffort=low', calls[0]?.reasoningEffort === 'low',
+    `实际 ${JSON.stringify(calls[0]?.reasoningEffort)}`)
   check('重试不再指定档位（交给模型默认）', calls[1] && !('reasoningEffort' in calls[1]))
   check('返回的是重试的文本', out === '这是译文。', `实际拿到 ${JSON.stringify(out)}`)
   check('只取 text-delta，不混入 reasoning',

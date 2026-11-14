@@ -134,7 +134,7 @@ async function translateOnce(ctx, text, target, signal) {
   if (!selection.provider || !selection.model) {
     throw new Error('没有可用的模型：宿主未配置默认模型，且插件设置里未指定翻译模型。')
   }
-  // 翻译本身不思考：固定 off（模型/provider 跟随当前会话默认）
+  // 翻译的思考档位固定为 TRANSLATE_EFFORT（模型/provider 跟随当前会话默认）
   let out = ''
   const stream = ctx.llm.stream({
     provider: selection.provider,
@@ -151,12 +151,14 @@ async function translateOnce(ctx, text, target, signal) {
 }
 
 /**
- * 翻译/解读的思考程度：固定 off。
+ * 翻译/解读的思考程度：固定 low。
  *
- * 翻译是转写任务，思考只增加等待时间，不提升质量。
+ * 原来是 off —— 翻译是转写任务，思考只增加等待时间。但 off 并不是所有模型
+ * 都公布的档位，不认时可能被拒、也可能静默回空串（界面上就是一片空白）。
+ * 用户明确要求改成 low：仍是最轻的一档，又落在绝大多数模型公布的取值里。
  * 模型/provider 仍然跟随当前会话的默认选择（用户要求「其他的和当前模型一致」）。
  */
-const TRANSLATE_EFFORT = 'off'
+const TRANSLATE_EFFORT = 'low'
 
 export function pickSelection(ctx, override) {
   const fallback = () => {
@@ -313,10 +315,9 @@ export async function translateSelection(ctx, text, options = {}) {
   const prompt = mode === 'explain' ? text : text
 
   /**
-   * 两次尝试：先按「不思考」的档位，不行再退回模型默认档。
+   * 两次尝试：先按设定档位，不行再退回模型默认档。
    *
-   * `reasoningEffort: 'off'` 只是省时间的优化（翻译是转写任务，思考没有收益），
-   * 但它依赖该模型公布过这个档位。有的模型只公布 low/medium/high，此时请求
+   * 推理档位只是省时间的优化，但它依赖该模型公布过这个取值。不公布时请求
    * 可能被上层拒绝，也可能回一个空串 —— 后者在界面上就是「浮窗里什么都没有」。
    * 档位不该成为整条链路的前提，所以失败或空结果都退回默认档重来一次。
    */
@@ -329,7 +330,7 @@ export async function translateSelection(ctx, text, options = {}) {
   const diag = options.onDiag
   let lastError = null
   for (const attempt of [
-    { label: 'off', params: { ...base, reasoningEffort: TRANSLATE_EFFORT } },
+    { label: TRANSLATE_EFFORT, params: { ...base, reasoningEffort: TRANSLATE_EFFORT } },
     { label: 'default', params: base },
   ]) {
     try {
