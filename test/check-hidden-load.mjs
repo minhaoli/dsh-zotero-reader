@@ -81,16 +81,32 @@ check('PapersView 接受 paneActive 参数',
 check('papersPane 按 tab 状态传入 paneActive',
   /paneActive:\s*tab === 'papers'/.test(src))
 
-/* ---------- 4. 零尺寸不得 setDocument ---------- */
+/* ---------- 4. 零尺寸不得 setDocument，且不得自旋 ---------- */
 check('存在零尺寸守卫', /if\s*\(!sized \|\| container\.clientWidth === 0 \|\| container\.clientHeight === 0\)/.test(src))
-check('零尺寸会退回并重来（自增 reloadToken）',
-  /viewer:defer-zero-size[\s\S]{0,700}?setReloadToken\(\(v\) => v \+ 1\)/.test(src))
+/**
+ * 区块按结构切到 setDocument 为止，不用固定字符窗口。
+ *
+ * 原来这两条断言写的是 `zeroSizeRetryRef.current < 8` 和
+ * `zeroSizeRetryRef.current = 0` —— 它们把「自旋重来」当成了正确行为。
+ * 实测日志（同一毫秒两条 pdf:start）：隐藏实例每轮重新下载 650KB、
+ * 重新解析整篇 PDF，连着重来 9 次。所以断言要改成「只等、不自旋」。
+ */
+const zeroGuardIdx = src.indexOf('if (!sized || container.clientWidth === 0')
+const zeroBlock = zeroGuardIdx > 0
+  ? src.slice(zeroGuardIdx, src.indexOf('viewer.setDocument(pdf.doc)'))
+  : ''
+check('零尺寸区块已定位（负向断言的前提）', zeroBlock.length > 300)
+check('零尺寸改为等 ResizeObserver，不再按次数自旋',
+  /new ResizeObserver/.test(zeroBlock) && !/zeroSizeRetryRef/.test(src),
+  '自旋每轮都要重新下载并解析整篇 PDF（实测连着重来 9 次）')
+check('尺寸真正出现后触发一次重来', /setReloadToken\(\(v\) => v \+ 1\)/.test(zeroBlock))
 check('零尺寸路径在 setDocument 之前返回',
   src.indexOf('viewer:defer-zero-size') < src.indexOf('viewer.setDocument(pdf.doc)'))
-check('重试有上限，不会无限自旋',
-  /zeroSizeRetryRef\.current < 8/.test(src))
-check('拿到尺寸后重试计数归零',
-  /zeroSizeRetryRef\.current = 0/.test(src))
+
+/* ---------- 4b. 数据 effect 在下载之前就挡住隐藏实例 ---------- */
+check('尺寸闸门在取字节之前（隐藏实例根本不发请求）',
+  src.indexOf('pdf:await-size') > 0 && src.indexOf('pdf:await-size') < src.indexOf("event: 'pdf:start'"))
+check('等尺寸的观察者会随卸载断开', /sizeObserver\?\.disconnect\(\)/.test(src))
 
 /* ---------- 5. waitForSize 不再长等 ---------- */
 check('waitForSize 上限已收紧到 90 帧',

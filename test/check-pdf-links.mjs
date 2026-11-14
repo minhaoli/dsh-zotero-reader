@@ -120,6 +120,24 @@ check('监听 mouseover / mouseout 并清理',
   /addEventListener\('mouseover', onPdfLinkOver\)/.test(src) &&
     /addEventListener\('mouseout', onPdfLinkOut\)/.test(src))
 
+/**
+ * 悬停处理器区块：切到下一个顶层声明为止（同点击区块的做法）。
+ *
+ * pdf.js 自己给链接挂了 `title = overlaidText`（链接覆盖的那段正文），
+ * 浏览器据此弹原生提示框；不删掉就会和我们的地址框同时出现 ——
+ * 用户看到的就是「悬停弹出两个框，一个是文档内跳转，一个是光标所在文字」。
+ * 原生提示约 500ms 后才弹，在 mouseover 这一拍删除来得及。
+ */
+const overBlock = (() => {
+  const tail = src.slice(overIdx)
+  const next = tail.indexOf('\n            const onPdfLinkOut', 10)
+  return next > 0 ? tail.slice(0, next) : tail.slice(0, 3000)
+})()
+check('悬停区块已定位（负向断言的前提）', overBlock.length > 200)
+check('悬停时删掉 pdf.js 挂的 title（否则原生提示框重叠）',
+  /removeAttribute\('title'\)/.test(overBlock),
+  'annotation_layer 里 link.title = overlaidText，会出现第二个框显示原文文字')
+
 check('提示用 position:fixed（宿主 overflow:hidden 会裁掉 absolute）',
   /\.zr-link-tip\{position:fixed/.test(src),
   '.zr-pdfviewer-host 是 overflow:hidden，absolute 贴边会被裁剪')

@@ -2614,14 +2614,6 @@ window.__ModuleLoader__.load({
        * viewer 的 effect 重建时按同一把钥匙读回来。
        */
       const [reloadToken, setReloadToken] = useState(0)
-      /**
-       * 因「容器零尺寸」而自动重来的次数。
-       *
-       * 为什么需要它：零尺寸时我们会退回 loading 并自增 reloadToken 重来，
-       * 但如果容器始终拿不到尺寸（例如这篇确实被隐藏着），就会无限自旋。
-       * 所以限次；用完后不再自动重试，等 active 变化或用户手动刷新。
-       */
-      const zeroSizeRetryRef = useRef(0)
 
       /* ---------- 加载文档元信息 ---------- */
       useEffect(() => {
@@ -2746,7 +2738,36 @@ window.__ModuleLoader__.load({
          * 的变化，viewer effect 才会在数据就绪后重新跑一次。
          */
         setStatus('loading')
+        /**
+         * **尺寸闸门要放在下载之前，而不是放到 setDocument 之前。**
+         *
+         * 日志实测（同一毫秒两条 pdf:start，同一个 itemKey）：刷新后右栏和
+         * 主区各挂了一个 PaperView，其中隐藏的那个容器是 0×0。原来的闸门在
+         * viewer effect 里，那时整篇 PDF 已经下载并解析完了 —— 于是隐藏实例
+         * 每重来一轮就白下载 650KB、白解析一遍，连着重来 9 次
+         * （viewer:defer-zero-size attempt 0→8）。
+         *
+         * 挪到这里：没有尺寸就**连请求都不发**。用 ResizeObserver 等它出现
+         * 真实尺寸（隐藏的 `display:none` 元素不会触发，这正是我们要的），
+         * 一旦可见立刻接着加载 —— 既没有自旋，也不用轮询。
+         */
+        let sizeObserver = null
         ;(async () => {
+          const laidOut = await new Promise((resolve) => {
+            const el = hostRef.current
+            if (!el) { resolve(false); return }
+            if (el.clientWidth > 0 && el.clientHeight > 0) { resolve(true); return }
+            reportDiag({ event: 'pdf:await-size', itemKey })
+            sizeObserver = new ResizeObserver(() => {
+              if (!alive) return
+              if (el.clientWidth > 0 && el.clientHeight > 0) {
+                try { sizeObserver?.disconnect() } catch { /* ignore */ }
+                resolve(true)
+              }
+            })
+            sizeObserver.observe(el)
+          })
+          if (!alive || !laidOut) return
           reportDiag({ event: 'pdf:start', itemKey })
           /**
            * 打开一篇 PDF 是这套阅读器最重的操作，探针从这一刻开始累积。
@@ -2898,6 +2919,9 @@ window.__ModuleLoader__.load({
         })()
         return () => {
           alive = false
+          // 还在等尺寸的观察者要断开，否则组件已卸载还在盯一个死节点
+          try { sizeObserver?.disconnect() } catch { /* ignore */ }
+          sizeObserver = null
           for (const task of renderTaskRef.current.values()) { try { task.cancel() } catch { /* ignore */ } }
           renderTaskRef.current.clear()
           /**
@@ -2939,7 +2963,6 @@ window.__ModuleLoader__.load({
         const was = wasActiveRef.current
         wasActiveRef.current = active
         if (active && !was && !pdfRef.current) {
-          zeroSizeRetryRef.current = 0
           setReloadToken((v) => v + 1)
         }
       }, [active])
@@ -3321,19 +3344,28 @@ window.__ModuleLoader__.load({
                 event: 'viewer:defer-zero-size',
                 containerW: container.clientWidth,
                 containerH: container.clientHeight,
-                attempt: zeroSizeRetryRef.current,
               })
-              // 限次自旋：容器始终拿不到尺寸时不要无限重来
-              if (zeroSizeRetryRef.current < 8) {
-                zeroSizeRetryRef.current += 1
-                requestAnimationFrame(() => {
-                  if (!disposed) setReloadToken((v) => v + 1)
-                })
-              }
-              return
+              /**
+               * **零尺寸只等，不自旋。**
+               *
+               * 原先这里是「重来，最多 8 次」，每轮都会让数据 effect 重跑一遍：
+               * 重新 /pdf 下载、重新 getDocument 解析。而零尺寸的原因只有两个 ——
+               * 容器还没布局完（几十毫秒），或者它压根是隐藏的（永远等不到）。
+               * 两种情况用固定次数去猜都不对：前者一次就够，后者重来 8 次纯属浪费。
+               *
+               * 改成挂 ResizeObserver：尺寸真正出现的那一刻才重来一次。
+               * 隐藏的 `display:none` 元素不会触发回调，所以不会再有自旋。
+               */
+              const ro = new ResizeObserver(() => {
+                if (disposed) return
+                if (container.clientWidth > 0 && container.clientHeight > 0) {
+                  try { ro.disconnect() } catch { /* ignore */ }
+                  setReloadToken((v) => v + 1)
+                }
+              })
+              ro.observe(container)
+              return () => { try { ro.disconnect() } catch { /* ignore */ } }
             }
-            // 拿到真实尺寸了，计数归零，下次零尺寸重新从头允许
-            zeroSizeRetryRef.current = 0
             /**
              * **在 setDocument 之前就把目标页算出来，并挂好 pagesinit。**
              *
@@ -3420,6 +3452,8 @@ window.__ModuleLoader__.load({
               if (!anchor || !host.contains(anchor)) return
               const href = anchor.getAttribute('href') || ''
               if (!href) return
+              // 点到了哪条链接：这是判断「没反应」卡在哪一层的唯一现场证据
+              reportDiag({ event: 'link:click', itemKey, href: href.slice(0, 300) })
 
               // ---- 内部跳转：-#page=N 或 -#<具名目标> ----
               if (href.startsWith('#')) {
@@ -3474,8 +3508,15 @@ window.__ModuleLoader__.load({
                    * 实际 PDF 里的链接绝大多数是 https（DOI、期刊站），
                    * 老论文偶尔有 http，属于可接受的边界。
                    */
-                  window.open(href, '_blank', 'noopener,noreferrer')
-                } catch { /* 被拦就什么都不做，链接仍可从悬停预览里读到 */ }
+                  const opened = window.open(href, '_blank', 'noopener,noreferrer')
+                  /**
+                   * `blocked` 是关键判据：window.open 被拦时返回 null 而不抛错。
+                   * 有这条日志就能分清「处理器没被调用」和「调用了但被宿主拒」。
+                   */
+                  reportDiag({ event: 'link:open', href: href.slice(0, 300), blocked: !opened })
+                } catch (e) {
+                  reportDiag({ event: 'link:open-error', href: href.slice(0, 300), message: String(e?.message ?? e) })
+                }
                 return
               }
               // 其余协议（如 zotero://）交给全局拦截器处理，这里不干预
@@ -3504,6 +3545,16 @@ window.__ModuleLoader__.load({
             const onPdfLinkOver = (event) => {
               const anchor = event.target?.closest?.('a[href]')
               if (!anchor || !host.contains(anchor)) return
+              /**
+               * **先删掉 pdf.js 自己挂的 `title`。**
+               *
+               * annotation_layer 给每个链接都写了 `link.title = overlaidText`，
+               * 即「这条链接覆盖的那段正文」。浏览器会把它渲染成原生提示框，
+               * 于是悬停时同时出现两个框：我们的地址框 + 原文文字框。
+               *
+               * 原生提示要等约 500ms 才弹，在 mouseover 这一拍删掉就弹不出来。
+               */
+              if (anchor.hasAttribute('title')) anchor.removeAttribute('title')
               const href = anchor.getAttribute('href') || ''
               if (!href) return
               const pageMatch = /^#page=(\d+)/i.exec(href)
