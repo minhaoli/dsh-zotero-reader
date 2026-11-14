@@ -272,6 +272,31 @@ export async function translateDocument(ctx, doc, options = {}) {
   return { pages: outPages, failed }
 }
 
+/**
+ * 流式取文本，带总时长上限。
+ *
+ * 为什么不靠调用方传 signal：划词翻译没有取消入口，一旦上游不回，
+ * `for await` 会一直挂着 —— 前端浮窗就是无限转圈。用户报「没有返回任何内容」
+ * 时，转圈和空白在界面上几乎分不出来，所以宿主先给一个明确错误。
+ * 60 秒比前端的 90 秒早，保证先由这里失败并带上原因。
+ */
+const SELECTION_TIMEOUT_MS = 60_000
+
+async function streamText(ctx, params, timeoutMs = SELECTION_TIMEOUT_MS) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => { try { ctrl.abort() } catch { /* ignore */ } }, timeoutMs)
+  let out = ''
+  try {
+    const stream = ctx.llm.stream({ ...params, signal: ctrl.signal })
+    for await (const chunk of stream) {
+      if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+  return out.trim()
+}
+
 /** 划词翻译 / 解释。返回纯文本。 */
 export async function translateSelection(ctx, text, options = {}) {
   const selection = pickSelection(ctx, options.override)
@@ -287,19 +312,45 @@ export async function translateSelection(ctx, text, options = {}) {
     : SYSTEM_PROMPT
   const prompt = mode === 'explain' ? text : text
 
-  let out = ''
-  const stream = ctx.llm.stream({
+  /**
+   * 两次尝试：先按「不思考」的档位，不行再退回模型默认档。
+   *
+   * `reasoningEffort: 'off'` 只是省时间的优化（翻译是转写任务，思考没有收益），
+   * 但它依赖该模型公布过这个档位。有的模型只公布 low/medium/high，此时请求
+   * 可能被上层拒绝，也可能回一个空串 —— 后者在界面上就是「浮窗里什么都没有」。
+   * 档位不该成为整条链路的前提，所以失败或空结果都退回默认档重来一次。
+   */
+  const base = {
     provider: selection.provider,
     model: selection.model,
-    reasoningEffort: TRANSLATE_EFFORT,
     system,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-    ...(options.signal ? { signal: options.signal } : {}),
-  })
-  for await (const chunk of stream) {
-    if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
   }
-  return out.trim()
+  const diag = options.onDiag
+  let lastError = null
+  for (const attempt of [
+    { label: 'off', params: { ...base, reasoningEffort: TRANSLATE_EFFORT } },
+    { label: 'default', params: base },
+  ]) {
+    try {
+      diag?.({ event: 'selection:attempt', effort: attempt.label, model: selection.model })
+      const out = await streamText(ctx, attempt.params)
+      if (out) {
+        diag?.({ event: 'selection:ok', effort: attempt.label, chars: out.length })
+        return out
+      }
+      diag?.({ event: 'selection:empty', effort: attempt.label })
+    } catch (error) {
+      lastError = error
+      diag?.({
+        event: 'selection:attempt-error',
+        effort: attempt.label,
+        message: String(error?.message ?? error).slice(0, 200),
+      })
+    }
+  }
+  if (lastError) throw lastError
+  return ''
 }
 
 export class TranslateJob extends EventEmitter {}

@@ -1158,6 +1158,8 @@ async function handleRequest(rctx, req, res, deps) {
       const out = await translateSelection(llmFacade(rctx), text, {
         mode: body.mode === 'explain' ? 'explain' : 'translate',
         override: selectionOverride(deps.settings),
+        // 推理档位回退、空结果、超时都要留痕：这些失败在前端都只剩一片空白
+        onDiag: deps.reportHostDiag,
       })
       sendJson(res, 200, { text: out, mode: body.mode === 'explain' ? 'explain' : 'translate' })
       return
