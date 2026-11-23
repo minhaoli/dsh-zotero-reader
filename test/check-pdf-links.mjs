@@ -175,10 +175,14 @@ check('内部跳转显示成「第 N 页」而不是裸 #page=',
  * 现在异步解析 dest 拿页号后补写第二行；断言它确实把页号算出来了，
  * 而不是只显示名字。
  */
-check('具名目标悬停补出目标页码',
-  /kind: 'line', text: `第 \$\{pageIndex \+ 1\} 页`/.test(src),
-  '只显示目标名等于没告诉用户会跳到哪')
-check('异步补页码前确认仍是当前链接',
+check('具名目标悬停显示具体内容（不再是元信息）',
+  /\{ kind: 'line', text: preview \}/.test(src),
+  '用户要的是「点过去会到哪句话」，只显示页码/目标名等于没预览')
+check('取不到文字时退回元信息显示',
+  /\{ kind: 'title', text: '文档内跳转' \}/.test(src) &&
+    /kind: 'line', text: `第 \$\{pageNo\} 页`/.test(src),
+  '扫描页没有文本层，此时不能空卡片')
+check('异步补内容前确认仍是当前链接',
   /linkTipAnchor !== anchor/.test(src),
   '鼠标已移开还回写会让卡片在错误位置闪出来')
 check('监听 mouseover / mouseout 并清理',
@@ -302,6 +306,87 @@ check('行内容用 createElement + textContent（不拼 innerHTML）',
 check('卡片有主行 / 正文行 / 链接行 / 次要行四种样式',
   /zr-tip-title/.test(src) && /zr-tip-line/.test(src) &&
     /zr-tip-link/.test(src) && /zr-tip-dim/.test(src))
+
+/* ---------- 4d. 预览内容：从 PDF 文本层提取 ---------- */
+
+/**
+ * 用户要的是「那段文字本身」，不是 DOI 卡片。
+ * 这条路线的好处是对 #fig8 / #eq1 / #cite.xxx 一视同仁 ——
+ * 不管有没有 DOI，目标处的文字都在 PDF 文本层里。
+ */
+check('从文本层提取目标内容（getTextContent）',
+  /page\.getTextContent\(\)/.test(src) && /const extractDestPreview = async/.test(src),
+  '预览正文只能从 PDF 文本层来，不依赖 Zotero 库')
+
+check('文本层按页缓存（不在每次 hover 都解析）',
+  /textLinesCacheRef/.test(src) && /\.get\(pageNo\)/.test(src) &&
+    /textLinesCacheRef\.current\.set\(pageNo/.test(src),
+  'getTextContent 跨 worker、一页几百 item，不缓存会把悬停拖慢')
+
+check('换文档时清空文本层缓存',
+  /textLinesCacheRef\.current\.clear\(\)/.test(src),
+  '缓存键只有 pageNo、不含文档身份，不清会把上一篇的文字当新文档预览')
+
+check('目标文字长度受限并加省略号',
+  /linkPreviewChars/.test(src) && /\.\.\.\$|…`/.test(src),
+  '卡片不能把整段正文铺出来')
+
+check('分栏处理（双栏论文不串栏）',
+  /packed\.width/.test(src) && /const mid = .* \/ 2/.test(src),
+  '双栏论文按纯 y 取最近行会把相邻栏的字取进来')
+
+check('按横向邻近度打分（不只看 y）',
+  /const score = dy \+ dx \* 0\.5/.test(src),
+  '同一栏内也可能在 destX 左侧另起一段，纯 y 最近会跳到隔壁段')
+
+check('提取失败返回 null 而不是抛错',
+  /const extractDestPreview = async \(dest, pageNo\) => \{[\s\S]{0,200}?try \{/.test(src) &&
+    /catch \{ return null \}/.test(src),
+  '扫描页没有文本层，但预览不该因此报错')
+
+/* ---------- 4e. 跳转后落点闪烁 ---------- */
+
+check('跳转成功后给落点加闪烁指示',
+  /const flashJumpTarget = \(pageNo, offset, previewText\) =>/.test(src) &&
+    /flashJumpTarget\(pageNo, offset \?\? 0, flashText\)/.test(src),
+  '侧栏里页与页长得差不多，光滚过去用户找不到该看哪句')
+
+check('闪烁约 1 秒后淡出',
+  /const jumpFlashMs = 1000/.test(src) && /data-fade/.test(src) &&
+    /transition:opacity/.test(src),
+  '要的是短暂指示，不是常驻高亮')
+
+check('闪烁用独立的 .zr-jump-flash（不复用 .zr-hl）',
+  /\.zr-jump-flash\{/.test(src) &&
+    /box\.className = 'zr-jump-flash'/.test(src),
+  '复用它的话标注层重绘会把闪烁块当成常驻高亮重新画出来')
+
+check('闪烁块能对齐到文本层里的目标行',
+  /pageEl\.querySelectorAll\('\.textLayer span/.test(src),
+  '用文本层 span 的矩形比反推 scale/rotation 可靠')
+
+check('闪烁块与定时器都有清理',
+  /const clearJumpFlash = \(\) =>/.test(src) &&
+    /clearJumpFlash\(\)/.test(src) &&
+    /jumpFlashTimer\) \{ clearTimeout\(jumpFlashTimer\)/.test(src),
+  '不清的话切文档后残留方块，定时器还会去改已移除的节点')
+
+/* ---------- 4f. 安全：全程不拼 innerHTML ---------- */
+
+check('链接相关的提示/闪烁都不用 innerHTML',
+  (() => {
+    // 只扫链接相关这几段，别把标注层原有的 layer.innerHTML 误判进来
+    const parts = ['const renderTipLines', 'const flashJumpTarget', 'const extractDestPreview',
+      'const pageTextLines', 'const showLinkTip']
+    for (const p of parts) {
+      const at = src.indexOf(p)
+      if (at < 0) continue
+      const seg = src.slice(at, at + 3000)
+      if (/\.innerHTML\s*=/.test(seg)) return false
+    }
+    return true
+  })(),
+  'PDF 里的文字是外部输入，innerHTML 就是注入面')
 
 
 /* ---------- 5. 监听必须清理（否则累积） ---------- */
