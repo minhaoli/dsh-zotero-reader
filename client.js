@@ -118,6 +118,8 @@ window.__ModuleLoader__.load({
       zoomIn: '放大',
       zoomOut: '缩小',
       fitWidth: '适应宽度',
+      backToPrev: '返回跳转前的位置',
+      backToPrevDepth: '返回跳转前的位置（可回退 {{depth}} 步）',
       translateSelection: '翻译',
       askSelection: '询问',
       askInserted: '已放入下方输入框，补充问题后发送即可',
@@ -214,6 +216,8 @@ window.__ModuleLoader__.load({
       nextPage: 'Next',
       zoomIn: 'Zoom in',
       zoomOut: 'Zoom out',
+      backToPrev: 'Back to previous position',
+      backToPrevDepth: 'Back to previous position ({{depth}} step(s) available)',
       fitWidth: 'Fit width',
       translateSelection: 'Translate',
       askSelection: 'Ask',
@@ -1702,6 +1706,61 @@ window.__ModuleLoader__.load({
     const ZOOM_GESTURE_GAP_MS = 320
 
     /**
+     * **量出「页号 + 页内比例」，也就是 `scrollPageIntoView` 的入参。**
+     *
+     * 这是 `scrollPageIntoView(hostEl, pageNo, offset)` 的**反函数**：
+     * 它按页顶 + `pageH * offset` 定位，这里就把当前滚动位置换算回同一个
+     * `(pageNo, offset)`，两者拼起来才是「记住这个位置，之后原样回去」。
+     *
+     * 为什么不能用上面那个 `measureScrollOffset`：它是给「阅读位置存档」用的，
+     * 收的是**滚动元素**、按 `offsetTop` 算 —— 而 `offsetTop` 的参照系是
+     * `offsetParent`，与滚动容器的坐标系不同源。这里全部用**视口矩形差值**，
+     * 与 `scrollPageIntoView` 里那一套完全同源，方向才不会差一页。
+     *
+     * 两个必须踩准的点：
+     *   · 滚动容器用 `findScrollParent` 现找。`scrollRef.current` 挂在 `.zr-page`
+     *     上，那个节点并不吃滚动，量它的 scrollTop 恒为 0。
+     *   · clientHeight 为 0（显示为 none 的隐藏面板）时直接放弃，
+     *     返回 null 由调用方决定压不压栈 —— 量不到就别记垃圾位置。
+     *
+     * 返回 `{ pageNo, offset }`；量不到返回 null。
+     */
+    function measurePosByGeometry(hostEl, pageNo) {
+      try {
+        if (!hostEl || !pageNo) return null
+        const pageEl = hostEl.querySelector(`.page[data-page-number="${pageNo}"]`)
+        if (!pageEl) return null
+        const scroller = findScrollParent(pageEl)
+        if (!scroller) return null
+        const pageH = pageEl.clientHeight || 0
+        if (pageH <= 0) return null
+        /**
+         * 视口顶部落在该页的百分之几（与 scrollPageIntoView 的算式同源）。
+         *
+         * `scrollPageIntoView` 的落点是
+         *     scrollTop = pageTop - 8 + pageH * offset
+         * 以它为基准反解：同一位置上，页顶相对滚动容器视口顶的位移是
+         *     pageRect.top - scrollerRect.top = 8 - pageH * offset
+         * 移项即得
+         *     offset = (scrollerTop - pageTop + 8) / pageH
+         * 那个 `+8` 是必须的：`-8` 是「放置」时让页眉别贴死上边框的余量，
+         * 反算时不补回来，量出的比例会恒偏小 8/pageH（约 0.01 量级），
+         * 而压栈→返回是一次往返，偏差会原样叠加到落点上。
+         *
+         * 夹到 0..0.98 —— 上界与 scrollPageIntoView 内部的 `Math.min(0.98, …)`
+         * 对齐，否则量出 0.99 再传回去会被夹成 0.98，位置漂一小段。
+         */
+        const rel = (
+          scroller.getBoundingClientRect().top
+          - pageEl.getBoundingClientRect().top
+          + 8
+        ) / pageH
+        if (!Number.isFinite(rel)) return null
+        return { pageNo, offset: Math.min(0.98, Math.max(0, rel)) }
+      } catch { return null }
+    }
+
+    /**
      * 找出屏幕坐标 (x, y) 底下是第几页。
      *
      * 先用 elementFromPoint —— 它给的正是「用户眼睛看到的那一页」，天然处理了
@@ -2680,6 +2739,14 @@ window.__ModuleLoader__.load({
       const [pageDraft, setPageDraft] = useState(null)
       const [scale, setScale] = useState(1.15)
       const [outlineOpen, setOutlineOpen] = useState(false)
+      /**
+       * 「跳转历史」栈的**可见层数**。
+       *
+       * 真正的栈在 hopStackRef 这个 ref 里（内容用 ref 才不会被闭包读旧），
+       * 这里只镜像一个长度给按钮用 —— 按钮的 enabled/disabled 必须走 state，
+       * 否则压栈之后 React 不重渲染，按钮会一直是灰的。
+       */
+      const [hopDepth, setHopDepth] = useState(0)
       const [settingsOpen, setSettingsOpen] = useState(false)
       const [highlight, setHighlight] = useState(null)  // { page, rects:[{x,y,w,h}] }
       /**
@@ -3212,6 +3279,55 @@ window.__ModuleLoader__.load({
       const viewerRef = useRef(null)
       /** 页码跳转的序号：新一轮跳转作废上一轮还在重试的旧跳转。 */
       const jumpSeqRef = useRef(0)
+      /**
+       * **「跳转历史」栈本体：`[{ pageNo, offset }]`，后进先出。**
+       *
+       * 只记「跳转前的位置」，不记普通滚动 —— 用户滚几屏再点返回时，
+       * 应该回到上一个**有意义**的落点，而不是退回几像素之前。
+       *
+       * 用 ref 不用 state：压栈/弹栈都发生在事件回调与异步闭包里
+       * （链接点击、抽屉 async 解析），读 state 会拿到旧快照，
+       * 连续两次跳转就会互相覆盖，栈只剩一条。给界面看的是 hopDepth。
+       */
+      const hopStackRef = useRef([])
+      /**
+       * **循环保护：正在执行「从历史恢复」的标记。**
+       *
+       * 恢复本身也要滚页、也要写 currentPageNumber，外观和一次跳转一模一样。
+       * 若恢复路径同样压栈，点一次返回就会把「返回前的位置」重新压进去，
+       * 栈永远见不了底 —— 表现为「返回按钮永远能点、永远退不出去」。
+       *
+       * 用一个 flag 而不是「让恢复绕开某个函数」：跳转入口有好几处
+       * （链接、页码、大纲、批注列表），逐个绕开总会漏一个；
+       * 在压栈的唯一出口上判一次，将来再加跳转入口也自动受保护。
+       */
+      const hopRestoringRef = useRef(false)
+      /**
+       * 页数上限的 ref 镜像。
+       *
+       * popHop 是 useCallback([])，读不到最新的 pageCount；而历史里存的页号
+       * 理论上可能因重新取字节而超出新页数（同一篇文献换了个修订版 PDF）。
+       * 夹取只是兜底，正常路径下它不会改变任何值。
+       */
+      const pageCountRef = useRef(0)
+      /**
+       * **换文献就清空跳转历史。**
+       *
+       * 现状是每个 PaperView **实例**对应的 itemKey 固定（外部按 `key` 渲染，
+       * React 会复用同 key 的实例），所以这项清理多数时候是幂等的空动作。
+       * 但它的存在是刻意的：历史记录只存 `{pageNo, offset}`，**不带文献标识** ——
+       * 一旦哪天实例被复用（换 key、或 itemKey 变化而实例不重建），
+       * 旧文献的页码会原样滚到新文献上，那是纯粹的错乱（第 12 页 ≠ 第 12 页）。
+       * 与其指望「没人会复用它」，不如在依赖变化时无条件清空，
+       * 让「历史只属于当前这篇文献」成为不依赖外部渲染细节的保证。
+       *
+       * 换文献本身也确实没有任何合理的「退回去」语义：跨文献的位置毫无意义，
+       * 第 12 页在第 A 篇是正文、在第 B 篇可能是附录。
+       */
+      useEffect(() => {
+        hopStackRef.current = []
+        setHopDepth(0)
+      }, [itemKey])
       const eventBusRef = useRef(null)
       /**
        * decoratePage 的 ref 镜像。
@@ -3236,6 +3352,106 @@ window.__ModuleLoader__.load({
        */
       visiblePageRef.current = visiblePage
       editColorRef.current = editColor
+      pageCountRef.current = pageCount
+
+      /**
+       * **跳转历史的上限。**
+       *
+       * 不封顶就是个只增不减的数组：一篇论文读一下午，来回点公式、
+       * 大纲、批注列表能攒出几百条，全程挂在内存里没有回收点。
+       * 50 条足够覆盖「刚才看的那一段」这种真实回溯需求，
+       * 超出时丢**最旧**的一条（shift）—— 留最近的才有用，
+       * 和浏览器前进后退的行为一致。
+       */
+      const HOP_LIMIT = 50
+
+      /**
+       * **把当前位置压进历史栈。**
+       *
+       * 只由「跳转」入口调用，普通滚动一律不调（见 hopStackRef 说明）。
+       * 三个必须守住的不变量：
+       *   ① 恢复路径不压栈（循环保护）—— 否则返回按钮把自己压回去，栈永不见底；
+       *   ② 量不到位置就不压 —— 面板隐藏（display:none）时 clientHeight 为 0，
+       *      压进去的是一条垃圾记录，之后返回会滚到一个乱七八糟的地方；
+       *   ③ 与栈顶同一个位置不重复压 —— 连点两次同一个链接不该占掉两格。
+       *
+       * 返回是否真的压了，供调用方打日志。
+       */
+      const pushHop = useCallback(() => {
+        if (hopRestoringRef.current) return false
+        /**
+         * 页号以 viewer 为准，visiblePageRef 只作退路。
+         *
+         * 两处必须取同一个源：gotoPage 用 `viewer.currentPageNumber` 判断
+         * 「这次跳转到底移没移动」，这里若改读 visiblePageRef（它是 state 镜像，
+         * 要等一次重渲染才更新），就可能出现「按第 12 页判断移动了、
+         * 却量第 11 页的页元素」—— 那是页号与位置错开一格，
+         * 返回时稳稳地落错地方。
+         */
+        const pageNo = (() => {
+          try { return viewerRef.current?.currentPageNumber || 0 } catch { return 0 }
+        })() || visiblePageRef.current || 0
+        if (!pageNo) return false
+        const pos = measurePosByGeometry(hostRef.current, pageNo)
+        if (!pos) return false
+        const stack = hopStackRef.current
+        const top = stack[stack.length - 1]
+        if (top && top.pageNo === pos.pageNo && Math.abs(top.offset - pos.offset) < 0.005) {
+          return false
+        }
+        stack.push(pos)
+        // 超上限丢最旧的
+        if (stack.length > HOP_LIMIT) stack.splice(0, stack.length - HOP_LIMIT)
+        setHopDepth(stack.length)
+        reportDiag({
+          event: 'history:push',
+          page: pos.pageNo,
+          offset: Number(pos.offset.toFixed(4)),
+          depth: stack.length,
+        })
+        return true
+      }, [])
+
+      /**
+       * **弹栈并回到记录的位置。**
+       *
+       * 消费式：回到一处就删掉一条，所以连点两次返回会依次退两步，
+       * 退到栈空后按钮自动变灰（hopDepth 归零 → disabled）。
+       *
+       * 恢复期间置 hopRestoringRef，让这次滚动不被当成人肉跳转压回栈里。
+       * 用 try/finally 而不是「先置位、成功后再清」：中途 throw 也必须解锁，
+       * 否则标记一旦卡住 true，之后所有跳转都不再记历史（静默失效）。
+       */
+      const popHop = useCallback(() => {
+        const stack = hopStackRef.current
+        if (stack.length === 0) return false
+        const pos = stack.pop()
+        setHopDepth(stack.length)
+        const pageNo = Math.max(1, Math.min(pos.pageNo, pageCountRef.current || pos.pageNo))
+        hopRestoringRef.current = true
+        try {
+          const viewer = viewerRef.current
+          try {
+            if (viewer) {
+              viewer.currentPageNumber = pageNo
+              viewer.update?.()
+            }
+          } catch { /* 页视图未建好时赋值会被丢弃，下面滚动兜住 */ }
+          setVisiblePage(pageNo)
+          setJumpPage(pageNo)
+          const scrolled = scrollPageIntoView(hostRef.current, pageNo, pos.offset)
+          reportDiag({
+            event: 'history:pop',
+            page: pageNo,
+            offset: Number(pos.offset.toFixed(4)),
+            depth: stack.length,
+            scrolled,
+          })
+        } finally {
+          hopRestoringRef.current = false
+        }
+        return true
+      }, [])
 
       /**
        * 最近一次「写进官方 viewer」的缩放值。
@@ -4408,6 +4624,15 @@ window.__ModuleLoader__.load({
                   reportDiag({ event: 'link:dest-fail', name, reason: 'bad-page', page: pageNo, pages: pageCount })
                   return
                 }
+                /**
+                 * **跳转前压栈**（PDF 内链接 → 具名目标，如 LaTeX 的 `#eq1`）。
+                 *
+                 * 位置必须取在下面那次 `viewer.currentPageNumber = pageNo` **之前** ——
+                 * 一旦页码被改写，量到的就是目标的页顶，历史里存的全是「刚跳到的地方」，
+                 * 点返回等于原地不动。pushHop 内部读的是 visiblePageRef，
+                 * 它与 currentPageNumber 同步，所以在改写之前调用才拿到真正的「跳转前」。
+                 */
+                pushHop()
                 try {
                   viewer.currentPageNumber = pageNo
                   viewer.update?.()
@@ -4637,6 +4862,12 @@ window.__ModuleLoader__.load({
                 if (pageMatch) {
                   const n = Number(pageMatch[1])
                   if (Number.isFinite(n) && n > 0) {
+                    /**
+                     * **跳转前压栈**（PDF 内链接 → `#page=N`）。
+                     * 同 jumpToNamedDest：必须早于 currentPageNumber 的改写，
+                     * 否则记下的是目标位置而不是「原来的位置」。
+                     */
+                    pushHop()
                     try {
                       viewer.currentPageNumber = n
                       viewer.update?.()
@@ -5552,7 +5783,7 @@ window.__ModuleLoader__.load({
           viewerRef.current = null
           eventBusRef.current = null
         }
-      }, [status, itemKey, reloadToken])
+      }, [status, itemKey, reloadToken, pushHop])
 
       /**
        * 缩放 state → 官方 viewer。
@@ -6269,6 +6500,21 @@ window.__ModuleLoader__.load({
 
       const gotoPage = useCallback((pageNo, rects) => {
         const target = Math.max(1, Math.min(pageNo, pageCount || pageNo))
+        /**
+         * **跳转前先记住当前在哪。**
+         *
+         * 缺口放在这里，而不是每个调用方各写一遍：页码输入框、上/下一页、
+         * 大纲条目、批注列表、会话里的页码点击**全都**收敛到 gotoPage，
+         * 在这里挂一次就全覆盖了；将来再加入口也自动带上历史。
+         *
+         * 只压「真的会移动」的跳转：target 等于当前页时（用户按了「»」到末尾页
+         * 已经到底、或点大纲里就是当前页的那条）不值得占一格历史 ——
+         * 否则「点了没动」也会让返回按钮亮起来，退一步还是在原地。
+         */
+        const fromPage = (() => {
+          try { return viewerRef.current?.currentPageNumber ?? 0 } catch { return 0 }
+        })()
+        if (target !== fromPage) pushHop()
         setJumpPage(target)
         setHighlight(rects ? { page: target, rects } : null)
 
@@ -6333,7 +6579,7 @@ window.__ModuleLoader__.load({
           if (!scrollToPage()) requestAnimationFrame(() => setTimeout(retry, 120))
         }
         requestAnimationFrame(() => setTimeout(retry, 60))
-      }, [pageCount])
+      }, [pageCount, pushHop])
 
       /* ---------- 滚动性能探针 ---------- */
       useEffect(() => {
@@ -7701,6 +7947,29 @@ window.__ModuleLoader__.load({
 
         // 工具条
         h('div', { className: 'zr-bar' },
+          /**
+           * **返回跳转前的位置**（消费式，点一次退一步）。
+           *
+           * 放在「上一页」左边：它和 ‹ › 都是「往回走」，但语义完全不同 ——
+           * ‹ › 是按页号线性的翻，这个是在**跳转历史**上回退，所以单独一格。
+           *
+           * disabled 由 hopDepth 驱动（栈空即灰）：栈在 ref 里，
+           * 只有镜像出来的 hopDepth 变化才会重渲染，光改栈按钮不会变灰。
+           *
+           * title 带剩余步数 —— 不做常驻的「还能退 N 步」标签，
+           * 那会让工具条多一块永远在变的文字；悬停时才看的东西放 title 最省。
+           */
+          h('button', {
+            className: 'zr-btn',
+            onClick: () => { popHop() },
+            disabled: hopDepth === 0,
+            /**
+             * 可回退时把层数塞进 title（悬停才知道，不占工具条空间）；
+             * 栈空时回落到基础文案 —— 那时按钮已经是灰的，
+             * 再说「没有可回退的跳转」只是同一件事的重复。
+             */
+            title: hopDepth > 0 ? t('backToPrevDepth', { depth: hopDepth }) : t('backToPrev'),
+          }, '↩'),
           h('button', { className: 'zr-btn', onClick: () => gotoPage(jumpPage - 1), disabled: jumpPage <= 1, title: t('prevPage') }, '‹'),
           h('input', {
             type: 'number', min: 1, max: pageCount || 1,
