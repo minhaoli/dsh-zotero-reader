@@ -37,10 +37,17 @@ check('签名判断早于 DOM 写入', sigIdx > 0 && innerIdx > sigIdx,
 check('签名写入在清空之后', setSigIdx > sigIdx,
   `set@${setSigIdx} 应当 > sig@${sigIdx}`)
 
-const beforeSig = src.slice(Math.max(0, sigIdx - 1200), sigIdx)
+/**
+ * 窗口取**结构边界**（decoratePage 函数起点 → 签名处），不取固定字符数。
+ * 这里踩过：签名上方补了一段解释为什么不再用尺寸的注释，1200 字符窗口
+ * 就把真正的 clientWidth 读取挤出去了，断言假失败（代码其实是对的）。
+ */
+const decorateStart = src.lastIndexOf('const decoratePage = useCallback(', sigIdx)
+const beforeSig = src.slice(decorateStart > 0 ? decorateStart : 0, sigIdx)
 check('clientWidth 读取发生在清空之前（避免读脏布局）',
   beforeSig.includes('pageEl.clientWidth'),
-  '签名用的 pw/ph 必须在任何 DOM 写入之前读取')
+  'pw/ph 必须在任何 DOM 写入之前读取 —— 它们即使不再进签名，也要用来算 k')
+check('函数体已定位（上面这条断言的前提）', beforeSig.length > 300)
 
 /* ---- 2. 换文献时清空签名缓存（否则新文献可能被跳过） ---- */
 
@@ -71,12 +78,16 @@ check('pagerendered 里用 requestAnimationFrame 延迟装饰',
 /**
  * 复刻 client.js 里的签名算法。
  * 故意保持与源码同构；若源码改了顺序，这里会与第 1 节的断言一起提示。
+ *
+ * **签名里记缩放，不再记 pw/ph。** 缩放过程中每页尺寸是连续变化的，
+ * 滚轮一次连抛十几条 scalechanging，Math.round(pw/ph) 帧帧都变，签名
+ * 于是帧帧失效 —— 批注层被反复清空重建，正是「缩放时又卡又闪」的来源。
+ * 位置真正依赖的是缩放比（pageHeightPt * k 还原出全部坐标），尺寸只是派生量。
  */
-function makeSig({ pageNo, pw, ph, highlight, annotations }) {
+function makeSig({ pageNo, scale, highlight, annotations }) {
   return [
     pageNo,
-    Math.round(pw),
-    Math.round(ph),
+    scale,
     highlight && highlight.page === pageNo ? JSON.stringify(highlight.rects) : '',
     annotations
       .filter((a) => a.pageIndex === pageNo - 1)
@@ -87,8 +98,7 @@ function makeSig({ pageNo, pw, ph, highlight, annotations }) {
 
 const base = {
   pageNo: 3,
-  pw: 600,
-  ph: 800,
+  scale: 1.3333,
   highlight: null,
   annotations: [
     { key: 'AAAA1111', pageIndex: 2, color: '#ffd400', type: 'highlight', rects: [[1, 2, 3, 4]] },
@@ -120,7 +130,15 @@ check('只有别的页的批注变了 → 本页签名不变（应跳过）',
   makeSig({ ...base, annotations: [base.annotations[0], base.annotations[1], { ...base.annotations[2], color: '#000000' }] }) === s0)
 
 check('缩放变化 → 签名变化（必须按新比例重画）',
-  makeSig({ ...base, pw: 720, ph: 960 }) !== s0)
+  makeSig({ ...base, scale: 1.6667 }) !== s0)
+
+/**
+ * 反向约束：同一缩放下的尺寸抖动**不该**让签名失效。
+ * 这正是这次要修的行为 —— 缩放的中间帧里 clientWidth 每帧都不同，
+ * 若尺寸进了签名，批注层就在缩放过程中被反复重建。
+ */
+check('同一缩放、尺寸抖动 → 签名不变（不得反复重建）',
+  makeSig({ ...base }) === s0)
 
 check('高亮出现 → 签名变化',
   makeSig({ ...base, highlight: { page: 3, rects: [[1, 1, 2, 2]] } }) !== s0)
@@ -137,9 +155,22 @@ check('不同页号的空批注 → 签名不同（换文献不误跳过）',
 /* ---- 5. 签名里必须含所有影响观感的要素 ---- */
 
 const sigBlock = src.slice(sigIdx, src.indexOf('].join(\'#\')', sigIdx))
-for (const field of ['pageNo', 'pw', 'ph', 'highlight', 'color', 'type', 'rects']) {
+for (const field of ['pageNo', 'pageScale', 'highlight', 'color', 'type', 'rects']) {
   check(`签名覆盖 ${field}`, sigBlock.includes(field), '漏掉这个字段会导致对应的变化不重画')
 }
+/**
+ * 尺寸项必须**不在**签名里。
+ * 它们会让签名在缩放的每一帧都失效，把「缩放卡顿」重新引回来 —— 断言反向锁住。
+ */
+check('签名里不再有会随缩放逐帧抖动的 Math.round(pw/ph)',
+  !/Math\.round\(pw\)/.test(sigBlock) && !/Math\.round\(ph\)/.test(sigBlock),
+  '尺寸是缩放的派生量，进签名会让每帧都判定失效')
+/**
+ * 但 pw 仍然必须被读取 —— 它后面要用来算 k（PDF pt → CSS px 的换算比例）。
+ * 这次改动只许动签名，不许顺手删掉尺寸读取。
+ */
+check('pw/ph 仍被读取（k 的换算要用，不能一起删）',
+  /const pw = pageEl\.clientWidth/.test(src) && /const ph = pageEl\.clientHeight/.test(src))
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)
