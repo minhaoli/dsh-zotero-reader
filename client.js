@@ -1640,6 +1640,8 @@ window.__ModuleLoader__.load({
 
     function Reader(props) {
       const bound = props.bound ?? ((k) => k)
+      /** 宿主注入的会话 id：本面板的「已打开」桶就以它为键。 */
+      const sessionId = props.sessionId
       const t = (key, vars) => {
         let text = bound(key)
         if (vars) for (const [k, v] of Object.entries(vars)) text = text.replace(`{{${k}}}`, String(v))
@@ -1659,7 +1661,7 @@ window.__ModuleLoader__.load({
         reportDiag({
           event: 'reader:mount',
           tabKey,
-          hasSessionId: Boolean(props.sessionId),
+          hasSessionId: Boolean(sessionId),
           hasCtx: Boolean(props.ctx),
         })
         /**
@@ -1687,7 +1689,7 @@ window.__ModuleLoader__.load({
        * 必须在任何一次「打开某篇」之前完成，否则 openedAdd 会先写进 `default` 桶，
        * 又被「已打开」那栏按真实 sessionId 的读取覆盖掉（这个 bug 已经踩过一次）。
        */
-      useEffect(() => { openedLoad(props.sessionId) }, [props.sessionId])
+      useEffect(() => { openedLoad(sessionId) }, [sessionId])
       /**
        * 有 itemKey 才直接进阅读；否则一律先给列表。
        * 之前的 bug：无论 tab 带不带 key 都从 browse 起，而点卡片开的是裸 key，
@@ -1701,9 +1703,30 @@ window.__ModuleLoader__.load({
       const [segment, setSegment] = useState('library')   // library | papers | searched
       const [err, setErr] = useState(null)
 
-      // 监听「打开某一篇」的全局请求（会话里点 zotero:// 链接、或列表里点条目）
+      /**
+       * 登记本面板的根节点，供「点击会话里的 zotero:// 链接」判断该记进哪个会话。
+       *
+       * `keepMounted: true` 让切走的面板留在 DOM 里，所以「谁在响应」不能靠挂载顺序，
+       * 只能靠这一刻谁真的可见 —— 由 `currentReaderSession()` 现场看。
+       * 依赖带 sessionId：同一个实例会随会话切换收到新的 sessionId，节点要登记到新会话名下。
+       */
+      const rootRef = useRef(null)
+      useEffect(() => {
+        registerReaderRoot(sessionId, rootRef.current)
+        return () => registerReaderRoot(sessionId, null)
+      }, [sessionId])
+
+      /**
+       * 监听「打开某一篇」的全局请求（会话里点 zotero:// 链接、或列表里点条目）。
+       *
+       * **按 sessionId 过滤**：事件是从 document 上全局派发的，不过滤的话那个
+       * `display:none` 里的旧会话面板也会响应，把别的会话的 PDF 塞进自己的阅读区。
+       * 老事件没有 sessionId（兼容），按「不指定会话=所有面板都响应」处理。
+       */
       useEffect(() => {
         const onOpen = (event) => {
+          const target = event?.detail?.sessionId
+          if (target !== undefined && String(target) !== String(sessionId ?? '')) return
           const key = event?.detail?.itemKey
           if (key) {
             setItemKey(String(key).toUpperCase())
@@ -1715,7 +1738,7 @@ window.__ModuleLoader__.load({
         }
         window.addEventListener('zotero-reader:open', onOpen)
         return () => window.removeEventListener('zotero-reader:open', onOpen)
-      }, [])
+      }, [sessionId])
 
       /**
        * **不要把 PaperView 条件渲染掉。**
@@ -1740,6 +1763,12 @@ window.__ModuleLoader__.load({
       const readPane = itemKey
         ? h('div', {
             key: `reader:${itemKey}`,
+            /**
+             * 只在「read 态直接把 readPane 当根」时它是可见的根；browse 态它被
+             * `display:none` 包在 shell 里，此刻 shell 的 ref 会随后覆盖掉它
+             * （React 先设子节点、后设父节点的 ref），最终存的是可见的那个。
+             */
+            ref: rootRef,
             style: mode === 'read'
               ? { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0 }
               : { display: 'none' },
@@ -1747,7 +1776,7 @@ window.__ModuleLoader__.load({
             itemKey,
             t,
             ctx: props.ctx,
-            sessionId: props.sessionId,
+            sessionId,
             // 隐藏态（mode 为 browse）不加载 PDF：容器宽高为 0 会让 pdf.js 建不出页，
             // 页码恢复随之失效。见 PaperView 里加载 effect 的说明。
             active: mode === 'read',
@@ -1768,12 +1797,18 @@ window.__ModuleLoader__.load({
        */
       return h('div', {
         className: 'zr-root',
+        /**
+         * browse 态的可见根就是它。父节点 ref 在子节点之后设置，所以 readPane 隐藏时
+         * 存下来的是这个 shell（它可见）；read 态则反过来，`readPane` 才是可见的那个。
+         * 两者都只是「本会话面板的可见根」，`currentReaderSession()` 用它们区分会话。
+         */
+        ref: rootRef,
         style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
       },
       readPane,
       h(LibraryView, {
         t,
-        sessionId: props.sessionId,
+        sessionId,
         ctx: props.ctx,
         tab: segment,
         setTab: setSegment,
@@ -1783,8 +1818,11 @@ window.__ModuleLoader__.load({
            *
            * 不再在本 tab 内切换内容：那样看两篇就会互相顶掉，回不到上一篇。
            * 同一个 key 再点只是一次「显示已有 tab」，所以重复点不会开重复 tab。
+           *
+           * 显式带上 sessionId：这里是「哪个会话的列表被点了」最清楚的一处，
+           * 不依赖 `currentReaderSession()` 的 DOM 探测。
            */
-          openInReader(props.ctx, key)
+          openInReader(props.ctx, key, sessionId)
         },
       }))
     }
@@ -1793,8 +1831,11 @@ window.__ModuleLoader__.load({
 
     function LibraryView({ t, onPick, sessionId, ctx, tab, setTab }) {
       /**
-       * 一开始就确立会话身份，早于任何一次「打开某篇」。
-       * 否则 openedAdd 会先写进 default 桶，又被「已打开」按真实 sessionId 的读取覆盖。
+       * 一开始就把会话身份确立下来。
+       *
+       * 现在 `openedAdd` 必须显式带 sessionId，写进去的一定是正确的桶，所以这一步
+       * 不再是「抢在写入之前确立身份」——它只是尽早把该会话的历史读进内存，
+       * 免得用户点开第一篇时列表还没从 localStorage 恢复。
        */
       useEffect(() => { openedLoad(sessionId) }, [sessionId])
 
@@ -2625,7 +2666,6 @@ window.__ModuleLoader__.load({
             const doc = await fetchJson(`${API}/doc?key=${encodeURIComponent(itemKey)}`)
             if (!alive) return
             setInfo(doc)
-            openedTitle(itemKey, doc.title)
             setPageCount(doc.pageCount || 0)
           } catch (e) {
             if (!alive) return
@@ -2635,6 +2675,17 @@ window.__ModuleLoader__.load({
         })()
         return () => { alive = false }
       }, [itemKey])
+
+      /**
+       * 把标题记进「自己那个会话」的切换条。
+       *
+       * 单独一个 effect、依赖带 sessionId：原来它写在加载 doc 的异步链里，
+       * 那条链的依赖只有 itemKey，切会话时不会重跑 —— 标题就记到旧会话的桶里去了。
+       */
+      useEffect(() => {
+        if (!info?.title) return
+        openedTitle(sessionId, itemKey, info.title)
+      }, [sessionId, itemKey, info?.title])
 
       /**
        * 加载 Zotero 里已有的批注。
@@ -6535,6 +6586,11 @@ window.__ModuleLoader__.load({
         if (!m) return
         event.preventDefault()
         event.stopPropagation()
+        /**
+         * 点击发生在会话面板的 DOM 里，但拦截器注册在 document 上，这里拿不到 sessionId
+         * （宿主没有公开「当前会话 id」）。`openInReader` 的默认参数会取
+         * 「当前可见的那个面板」的会话 —— 点击本来也只可能发生在可见的面板里。
+         */
         openInReader(ctx, m[1].toUpperCase())
       }
       document.addEventListener('click', onClick, true)
@@ -6557,10 +6613,23 @@ window.__ModuleLoader__.load({
     function PapersView({ t, ctx, sessionId, paneActive = true }) {
       useStyle()
       const [, setTick] = useState(0)
-      useEffect(() => openedSubscribe(() => setTick((n) => n + 1)), [])
+      /**
+       * 只订阅**自己这个会话**的桶。
+       *
+       * 依赖里有 sessionId：`keepMounted: true` 让面板在切走时不卸载，同一个组件
+       * 实例会随着会话切换收到新的 sessionId（宿主通过 `inject(sessionId => ...)` 注入）。
+       * 依赖漏掉它，订阅就会一直挂在旧会话上 —— 表现正是「切了会话却还是旧的列表」。
+       */
+      useEffect(() => openedSubscribe(sessionId, () => setTick((n) => n + 1)), [sessionId])
       useEffect(() => { openedLoad(sessionId) }, [sessionId])
 
-      const { keys, active, titles } = openedState
+      /**
+       * 只读自己那个桶。两个会话的 PapersView 同时挂着时，各自读各自的，
+       * 谁也不会把对方的列表渲染出来。取不到桶时给一份空的，不要新建 ——
+       * 渲染期写 Map 会让「读」变成「写」，`openedLoad` 的 loaded 标记也就失去意义。
+       */
+      const bucket = openedBySession.get(openedSid(sessionId)) ?? { keys: [], active: null, titles: {}, loaded: false }
+      const { keys, active, titles } = bucket
 
       const bar = keys.length > 0
         ? h('div', { className: 'zr-papers-bar' },
@@ -6570,13 +6639,13 @@ window.__ModuleLoader__.load({
             className: 'zr-papers-chip',
             'data-active': active === key ? '1' : '0',
             title: titles[key] ?? key,
-            onClick: () => openedActivate(key),
+            onClick: () => openedActivate(sessionId, key),
           },
           h('span', null, shorten(titles[key] ?? key, 26)),
           h('span', {
             className: 'zr-papers-x',
             title: t('closePaper'),
-            onClick: (event) => { event.stopPropagation(); openedRemove(key) },
+            onClick: (event) => { event.stopPropagation(); openedRemove(sessionId, key) },
           }, '✕'),
           )),
         )
@@ -6612,7 +6681,7 @@ window.__ModuleLoader__.load({
            */
           active: key === active && paneActive,
           bare: true,
-          onBack: () => openedRemove(key),
+          onBack: () => openedRemove(sessionId, key),
           topError: null,
         }))),
       )
@@ -6676,24 +6745,94 @@ window.__ModuleLoader__.load({
      * 「打开了哪些 PDF、当前在看哪一篇」放在模块作用域，而不是某个组件的 state 里。
      *
      * 因为要跨两个右栏栏共享：文献库那一栏负责「打开」，已打开那一栏负责「展示与切换」。
-     * 两栏是同一个模块实例，一张订阅表就够，不必引入状态库。
+     * 两栏是同一个模块实例，不必引入状态库。
+     *
+     * **按会话分桶，而不是共用一个对象。**
+     *
+     * 原来这里是 `const openedState = { keys, active, titles, listeners }` 加一个
+     * `let openedSession`（「当前桶」），`openedLoad(sessionId)` 只在 sessionId 变化时
+     * 重读 localStorage。这个结构有两个致命点：
+     *
+     *   ① 读写共用同一个对象 —— 谁后写谁赢。两个面板同时在跑时，A 的 `openedLoad`
+     *      会把 B 的列表覆盖掉，而两边渲染的又都是这同一个对象，于是**看起来就像没刷新**。
+     *   ② 「当前桶」是模块级可变状态 —— 它假定「同一时刻只有一个会话在使用这份状态」。
+     *      而 tab 类型注册用了 `keepMounted: true`（切走不卸载，免得回来重载 PDF），
+     *      所以切换会话时旧面板**仍然挂着**，两个会话同时持有这句话就是假的。
+     *
+     * 现在的结构：
+     *   · `openedBySession`：sessionId → { keys, active, titles, loaded }。每个会话
+     *     只可能是自己那个桶的读者和写者，不存在互相覆盖。
+     *   · `openedListeners`：sessionId → 订阅者集合。通知只发给**同一个 sessionId**
+     *     的订阅者，所以会话 A 的变更不会把会话 B 的面板重新渲染一遍。
+     *
+     * 为什么这样就能隔离（两个面板同时挂载时的推演）：
+     *   设会话 A、B 的面板同时挂着，各自只调用 `openedXxx(A/B, ...)`：
+     *   · 读：A 只读 `openedBySession.get(A)`，B 只读 `get(B)`，两个对象不同，
+     *     任何一次 `openedPersist(A)` 都只写 `...:opened:<A>` 这把 localStorage 钥匙；
+     *   · 写：`openedAdd(A, k)` 只动 A 的桶，`openedEmit(A)` 只遍历 `openedListeners.get(A)`；
+     *   · 相互影响只剩「同一篇论文在两个会话里都被打开」这种**本来就该发生**的情形，
+     *     以及 localStorage 总容量 —— 不构成串数据。
+     *   因此「切会话后仍显示旧会话的 PDF」在结构上不再可能：旧面板即使还活着，
+     *   它渲染的也永远是它自己那个桶。
+     *
+     * 空的 sessionId（宿主偶尔拿不到）统一落在 `''` 这个桶里，localStorage 钥匙
+     * 仍映射成 `...:opened:default`，与历史数据兼容。
      */
-    const openedState = { keys: [], active: null, titles: {}, listeners: new Set() }
-    let openedSession = ''
+    const openedBySession = new Map()    // sessionId -> { keys, active, titles, loaded }
+    const openedListeners = new Map()    // sessionId -> Set<fn>
 
-
-    function openedEmit() {
-      for (const fn of openedState.listeners) { try { fn() } catch { /* 单个订阅者出错不影响其它 */ } }
+    /** 桶的键：空会话也归到一个确定的桶，不散成 undefined。 */
+    function openedSid(sessionId) {
+      return String(sessionId ?? '')
     }
 
-    function openedSubscribe(fn) {
-      openedState.listeners.add(fn)
-      return () => openedState.listeners.delete(fn)
+    /**
+     * 取（必要时新建）某个会话的桶。
+     *
+     * `loaded` 标记「localStorage 已经读过」，用来替代原来那个
+     * `if (next === openedSession) return` —— 那是「当前会话变了才重读」，
+     * 现在每个会话各自只读一次，之后以内存为准（内存里的每次改动都立刻落盘）。
+     */
+    function openedBucket(sessionId) {
+      const sid = openedSid(sessionId)
+      let bucket = openedBySession.get(sid)
+      if (bucket === undefined) {
+        bucket = { keys: [], active: null, titles: {}, loaded: false }
+        openedBySession.set(sid, bucket)
+      }
+      return bucket
     }
 
-    /** 按会话隔离：不同会话打开过的论文互不干扰。 */
-    function openedStorageKey() {
-      return `dsh-zotero-reader:opened:${openedSession || 'default'}`
+    /** 只通知这个会话的订阅者；别的会话的面板不该被别人的改动牵着重渲染。 */
+    function openedEmit(sessionId) {
+      const set = openedListeners.get(openedSid(sessionId))
+      if (set === undefined) return
+      // 复制一份再遍历：订阅者在回调里退订是常事，直接遍历 Set 会漏掉后面的订阅者。
+      for (const fn of [...set]) { try { fn() } catch { /* 单个订阅者出错不影响其它 */ } }
+    }
+
+    /**
+     * 订阅某个会话的变更。必须带 sessionId —— 「订阅全局」正是老 bug 的一半：
+     * 会话 B 的改动会把会话 A 的面板也唤醒，而 A 读到的还是共享对象。
+     */
+    function openedSubscribe(sessionId, fn) {
+      const sid = openedSid(sessionId)
+      let set = openedListeners.get(sid)
+      if (set === undefined) {
+        set = new Set()
+        openedListeners.set(sid, set)
+      }
+      set.add(fn)
+      return () => {
+        set.delete(fn)
+        // 空集合就删掉，别让 Map 随着会话切换一直长。
+        if (set.size === 0) openedListeners.delete(sid)
+      }
+    }
+
+    /** 按会话隔离：不同会话打开过的论文互不干扰。空会话沿用历史的 `default` 段。 */
+    function openedStorageKey(sessionId) {
+      return `dsh-zotero-reader:opened:${openedSid(sessionId) || 'default'}`
     }
 
     /**
@@ -6791,65 +6930,69 @@ window.__ModuleLoader__.load({
       } catch { /* 存不下就算了 */ }
     }
 
-    function openedPersist() {
+    function openedPersist(sessionId) {
+      const bucket = openedBucket(sessionId)
       try {
-        window.localStorage.setItem(openedStorageKey(), JSON.stringify({
-          keys: openedState.keys,
-          active: openedState.active,
-          titles: openedState.titles,
+        window.localStorage.setItem(openedStorageKey(sessionId), JSON.stringify({
+          keys: bucket.keys,
+          active: bucket.active,
+          titles: bucket.titles,
         }))
       } catch { /* 存不下就只留在内存，不影响使用 */ }
     }
 
+    /**
+     * 把某个会话的「已打开」从 localStorage 读回它自己的桶。
+     *
+     * 每个会话只读一次（`loaded` 标记）。读完之后以内存为准：所有改动都经
+     * `openedPersist(sessionId)` 立刻落盘，所以不存在「另一个会话写了盘、我这边不重读就落后」
+     * —— 盘是按会话分钥匙的，别人写的是别人那把。
+     *
+     * 老代码里那段 `adoptMemory` 补丁可以整块去掉：它的存在是因为「当前桶」在会话确立前
+     * 会被 `openInReader` 先写一遍，随后真正的 sessionId 到来时又要认领。现在 `openedAdd`
+     * 必须显式带 sessionId，写进去的就是正确的桶，不需要「认领」这个动作。
+     */
     function openedLoad(sessionId) {
-      const next = String(sessionId ?? '')
-      if (next === openedSession) return
-
-      /**
-       * 「还没确立会话就先点了文章」要认领而不是清空。
-       *
-       * 实测踩过：文献库那栏没调用本函数，openInReader 在 `openedSession === ''`
-       * 时把记录写进了 `default` 桶；随后「已打开」那栏首次挂载才确立真实 sessionId，
-       * 于是按新 key 读到空记录，把刚加进去的那篇覆盖掉了 —— 表现为「打开了，但列表是空的」。
-       * 这里把内存里已有的这几篇当成属于这个会话，写进正确的桶。
-       */
-      const adoptMemory = openedSession === '' && openedState.keys.length > 0
-      openedSession = next
+      const bucket = openedBucket(sessionId)
+      if (bucket.loaded) return
+      bucket.loaded = true
 
       let data = null
       try {
-        const raw = window.localStorage.getItem(openedStorageKey())
+        const raw = window.localStorage.getItem(openedStorageKey(sessionId))
         data = raw ? JSON.parse(raw) : null
       } catch { data = null }
 
-      if (!data && adoptMemory) {
-        openedPersist()
-        openedEmit()
-        return
-      }
-
       const keys = Array.isArray(data?.keys) ? data.keys.filter((k) => /^[A-Z0-9]{8}$/.test(k)) : []
-      openedState.keys = keys
-      openedState.active = keys.includes(data?.active) ? data.active : (keys[0] ?? null)
-      openedState.titles = (data?.titles && typeof data.titles === 'object') ? data.titles : {}
-      openedEmit()
+      bucket.keys = keys
+      bucket.active = keys.includes(data?.active) ? data.active : (keys[0] ?? null)
+      bucket.titles = (data?.titles && typeof data.titles === 'object') ? data.titles : {}
+      openedEmit(sessionId)
     }
 
-    function openedAdd(itemKey) {
+    /**
+     * 把一篇登记进某个会话的「已打开」。
+     *
+     * **sessionId 是必需参数。** 老签名 `openedAdd(itemKey)` 靠「当前桶」猜会话，
+     * 而猜错的时机恰恰是最常见的：用户刚切到一个还没读过 localStorage 的会话就点开一篇。
+     */
+    function openedAdd(sessionId, itemKey) {
       const key = String(itemKey ?? '').toUpperCase()
       if (!/^[A-Z0-9]{8}$/.test(key)) return
-      if (!openedState.keys.includes(key)) openedState.keys = [...openedState.keys, key]
-      openedState.active = key
-      openedPersist()
-      openedEmit()
+      const bucket = openedBucket(sessionId)
+      if (!bucket.keys.includes(key)) bucket.keys = [...bucket.keys, key]
+      bucket.active = key
+      openedPersist(sessionId)
+      openedEmit(sessionId)
     }
 
-    function openedActivate(itemKey) {
+    function openedActivate(sessionId, itemKey) {
       const key = String(itemKey ?? '').toUpperCase()
-      if (!openedState.keys.includes(key)) return
-      openedState.active = key
-      openedPersist()
-      openedEmit()
+      const bucket = openedBucket(sessionId)
+      if (!bucket.keys.includes(key)) return
+      bucket.active = key
+      openedPersist(sessionId)
+      openedEmit(sessionId)
     }
 
     /**
@@ -6858,39 +7001,80 @@ window.__ModuleLoader__.load({
      * 只有真正打开过（PaperView 拉到 /doc）才知道标题；没打开过的只显示 key。
      * 不额外请求：切换条不该为一排标签去拖 8 个接口。
      */
-    function openedTitle(itemKey, title) {
+    function openedTitle(sessionId, itemKey, title) {
       const key = String(itemKey ?? '').toUpperCase()
       const text = String(title ?? '').trim()
-      if (!key || !text || openedState.titles[key] === text) return
-      openedState.titles[key] = text
-      openedPersist()
-      openedEmit()
+      if (!key || !text) return
+      const bucket = openedBucket(sessionId)
+      if (bucket.titles[key] === text) return
+      bucket.titles[key] = text
+      openedPersist(sessionId)
+      openedEmit(sessionId)
     }
 
     /** 关掉一篇；若关的正是当前这篇，顺延到相邻的一篇。 */
-    function openedRemove(itemKey) {
+    function openedRemove(sessionId, itemKey) {
       const key = String(itemKey ?? '').toUpperCase()
-      const at = openedState.keys.indexOf(key)
+      const bucket = openedBucket(sessionId)
+      const at = bucket.keys.indexOf(key)
       if (at < 0) return
-      const rest = openedState.keys.filter((k) => k !== key)
-      openedState.keys = rest
-      if (openedState.active === key) {
-        openedState.active = rest.length === 0 ? null : rest[Math.min(at, rest.length - 1)]
+      const rest = bucket.keys.filter((k) => k !== key)
+      bucket.keys = rest
+      if (bucket.active === key) {
+        bucket.active = rest.length === 0 ? null : rest[Math.min(at, rest.length - 1)]
       }
-      openedPersist()
-      openedEmit()
+      openedPersist(sessionId)
+      openedEmit(sessionId)
     }
 
     /**
-     * 打开一篇：登记进「已打开」，并让阅读器切到这篇。
+     * 「当前可见的那个 Reader 属于哪个会话」—— 只有点击 `zotero://` 链接时需要它。
+     *
+     * 为什么需要：宿主的右栏控制器按会话各存一棵 tab 树，但 tab 类型的
+     * `keepMounted: true` 让切走的面板留在 DOM 里（`display:none`）。于是
+     * 「点击发生在哪个会话」和「这个点击该记进哪个会话」是两件事：
+     *   · 链接拦截器装在 document 上，click 冒泡到它时**不携带任何会话信息**；
+     *   · 宿主也没有公开「当前会话 id」的服务（实测 sessions 服务只有按 id 取 scope）；
+     *   · 所以由每个 Reader 在挂载时登记自己的根节点，取会话时**现场看 DOM**：
+     *     `display:none` 子树里的元素 `getClientRects()` 长度为 0，正好把切走的旧面板排除掉。
+     *
+     * 不用「最后挂载者赢」这种顺序猜测：切回来时旧面板并不重新挂载，顺序早就没意义了。
+     * 一个可见面板都没有（右栏关着）时返回空串，落到历史的 `default` 桶 —— 与老行为一致。
+     */
+    const readerRoots = new Map()    // sessionId -> 该会话 Reader 的根 DOM 节点
+
+    /** 登记/注销某个会话的 Reader 根节点（传 null 表示卸载）。 */
+    function registerReaderRoot(sessionId, el) {
+      const sid = openedSid(sessionId)
+      if (el) readerRoots.set(sid, el)
+      else readerRoots.delete(sid)
+    }
+
+    function currentReaderSession() {
+      for (const [sid, el] of readerRoots) {
+        try {
+          if (el && el.getClientRects().length > 0) return sid
+        } catch { /* 拿不到布局就跳过，继续看下一个 */ }
+      }
+      return ''
+    }
+
+    /**
+     * 打开一篇：登记进**该会话**的「已打开」，并让阅读器切到这篇。
      *
      * 不再开新的右栏标签页 —— 宿主只认已注册的 tab 类型，复合 key 会被静默丢弃
      * （实测点了完全没有反应）。「已打开的 PDF」现在是 Zotero 栏里的一个分段，
      * 所以这里只派发一个事件，由已挂载的 Reader 切换到阅读视图。
+     *
+     * 事件上带 sessionId：旧代码不带，所有面板都会响应 —— 包括那个 `display:none`
+     * 里的旧会话面板，这既是「切过去还是旧的」的一部分，也是重复加载的由来。
      */
-    function openInReader(ctx, itemKey) {
-      openedAdd(itemKey)
-      window.dispatchEvent(new CustomEvent('zotero-reader:open', { detail: { itemKey } }))
+    function openInReader(ctx, itemKey, sessionId = currentReaderSession()) {
+      const sid = String(sessionId ?? '')
+      openedAdd(sid, itemKey)
+      window.dispatchEvent(new CustomEvent('zotero-reader:open', {
+        detail: { itemKey, sessionId: sid },
+      }))
     }
 
     /**
