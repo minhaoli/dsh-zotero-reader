@@ -319,12 +319,12 @@ check('从文本层提取目标内容（getTextContent）',
   '预览正文只能从 PDF 文本层来，不依赖 Zotero 库')
 
 check('文本层按页缓存（不在每次 hover 都解析）',
-  /textLinesCacheRef/.test(src) && /\.get\(pageNo\)/.test(src) &&
-    /textLinesCacheRef\.current\.set\(pageNo/.test(src),
+  /textLinesCache\s*=\s*new Map\(\)/.test(src) && /\.get\(pageNo\)/.test(src) &&
+    /textLinesCache\.set\(pageNo/.test(src),
   'getTextContent 跨 worker、一页几百 item，不缓存会把悬停拖慢')
 
 check('换文档时清空文本层缓存',
-  /textLinesCacheRef\.current\.clear\(\)/.test(src),
+  /textLinesCache\.clear\(\)/.test(src),
   '缓存键只有 pageNo、不含文档身份，不清会把上一篇的文字当新文档预览')
 
 check('目标文字长度受限并加省略号',

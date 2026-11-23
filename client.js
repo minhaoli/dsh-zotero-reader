@@ -3854,11 +3854,17 @@ window.__ModuleLoader__.load({
              * getTextContent 要跨 worker 取整页文本（实测一页 320 个 item），
              * 每次悬停都做会让预览变卡。按页缓存，一篇论文很快全命中。
              * **换文档时必须清空**（见下面 cleanup），否则新 PDF 会读到上一篇的行。
+             *
+             * 用普通 Map 而不是 `useRef`：这段代码跑在 setDocument 的异步装载
+             * 链路里，**不在组件渲染期**。在这里调 hook 会抛 React #321
+             * （invalid hook call），表现为「官方阅读器加载失败」。
+             * 这个缓存只被本闭包与 cleanup 用到，不需要跨渲染持久，
+             * 每次装载新建一个正好——也就自然满足「换文档即清空」。
              */
-            const textLinesCacheRef = useRef(new Map())
+            const textLinesCache = new Map()
 
             const pageTextLines = async (pdfDocument, pageNo) => {
-              const cached = textLinesCacheRef.current.get(pageNo)
+              const cached = textLinesCache.get(pageNo)
               if (cached) return cached
               const page = await pdfDocument.getPage(pageNo)
               const viewport = page.getViewport({ scale: 1 })
@@ -3903,7 +3909,7 @@ window.__ModuleLoader__.load({
                * 不缓存就会每次悬停都白跑一遍 getTextContent。
                */
               const result = { lines, width: viewport.width, height: viewport.height }
-              textLinesCacheRef.current.set(pageNo, result)
+              textLinesCache.set(pageNo, result)
               return result
             }
 
@@ -4587,7 +4593,7 @@ window.__ModuleLoader__.load({
                * 不清就会把上一篇第 3 页的文字当成新文档的预览显示出来 ——
                * 这种错看起来像「预览内容张冠李戴」，最难往缓存上想。
                */
-              try { textLinesCacheRef.current.clear() } catch { /* ignore */ }
+              try { textLinesCache.clear() } catch { /* ignore */ }
               // 闪烁块是临时元素，清理时一并收掉（它可能还在淡出中）
               try { clearJumpFlash() } catch { /* ignore */ }
             }
