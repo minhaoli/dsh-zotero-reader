@@ -1378,6 +1378,9 @@ window.__ModuleLoader__.load({
         pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
         opacity:0;transition:opacity .12s}
       .zr-link-tip[data-on="1"]{opacity:1}
+      /* 告警态：外部链接被宿主拒掉时用，颜色区分「这是个失败的提示」 */
+      .zr-link-tip[data-warn="1"]{border-color:var(--dsh-danger,#c0392b);color:var(--dsh-text-primary,#e6e6e6);
+        max-width:min(560px,86vw);white-space:normal}
       /* 工具条里阅读控件与批注工具之间的分隔线 */
       .zr-sep{width:1px;height:18px;background:var(--dsh-border,#3a3a3a);margin:0 2px;flex:0 0 auto}
       /* 调色板：八个小色块，当前颜色加描边 */
@@ -3447,6 +3450,137 @@ window.__ModuleLoader__.load({
              * pdf.js 的处理器挂在 <a> 自身的 onclick 上，事件从 host 往
              * target 走，capture 先到、能把它拦下来。
              */
+            /**
+             * **文档内具名目标（LaTeX 的 `#eq1`、`#cite.hutchison2013semantic`）自己解析。**
+             *
+             * 原来这一支写的是 `linkService.navigateTo(name)` —— 而这个版本的
+             * pdf_viewer.mjs 里**根本没有 navigateTo 这个方法**（全文 0 处），
+             * 于是每点一次都抛 TypeError，再被空 catch 吞掉：
+             * 日志只留下 link:click，画面一动不动，看起来像「处理器没被调用」。
+             *
+             * 官方那只入口叫 goToDestination，但它最终的落点仍然是
+             * pdfViewer.scrollPageIntoView —— 即本项目已知断掉的那条滚动画布链路
+             * （侧栏容器 overflow:hidden、scrollHeight === clientHeight）。
+             * 所以这里只借它解析命名目标的部分，滚动交给 scrollPageIntoView。
+             *
+             * dest 的三种形态都要接：
+             *   · 命名目标 → [pageRef, {name:'XYZ'}, left, top, zoom]
+             *   · 间接目标（/Dest 里存的是另一个名字）→ 字符串，要再查一层
+             *   · dest[0] 通常是 page ref 对象，也兼容直接给页号（0 基）
+             */
+            const jumpToNamedDest = async (rawName) => {
+              const pdfDocument = pdfRef.current?.doc
+              if (!pdfDocument) {
+                reportDiag({ event: 'link:dest-fail', name: rawName, reason: 'no-document' })
+                return
+              }
+              /**
+               * href 里的目标名是 URL 编码过的（LaTeX 生成的锚点常带括号、空格，
+               * 会变成 %28、%20），而 PDF 的 Dests 字典里存的是原文。
+               */
+              let name = rawName
+              try { name = decodeURIComponent(rawName) } catch { /* 名字里本就有裸 % 时按原样用 */ }
+              try {
+                let dest = await pdfDocument.getDestination(name)
+                if (typeof dest === 'string') dest = await pdfDocument.getDestination(dest)
+                if (!Array.isArray(dest) || dest.length === 0) {
+                  reportDiag({ event: 'link:dest-fail', name, reason: 'no-dest' })
+                  return
+                }
+                const destRef = dest[0]
+                let pageIndex
+                if (Number.isInteger(destRef)) {
+                  pageIndex = destRef
+                } else {
+                  // 先用 pdf.js 自己的映射（纯本地，不跨 worker），没有再问
+                  const cached = pdfDocument.cachedPageNumber?.(destRef)
+                  pageIndex = Number.isInteger(cached) && cached > 0
+                    ? cached - 1
+                    : await pdfDocument.getPageIndex(destRef)
+                }
+                const pageNo = pageIndex + 1
+                const pageCount = pdfDocument.numPages || 0
+                if (!Number.isInteger(pageIndex) || pageIndex < 0 ||
+                    (pageCount > 0 && pageNo > pageCount)) {
+                  reportDiag({ event: 'link:dest-fail', name, reason: 'bad-page', page: pageNo, pages: pageCount })
+                  return
+                }
+                try {
+                  viewer.currentPageNumber = pageNo
+                  viewer.update?.()
+                  setVisiblePage(pageNo)
+                  setJumpPage(pageNo)
+                } catch { /* 页视图未建好时赋值会被丢弃，下面滚动兜住 */ }
+                const scrolled = scrollPageIntoView(host, pageNo, 0)
+                reportDiag({ event: 'link:dest', name, page: pageNo, scrolled })
+              } catch (e) {
+                /**
+                 * 不再空吞：命名目标解析失败正是「点了没反应」的主要来源，
+                 * 而空 catch 让这件事在日志里完全隐形。
+                 */
+                reportDiag({ event: 'link:dest-fail', name, reason: 'throw', message: String(e?.message ?? e) })
+              }
+            }
+
+            let linkTip = null
+            const ensureTip = () => {
+              if (linkTip && linkTip.isConnected) return linkTip
+              linkTip = document.createElement('div')
+              linkTip.className = 'zr-link-tip'
+              linkTip.setAttribute('data-on', '0')
+              document.body.appendChild(linkTip)
+              return linkTip
+            }
+
+            /** 悬停延时句柄；0 表示没有待执行的悬停。 */
+            let linkTipTimer = 0
+            /** 当前悬停的那条链接，用于 mouseover 冒泡去重。 */
+            let linkTipAnchor = null
+            /** 自动隐藏句柄（只有告警用）。 */
+            let linkWarnTimer = 0
+
+            /**
+             * 统一的提示写入与定位。
+             *
+             * `anchor` 为 null 时居中显示 —— 外部链接被宿主拒掉时没有可锚定的位置
+             * （那一刻鼠标可能已经移开），居中比跟着旧矩形更稳。
+             */
+            const hideLinkTip = () => {
+              if (linkTipTimer) { clearTimeout(linkTipTimer); linkTipTimer = 0 }
+              if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
+              linkTipAnchor = null
+              if (linkTip) linkTip.setAttribute('data-on', '0')
+            }
+
+            const showLinkTip = (label, anchor, autoHideMs = 0, warn = false) => {
+              const tip = ensureTip()
+              tip.textContent = label
+              tip.setAttribute('data-warn', warn ? '1' : '0')
+              /**
+               * 定位：优先放在链接上方；上方空间不够（贴近视口顶部）就放下方。
+               * 左右夹在视口内，避免长 URL 把提示顶出屏幕。
+               *
+               * `getBoundingClientRect` 只在这里读一次 —— 它会强制布局，
+               * 而链接是刚画出来的，前面压着一大批没偿还的 DOM 写入。
+               */
+              const tipW = Math.min(tip.offsetWidth || 240, window.innerWidth - 16)
+              let left
+              let top
+              if (anchor) {
+                const r = anchor.getBoundingClientRect()
+                left = Math.max(8, Math.min(r.left, window.innerWidth - tipW - 8))
+                top = r.top - 30
+                if (top < 8) top = r.bottom + 8
+              } else {
+                left = Math.max(8, (window.innerWidth - tipW) / 2)
+                top = 56
+              }
+              tip.style.left = `${Math.round(left)}px`
+              tip.style.top = `${Math.round(top)}px`
+              tip.setAttribute('data-on', '1')
+              if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
+              if (autoHideMs > 0) linkWarnTimer = setTimeout(() => hideLinkTip(), autoHideMs)
+            }
             const onPdfLinkClick = (event) => {
               const anchor = event.target?.closest?.('a[href]')
               if (!anchor || !host.contains(anchor)) return
@@ -3474,11 +3608,10 @@ window.__ModuleLoader__.load({
                   return
                 }
                 /**
-                 * 具名目标（PDF 里的命名 dest）：交给 pdf.js 自己解析，
-                 * 它会走到我们的 scrollPageIntoView 之外 —— 失败也不致命，
-                 * 至少不会把整个页面导航走。
+                 * 具名目标（PDF 里的命名 dest，LaTeX 的 \label 就落在这里）：
+                 * 见上面 jumpToNamedDest 的说明 —— 不再走不存在的 linkService.navigateTo。
                  */
-                try { linkService.navigateTo(href.slice(1)) } catch { /* 忽略 */ }
+                void jumpToNamedDest(href.slice(1))
                 return
               }
 
@@ -3508,12 +3641,49 @@ window.__ModuleLoader__.load({
                    * 实际 PDF 里的链接绝大多数是 https（DOI、期刊站），
                    * 老论文偶尔有 http，属于可接受的边界。
                    */
-                  const opened = window.open(href, '_blank', 'noopener,noreferrer')
+                  /**
+                   * **不能带 `noopener` / `noreferrer`。**
+                   *
+                   * 按 HTML 规范，window.open 的 features 里出现这两个之一时，
+                   * 实现必须返回 null（新窗口的 WindowProxy 不可暴露）。
+                   * 原来那句 `'noopener,noreferrer'` 于是让返回值恒为 null，
+                   * 下面 `blocked: !opened` 就成了永远为真的假信号 ——
+                   * 日志里看着像「宿主每次都拦」，实际可能一次都没拦。
+                   *
+                   * 去掉之后拿到真实返回值，blocked 才有判读价值。
+                   * 安全性在这里不受影响：打开的是用户主动点击的外部链接，
+                   * 且宿主 setWindowOpenHandler 一律返回 { action: "deny" }
+                   * （见上面那段规则），根本不会真的在当前页导航。
+                   */
+                  const opened = window.open(href, '_blank')
                   /**
                    * `blocked` 是关键判据：window.open 被拦时返回 null 而不抛错。
                    * 有这条日志就能分清「处理器没被调用」和「调用了但被宿主拒」。
                    */
-                  reportDiag({ event: 'link:open', href: href.slice(0, 300), blocked: !opened })
+                  const blocked = !opened
+                  reportDiag({ event: 'link:open', href: href.slice(0, 300), blocked })
+                  /**
+                   * 真的被拒时要让用户看见。
+                   *
+                   * 宿主的规则是「https 才 shell.openExternal，其余一律 deny」，
+                   * 所以 http / mailto / tel 必然走到这里。静默拒绝的观感
+                   * 和「点了没反应」完全一样，而这正是用户此前报的现象。
+                   * 提示里带上完整地址，方便手动复制。
+                   */
+                  if (blocked) {
+                    showLinkTip(`打不开这个链接：${href}`, null, 4000, true)
+                    /**
+                     * 顺手复制地址，但**不要预先声称复制成功** ——
+                     * 剪贴板可能被权限拒掉，谎报「已复制」比不提示更糟。
+                     * 只在 promise 真的兑现时才改文案。
+                     */
+                    try {
+                      navigator.clipboard?.writeText?.(href)?.then?.(
+                        () => { if (linkTip) linkTip.textContent = `打不开这个链接（地址已复制）：${href}` },
+                        () => { /* 复制失败就保留原提示 */ },
+                      )
+                    } catch { /* 剪贴板不可用就算了 */ }
+                  }
                 } catch (e) {
                   reportDiag({ event: 'link:open-error', href: href.slice(0, 300), message: String(e?.message ?? e) })
                 }
@@ -3533,15 +3703,18 @@ window.__ModuleLoader__.load({
              * 宿主的 .zr-pdfviewer-host 是 overflow:hidden，
              * 挂在里面贴边时会被裁掉。
              */
-            let linkTip = null
-            const ensureTip = () => {
-              if (linkTip && linkTip.isConnected) return linkTip
-              linkTip = document.createElement('div')
-              linkTip.className = 'zr-link-tip'
-              linkTip.setAttribute('data-on', '0')
-              document.body.appendChild(linkTip)
-              return linkTip
-            }
+
+            /**
+             * 悬停多久之后才算矩形。
+             *
+             * 原来每次 mouseover 立刻算 —— 而 mouseover 会从 `<a>` 里的子元素
+             * 反复冒泡上来，鼠标扫过一行字就是一串调用。性能日志里
+             * `HTMLAnchorElement.patchedGBCR <- onPdfLinkOver` 18 次累计 4751ms，
+             * 单次最高 447ms，全是这一处的强制布局。
+             * 150ms：人真的停在链接上才会看到提示，快速扫过不触发任何计算。
+             */
+            const HOVER_TIP_DELAY = 150
+
             const onPdfLinkOver = (event) => {
               const anchor = event.target?.closest?.('a[href]')
               if (!anchor || !host.contains(anchor)) return
@@ -3553,35 +3726,35 @@ window.__ModuleLoader__.load({
                * 于是悬停时同时出现两个框：我们的地址框 + 原文文字框。
                *
                * 原生提示要等约 500ms 才弹，在 mouseover 这一拍删掉就弹不出来。
+               * 这一步必须**立即**做，不能挪进下面的延时里 —— 延时 150ms 之后
+               * 原生提示框可能已经排上队了。
                */
               if (anchor.hasAttribute('title')) anchor.removeAttribute('title')
-              const href = anchor.getAttribute('href') || ''
-              if (!href) return
-              const pageMatch = /^#page=(\d+)/i.exec(href)
-              const label = pageMatch
-                ? `文档内跳转 · 第 ${pageMatch[1]} 页`
-                : href.startsWith('#')
-                  ? `文档内跳转 · ${href.slice(1)}`
-                  : href
-              const tip = ensureTip()
-              tip.textContent = label
-              tip.setAttribute('data-on', '1')
-              /**
-               * 定位：优先放在链接上方；上方空间不够（贴近视口顶部）就放下方。
-               * 左右夹在视口内，避免长 URL 把提示顶出屏幕。
-               */
-              const r = anchor.getBoundingClientRect()
-              const tipW = Math.min(tip.offsetWidth || 240, window.innerWidth - 16)
-              let left = Math.max(8, Math.min(r.left, window.innerWidth - tipW - 8))
-              let top = r.top - 30
-              if (top < 8) top = r.bottom + 8
-              tip.style.left = `${Math.round(left)}px`
-              tip.style.top = `${Math.round(top)}px`
+              // 同一条链接内部移动（冒泡）不算换目标，否则会不停重排延时
+              if (anchor === linkTipAnchor) return
+              if (linkTipTimer) clearTimeout(linkTipTimer)
+              linkTipAnchor = anchor
+              linkTipTimer = setTimeout(() => {
+                linkTipTimer = 0
+                // 延时期间可能已经滚走、重渲染或切文献
+                if (!anchor.isConnected || !host.contains(anchor)) return
+                const href = anchor.getAttribute('href') || ''
+                if (!href) return
+                const pageMatch = /^#page=(\d+)/i.exec(href)
+                const label = pageMatch
+                  ? `文档内跳转 · 第 ${pageMatch[1]} 页`
+                  : href.startsWith('#')
+                    ? `文档内跳转 · ${href.slice(1)}`
+                    : href
+                showLinkTip(label, anchor)
+              }, HOVER_TIP_DELAY)
             }
             const onPdfLinkOut = (event) => {
               const anchor = event.target?.closest?.('a[href]')
               if (!anchor) return
-              if (linkTip) linkTip.setAttribute('data-on', '0')
+              // 指针在本链接的子元素之间移动时也会触发 mouseout，那不是离开
+              if (event.relatedTarget && anchor.contains?.(event.relatedTarget)) return
+              hideLinkTip()
             }
 
             host.addEventListener('click', onPdfLinkClick, true)
@@ -3591,6 +3764,11 @@ window.__ModuleLoader__.load({
               try { host.removeEventListener('click', onPdfLinkClick, true) } catch { /* ignore */ }
               try { host.removeEventListener('mouseover', onPdfLinkOver) } catch { /* ignore */ }
               try { host.removeEventListener('mouseout', onPdfLinkOut) } catch { /* ignore */ }
+              try { if (linkTipTimer) clearTimeout(linkTipTimer) } catch { /* ignore */ }
+              try { if (linkWarnTimer) clearTimeout(linkWarnTimer) } catch { /* ignore */ }
+              linkTipTimer = 0
+              linkWarnTimer = 0
+              linkTipAnchor = null
               try { linkTip?.remove() } catch { /* ignore */ }
               linkTip = null
             }
