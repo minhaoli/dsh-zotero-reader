@@ -1184,6 +1184,20 @@ window.__ModuleLoader__.load({
       /* 文字层样式由官方 pdf_viewer.css 提供（.textLayer），这里不再自定义 */
       .zr-pagemark{position:absolute;right:4px;bottom:4px;background:rgba(0,0,0,.55);color:#fff;padding:1px 6px;border-radius:4px;font-size:11px;line-height:1.5}
       .zr-hl{position:absolute;background:rgba(255,196,0,.42);border-radius:2px;pointer-events:none;mix-blend-mode:multiply}
+      /*
+       * 跳转闪烁：点了文档内链接后，在落点处短暂铺一层蓝色半透明底，
+       * 约 1 秒后淡出。和 .zr-hl（会话跳页留下的高亮）是两回事：
+       *   · .zr-hl 由 highlight state 驱动、跟随标注层一起重建，会一直留着；
+       *   · 这个是**一次性临时元素**，挂在页面元素上，自己定时移除。
+       * 用独立 class 是为了两套生命周期互不影响 —— 复用 .zr-hl 的话，
+       * 标注层重绘会把闪烁块当成常驻高亮重新画出来。
+       *
+       * 蓝色调（用户明确要的），multiply 让底下文字仍然透出来。
+       */
+      .zr-jump-flash{position:absolute;z-index:3;border-radius:2px;pointer-events:none;
+        background:rgba(64,150,255,.34);mix-blend-mode:multiply;
+        opacity:1;transition:opacity .45s ease-out}
+      .zr-jump-flash[data-fade="1"]{opacity:0}
       .zr-note{padding:10px 12px;color:var(--dsh-text-secondary,#9aa0a6);font-size:12px;line-height:1.7}
       .zr-err{padding:10px 12px;color:#ff8a80;font-size:12px;line-height:1.7}
       .zr-list{overflow:auto;flex:1 1 auto;min-height:0;padding:4px 0}
@@ -3758,6 +3772,295 @@ window.__ModuleLoader__.load({
              * 参数为 null 是 PDF 规范里的「保持不变」，不是 0，所以逐项判。
              * 取不到可靠 y 时返回 null，调用方退回页首。
              */
+            /**
+             * **取名目标位置附近的正文，作为悬停预览。**
+             *
+             * 上一轮卡片里显示的是「文档内跳转 / 第 N 页 / fig8」这类元信息，
+             * 用户要看的是「点过去会到哪句话」。这段话本来就在 PDF 文本层里，
+             * 不需要 DOI、不需要查 Zotero 库 —— 对 `#fig8`、`#eq1`、
+             * `#cite.andrews1997` 一视同仁。
+             *
+             * 取法的三个要点（都是拿真实 PDF 实测踩出来的）：
+             *
+             * ① **先分栏**。双栏论文左栏 x≈49、右栏 x≈305，
+             *    只按 y 找最近行会把相邻栏的文字混进来：`cite.collins1975`
+             *    的 destX=300 在右栏，按纯 y 会取到左栏那句「283–316. doi:...」。
+             *    用页宽中点判定 destX 属哪栏，再只在该栏里找。
+             *
+             * ② **按 x 邻近度给惩罚**。同一栏内仍可能在 destX 左侧另起一段，
+             *    纯 y 最近会跳到隔壁段：`fig8` 的 destX=317 在右栏，
+             *    不加横向惩罚会取到左栏正文而错过「FIGURE 8」。
+             *
+             * ③ **命中行之后继续往下拼一点**，凑成一段可读预览。
+             */
+            const linkPreviewChars = 120
+            /**
+             * 文本层缓存：pageNo → { lines, width, height }。
+             *
+             * getTextContent 要跨 worker 取整页文本（实测一页 320 个 item），
+             * 每次悬停都做会让预览变卡。按页缓存，一篇论文很快全命中。
+             * **换文档时必须清空**（见下面 cleanup），否则新 PDF 会读到上一篇的行。
+             */
+            const textLinesCacheRef = useRef(new Map())
+
+            const pageTextLines = async (pdfDocument, pageNo) => {
+              const cached = textLinesCacheRef.current.get(pageNo)
+              if (cached) return cached
+              const page = await pdfDocument.getPage(pageNo)
+              const viewport = page.getViewport({ scale: 1 })
+              const content = await page.getTextContent()
+              const items = []
+              for (const it of content?.items ?? []) {
+                // 纯空白 item 不参与（文本层里大量这种）
+                if (!it?.str || !it.str.trim()) continue
+                const x = it.transform?.[4]
+                const y = it.transform?.[5]
+                if (typeof x !== 'number' || typeof y !== 'number') continue
+                items.push({ s: it.str, x, y, w: it.width ?? 0 })
+              }
+              const lines = []
+              if (items.length > 0) {
+                /**
+                 * 聚行：同一基线（±4pt 容差）的 item 拼成一行。
+                 * 容差取 4pt 是因为上下标差 2–3pt，再大就会把相邻行并掉。
+                 */
+                const byBaseline = new Map()
+                for (const it of items) {
+                  const key = Math.round(it.y / 4)
+                  if (!byBaseline.has(key)) byBaseline.set(key, [])
+                  byBaseline.get(key).push(it)
+                }
+                for (const group of byBaseline.values()) {
+                  group.sort((a, b) => a.x - b.x)
+                  const text = group.map((v) => v.s).join(' ').replace(/\s+/g, ' ').trim()
+                  if (!text) continue
+                  lines.push({
+                    y: group[0].y,
+                    x0: Math.min(...group.map((v) => v.x)),
+                    x1: Math.max(...group.map((v) => v.x + (v.w || 0))),
+                    text,
+                  })
+                }
+                // 排版顺序：PDF 原点在左下，所以 y 递减才是从上到下
+                lines.sort((a, b) => b.y - a.y)
+              }
+              /**
+               * 空页也缓存：扫描页永远没有文本层，
+               * 不缓存就会每次悬停都白跑一遍 getTextContent。
+               */
+              const result = { lines, width: viewport.width, height: viewport.height }
+              textLinesCacheRef.current.set(pageNo, result)
+              return result
+            }
+
+            /**
+             * 从文本层里裁出 dest 附近的文字；取不到返回 null。
+             * @returns {Promise<string|null>}
+             */
+            const extractDestPreview = async (dest, pageNo) => {
+              try {
+                const pdfDocument = pdfRef.current?.doc
+                if (!pdfDocument) return null
+                const packed = await pageTextLines(pdfDocument, pageNo)
+                const lines = packed?.lines ?? []
+                if (lines.length === 0) return null
+                // destX / destY 都可能是 null（规范里的「保持不变」）
+                const destX = typeof dest?.[2] === 'number' ? dest[2] : null
+                const destY = typeof dest?.[3] === 'number' ? dest[3] : null
+                if (destY === null) return null
+
+                /**
+                 * 分栏：按行区间中点落在页宽哪一半判断。
+                 * 该栏行数占比太低时（单栏文档，或 destX 落在栏间空白）
+                 * 退回全页 —— 宁可多给一点，也别因为分栏判断错而一个字取不到。
+                 */
+                let scoped = lines
+                if (destX !== null && packed.width > 0) {
+                  const mid = packed.width / 2
+                  const side = destX < mid ? 'L' : 'R'
+                  const sameSide = lines.filter((l) => ((l.x0 + l.x1) / 2 < mid ? 'L' : 'R') === side)
+                  if (sameSide.length >= Math.max(2, lines.length * 0.15)) scoped = sameSide
+                }
+
+                // 打分：竖向距离为主；destX 落到该行横向区间之外的偏移按 0.5 计惩罚
+                let best = 0
+                let bestScore = Infinity
+                for (let i = 0; i < scoped.length; i += 1) {
+                  const l = scoped[i]
+                  const dy = Math.abs(l.y - destY)
+                  const dx = destX === null
+                    ? 0
+                    : destX < l.x0 - 2
+                      ? l.x0 - destX
+                      : destX > l.x1 + 2
+                        ? destX - l.x1
+                        : 0
+                  const score = dy + dx * 0.5
+                  if (score < bestScore) { bestScore = score; best = i }
+                }
+                // 命中行 + 往后若干行，凑到字数上限
+                let out = scoped[best].text || ''
+                for (let i = best + 1; i < scoped.length && out.length < linkPreviewChars; i += 1) {
+                  const next = scoped[i].text || ''
+                  if (!next) continue
+                  if (out.length + 1 + next.length > linkPreviewChars + 20) break
+                  out += ` ${next}`
+                }
+                out = out.trim()
+                if (!out) return null
+                if (out.length > linkPreviewChars) {
+                  out = `${out.slice(0, linkPreviewChars).trimEnd()}…`
+                }
+                return out
+              } catch { return null }
+            }
+
+            /**
+             * **跳转落点闪烁。**
+             *
+             * 点了 `#fig8` 之后只有「滚过去了」这一个反馈，而侧栏里页与页
+             * 长得差不多，用户常常找不到到底该看哪一句。所以在落点铺一层
+             * 蓝色半透明底，约 1 秒后淡出。
+             *
+             * 定位不用 dest 的坐标自己算，而是**直接量目标行的 DOM 矩形**：
+             * 文本层 span 已经由 pdf.js 摆好位置，拿它的 getBoundingClientRect
+             * 再换算到页面元素内即可，比反推 scale、rotation、padding 都可靠。
+             *
+             * 拿不到行元素时退回「按 offset 估一个横条」，至少给个方向感。
+             */
+            const jumpFlashMs = 1000
+            /** 当前闪烁元素与定时器，必须能被 cleanup 清掉。 */
+            let jumpFlashEl = null
+            let jumpFlashTimer = 0
+
+            const clearJumpFlash = () => {
+              if (jumpFlashTimer) { clearTimeout(jumpFlashTimer); jumpFlashTimer = 0 }
+              try { jumpFlashEl?.remove() } catch { /* 已经不在 DOM 里 */ }
+              jumpFlashEl = null
+            }
+
+            const flashJumpTarget = (pageNo, offset, previewText) => {
+              try {
+                clearJumpFlash()
+                const host = hostRef.current
+                const pageEl = host?.querySelector?.(`.page[data-page-number="${pageNo}"]`)
+                if (!pageEl) return
+                const pageRect = pageEl.getBoundingClientRect()
+                if (!(pageRect.width > 0 && pageRect.height > 0)) return
+
+                const box = document.createElement('div')
+                box.className = 'zr-jump-flash'
+                /**
+                 * 默认：横跨页面正文区、高约两行的一个横条，
+                 * 纵向按 offset 落在目标位置。
+                 */
+                const pageH = pageEl.clientHeight || pageRect.height
+                const lineH = Math.max(16, Math.min(30, pageH * 0.032))
+                const inset = Math.max(8, pageRect.width * 0.06)
+                let left = inset
+                let top = pageH * Math.min(0.98, Math.max(0, offset || 0))
+                let width = Math.max(40, pageRect.width - inset * 2)
+                let height = lineH
+                let x = 0
+                let y = 0
+                let w = 0
+                let h = 0
+
+                /**
+                 * 更精确的做法：在文本层里找到与预览文字匹配的 span，
+                 * 直接用它自己的矩形。文本层还没画出来时返回 false。
+                 *
+                 * 抽成函数是因为它可能要跑两次：目标页首次打开时
+                 * `.textLayer` 里的 span 还没生成，得等 textlayerrendered 再补。
+                 */
+                const alignToTextLayer = () => {
+                  if (!previewText) return false
+                  try {
+                    const spans = pageEl.querySelectorAll('.textLayer span')
+                    const needle = String(previewText).trim().slice(0, 24)
+                    if (!needle) return false
+                    let hit = null
+                    for (const sp of spans) {
+                      const t = (sp.textContent || '').trim()
+                      if (!t) continue
+                      if (t.length >= 8 && needle.includes(t)) { hit = sp; break }
+                      if (t.length >= 4 && needle.startsWith(t.slice(0, Math.min(t.length, 24)))) { hit = sp; break }
+                    }
+                    if (!hit) return false
+                    const r = hit.getBoundingClientRect()
+                    if (!(r.width > 0 && r.height > 0)) return false
+                    x = Math.max(0, r.left - pageRect.left - 2)
+                    y = Math.max(0, r.top - pageRect.top - 1)
+                    w = Math.min(pageRect.width - x, Math.max(8, r.width + 4))
+                    h = Math.max(8, r.height + 2)
+                    return true
+                  } catch { return false }
+                }
+
+                const paint = () => {
+                  box.style.left = `${Math.round(left)}px`
+                  box.style.top = `${Math.round(top)}px`
+                  box.style.width = `${Math.round(width)}px`
+                  box.style.height = `${Math.round(height)}px`
+                }
+
+                /**
+                 * 定位优先用文本层矩形；拿不到才用估算横条。
+                 */
+                if (alignToTextLayer()) {
+                  left = x
+                  top = y
+                  width = w
+                  height = h
+                }
+                paint()
+                /**
+                 * 挂在页面元素上（position:absolute 相对它），
+                 * 这样页面滚动/缩放时闪烁块跟着走，不会浮在半空。
+                 */
+                pageEl.appendChild(box)
+                jumpFlashEl = box
+
+                /**
+                 * **文本层可能还没画出来。**
+                 *
+                 * 目标页若是首次打开（懒渲染），`scrollPageIntoView` 那一刻
+                 * 页元素在、但 `.textLayer` 里的 span 还没生成 —— 精确对齐必然失败，
+                 * 用户看到的就是「一个跟内容对不上的横条」。
+                 * 所以在 textlayerrendered 上挂一次性补位（只关心目标页），
+                 * 页面画好后把估算块换成真实行矩形。用 once 语义 + 自身校验，
+                 * 避免长期挂着或改到已经被替换掉的节点。
+                 */
+                const bus = eventBusRef.current
+                if (!alignToTextLayer() && previewText && bus) {
+                  try {
+                    const onTextLayer = (evt) => {
+                      if (evt?.pageNumber !== pageNo) return
+                      try { bus.off('textlayerrendered', onTextLayer) } catch { /* ignore */ }
+                      // 已经被清掉或换成了别的闪块：不要再改
+                      if (jumpFlashEl !== box) return
+                      if (!alignToTextLayer()) return
+                      left = x
+                      top = y
+                      width = w
+                      height = h
+                      paint()
+                    }
+                    bus.on('textlayerrendered', onTextLayer)
+                    // 兜底：页面始终没抛该事件时也别让监听常驻
+                    setTimeout(() => { try { bus.off('textlayerrendered', onTextLayer) } catch { /* ignore */ } }, 3000)
+                  } catch { /* 事件总线不可用就保持估算 */ }
+                }
+
+                // 先让它可见一拍，再加淡出属性，保证 transition 真的跑起来
+                jumpFlashTimer = setTimeout(() => {
+                  try { box.setAttribute('data-fade', '1') } catch { /* ignore */ }
+                  // 淡出结束再移除；多留 500ms 兜住 transition 的尾巴
+                  jumpFlashTimer = setTimeout(() => { clearJumpFlash() }, 500)
+                }, jumpFlashMs)
+              } catch { /* 闪烁纯装饰，失败不影响跳转 */ }
+            }
+
             const destVOffset = async (dest, pageNo) => {
               const kind = dest?.[1]?.name
               if (!kind) return null
@@ -3843,6 +4146,12 @@ window.__ModuleLoader__.load({
                  */
                 const offset = await destVOffset(dest, pageNo)
                 const scrolled = scrollPageIntoView(host, pageNo, offset ?? 0)
+                /**
+                 * 落点闪烁：取一次该目标的预览文字，用它去对齐文本层里的
+                 * 那一行；取不到就用 offset 估一条横条。纯装饰，失败不影响跳转。
+                 */
+                const flashText = await extractDestPreview(dest, pageNo)
+                flashJumpTarget(pageNo, offset ?? 0, flashText)
                 reportDiag({
                   event: 'link:dest',
                   name,
@@ -3851,6 +4160,7 @@ window.__ModuleLoader__.load({
                   destY: dest?.[1]?.name === 'XYZ' ? dest[3] : (dest?.[1]?.name?.startsWith('FitH') ? dest[2] : null),
                   offset: offset ?? 0,
                   scrolled,
+                  preview: flashText ? flashText.slice(0, 60) : null,
                 })
               } catch (e) {
                 /**
@@ -4129,30 +4439,26 @@ window.__ModuleLoader__.load({
                 if (href.startsWith('#')) {
                   const rawName = href.slice(1)
                   /**
-                   * 具名目标：先同步显示目标名，页码异步补上。
+                   * 具名目标的预览：**显示目标处那段正文**。
                    *
-                   * 为什么不直接等着查完再显示：解析要跨 worker（getDestination
-                   * 是异步的），快则几毫秒、慢则几十毫秒，先出卡片再补页码
-                   * 观感更稳，也不至于让悬停变成一次强制等待。
+                   * 原来卡片里是「文档内跳转 / 第 N 页 / fig8」这类元信息，
+                   * 用户的原话是「我希望是具体的内容预览呀」。那段文字本来
+                   * 就在 PDF 文本层里 —— 不需要 DOI，也不需要查 Zotero 库，
+                   * 对 `#fig8`、`#eq1`、`#cite.andrews1997` 一视同仁。
                    *
-                   * 路线说明：这里只显示**本文档内的目标页号**，不拉文献条目。
-                   * Zotero 那种「作者-年份-期刊-DOI」卡片要求被引文献在用户库里
-                   * 存着，而 PDF 的 /Dests 里只有目标名和一个页内坐标，没有 DOI；
-                   * 按 key 反查当前库对 `cite.andrews1997` 这类 LaTeX 命名目标
-                   * 也拿不到（它不是 Zotero 的 itemKey）。要做得改宿主加接口，
-                   * 成本与收益不匹配，故降级为页号。
+                   * 分两步：先同步出「加载中」的骨架（悬停要即时反馈），
+                   * 再异步解析 dest 取文字后补上。取不到就退回元信息。
                    */
                   const decName = (() => {
                     try { return decodeURIComponent(rawName) } catch { return rawName }
                   })()
-                  const lines = [
+                  showLinkTip([
                     { kind: 'title', text: '文档内跳转' },
-                    { kind: 'dim', text: decName },
-                  ]
-                  showLinkTip(lines, anchor)
+                    { kind: 'dim', text: '正在读取目标内容…' },
+                  ], anchor)
                   /**
-                   * 异步补页码。此时用户可能已经移开鼠标（卡片已隐藏、
-                   * linkTipAnchor 已换人），所以补写前要确认「还是这一条」。
+                   * 异步补内容。此时用户可能已经移开鼠标（卡片已隐藏、
+                   * linkTipAnchor 已换人），所以回写前要确认「还是这一条」。
                    */
                   void (async () => {
                     try {
@@ -4171,13 +4477,26 @@ window.__ModuleLoader__.load({
                           : await pdfDocument.getPageIndex(destRef)
                       }
                       if (!Number.isInteger(pageIndex) || pageIndex < 0) return
+                      const pageNo = pageIndex + 1
+                      const preview = await extractDestPreview(dest, pageNo)
                       // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
                       if (linkTipAnchor !== anchor || !linkTip || !anchor.isConnected) return
-                      showLinkTip([
-                        { kind: 'title', text: '文档内跳转' },
-                        { kind: 'line', text: `第 ${pageIndex + 1} 页` },
-                        { kind: 'dim', text: decName },
-                      ], anchor)
+                      /**
+                       * 有正文就以正文为卡片主体（这才是用户要的「内容预览」），
+                       * 页码与目标名退成次要信息；取不到文字则保留元信息。
+                       */
+                      if (preview) {
+                        showLinkTip([
+                          { kind: 'line', text: preview },
+                          { kind: 'dim', text: `第 ${pageNo} 页 · ${decName}` },
+                        ], anchor)
+                      } else {
+                        showLinkTip([
+                          { kind: 'title', text: '文档内跳转' },
+                          { kind: 'line', text: `第 ${pageNo} 页` },
+                          { kind: 'dim', text: decName },
+                        ], anchor)
+                      }
                     } catch { /* 解析不出来就保持目标名，不打扰用户 */ }
                   })()
                   return
@@ -4207,6 +4526,16 @@ window.__ModuleLoader__.load({
               linkTipAnchor = null
               try { linkTip?.remove() } catch { /* ignore */ }
               linkTip = null
+              /**
+               * 文本层缓存**必须跟着文档一起清**。
+               *
+               * 缓存键是 pageNo，不带文档身份：换一篇 PDF 后第 3 页还是第 3 页，
+               * 不清就会把上一篇第 3 页的文字当成新文档的预览显示出来 ——
+               * 这种错看起来像「预览内容张冠李戴」，最难往缓存上想。
+               */
+              try { textLinesCacheRef.current.clear() } catch { /* ignore */ }
+              // 闪烁块是临时元素，清理时一并收掉（它可能还在淡出中）
+              try { clearJumpFlash() } catch { /* ignore */ }
             }
             disposeLinkHandlersRef.current = disposeLinkHandlers
 
