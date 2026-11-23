@@ -1642,32 +1642,104 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 视口顶部落在某页内的比例，**按几何量**，不依赖调用方传对滚动容器。
+     * 找出屏幕坐标 (x, y) 底下是第几页。
      *
-     * 与 measureScrollOffset 的区别只有一点：滚动祖先由 findScrollParent 现找。
-     * 为什么需要另一份：那个函数的第一个参数是 `scrollRef.current`，而 ScrollRef
-     * 挂在 `.zr-page` 上 —— 它并不是真正吃滚动的节点（`.pdfViewer` 才是）。
-     * 用它算偏移会恒得 0，用在「缩放后位置有没有漂」的判据里就等于判据失灵。
-     *
-     * 这里还兜住「连续滚动」的情况：整页高度为 0 时（页视图还没建好）退回按
-     * 页间距折算，而不是直接报 0。
+     * 先用 elementFromPoint —— 它给的正是「用户眼睛看到的那一页」，天然处理了
+     * 页间距、批注浮层、文本层这些覆盖物。拿不到 `.page`（指针落在页间空隙、
+     * 滚动条、或者某层抢了命中）时，退回按几何找：
+     *   · 优先取垂直方向真正覆盖该点的页；
+     *   · 都不覆盖就取垂直距离最近的一页（页间空隙就属于这种）。
+     * 必须有兜底：指针停在两页之间的空白是很常见的，那时若放弃锚点，
+     * 缩放就会退回「当前页贴顶」—— 正是要修的那个行为。
      */
-    function measureScrollOffsetByGeometry(hostEl, pageNo) {
+    function pageElementAtPoint(hostEl, clientX, clientY) {
       try {
-        if (!hostEl || !pageNo) return 0
-        const pageEl = hostEl.querySelector(`.page[data-page-number="${pageNo}"]`)
-        if (!pageEl) return 0
+        if (!hostEl) return null
+        const hit = (typeof document !== 'undefined' && document.elementFromPoint)
+          ? document.elementFromPoint(clientX, clientY)
+          : null
+        const fromHit = hit?.closest?.('.page[data-page-number]')
+        if (fromHit && hostEl.contains(fromHit)) return fromHit
+        const pages = hostEl.querySelectorAll('.page[data-page-number]')
+        if (!pages.length) return null
+        let best = null
+        let bestDist = Infinity
+        for (const el of pages) {
+          const r = el.getBoundingClientRect()
+          if (r.height <= 0) continue
+          if (clientY >= r.top && clientY <= r.bottom) return el
+          const dist = clientY < r.top ? r.top - clientY : clientY - r.bottom
+          if (dist < bestDist) { bestDist = dist; best = el }
+        }
+        return best
+      } catch { return null }
+    }
+
+    /**
+     * **记下缩放前的「指针锚点」。**
+     *
+     * 这是「以光标所在点为原点缩放」的全部依据：把屏幕点换算成
+     * 「某页 + 该页内的归一化坐标 (nx, ny)」，缩放到任意比例后同一对
+     * 归一化坐标仍然指同一个文档位置 —— 因为 pdf.js 的每页几何是纯线性缩放，
+     * 页内归一化坐标不随 scale 改变。
+     *
+     * 注意 nx/ny **不夹到 [0,1]**：指针可能停在页边缘外一点（padding、页间空隙），
+     * 那仍是合法的线性坐标，夹取反而会让锚点突然跳到页边，缩放时抖一下。
+     */
+    function captureZoomAnchor(hostEl, clientX, clientY) {
+      try {
+        const pageEl = pageElementAtPoint(hostEl, clientX, clientY)
+        if (!pageEl) return null
+        const pageNo = Number(pageEl.dataset.pageNumber)
+        if (!Number.isInteger(pageNo) || pageNo <= 0) return null
+        const rect = pageEl.getBoundingClientRect()
+        if (rect.width <= 0 || rect.height <= 0) return null
+        return {
+          pageNo,
+          nx: (clientX - rect.left) / rect.width,
+          ny: (clientY - rect.top) / rect.height,
+          clientX,
+          clientY,
+        }
+      } catch { return null }
+    }
+
+    /**
+     * **缩放后把锚点拽回原处。**
+     *
+     * 缩放改变的是页面的 CSS 尺寸，于是同一归一化坐标会跑到屏幕的另一处。
+     * 这里重新取该页当前的矩形，算出它此刻落在哪（wantX/wantY），
+     * 再按差值滚动容器 —— 差值就是「该点被推开了多远」，滚回去即抵消，
+     * 于是指针下的文档坐标点在屏幕上保持不动。
+     *
+     * 三个必须踩准的点：
+     *   · 滚动容器用 findScrollParent 现找。`scrollRef.current` 挂在 `.zr-page`
+     *     上，它不是真正吃滚动的节点，写它的 scrollTop 不产生任何效果
+     *     （本项目为此专门留过注释，别再踩）。
+     *   · 用增量 `+=` 而不是绝对赋值：pdf.js 在 #setScaleUpdatePages 里
+     *     已经自己滚过一次（按旧 _location 保位，会贴顶），我们要在它的结果
+     *     之上校正，不是从头定位。
+     *   · 横向也要管：放大后页宽超过容器时，锚点的横向位置同样会漂。
+     *
+     * 返回实际补偿量，量不到就返回 null。
+     */
+    function applyZoomAnchor(hostEl, anchor) {
+      try {
+        if (!hostEl || !anchor) return null
+        const pageEl = hostEl.querySelector(`.page[data-page-number="${anchor.pageNo}"]`)
+        if (!pageEl) return null
+        const rectNow = pageEl.getBoundingClientRect()
+        if (rectNow.width <= 0 || rectNow.height <= 0) return null
         const scroller = findScrollParent(pageEl)
-        if (!scroller) return 0
-        // 视口顶部相对该页内容原点的偏移（负值表示页首还在下方）
-        const delta = scroller.getBoundingClientRect().top
-          - pageEl.getBoundingClientRect().top
-        const pageH = pageEl.clientHeight || pageEl.offsetHeight || 0
-        if (pageH <= 0) return 0
-        const rel = delta / pageH
-        if (!Number.isFinite(rel)) return 0
-        return Math.min(0.98, Math.max(0, rel))
-      } catch { return 0 }
+        if (!scroller) return null
+        const wantX = rectNow.left + anchor.nx * rectNow.width
+        const wantY = rectNow.top + anchor.ny * rectNow.height
+        const dx = wantX - anchor.clientX
+        const dy = wantY - anchor.clientY
+        if (Math.abs(dx) > 0.5) scroller.scrollLeft += dx
+        if (Math.abs(dy) > 0.5) scroller.scrollTop += dy
+        return { dx, dy }
+      } catch { return null }
     }
 
     function Reader(props) {
@@ -3145,13 +3217,28 @@ window.__ModuleLoader__.load({
        */
       const resumeByInitRef = useRef(false)
       /**
-       * 上一次「用户主动改缩放」的时刻（performance.now()）。
+       * 上一次缩放结束的时刻（performance.now()）。
        *
-       * 缩放之后 pdf.js 需要几帧把每页 viewport 重算完，这段时间里我们自己的
-       * 滚动/重试若还按旧的恢复目标动作，就会把用户刚放好的位置拽走。
-       * 用时间戳而不是布尔量：它是一个「刚刚在缩放」的窗口，会自然过期。
+       * 缩放之后 pdf.js 要若干帧才把每页 viewport 重算完，这段时间里
+       * 「下一帧补装饰」之类的写入会跟它抢 DOM。用时间戳而不是布尔量：
+       * 它是一个会自然过期的窗口。
        */
       const zoomAtRef = useRef(0)
+      /**
+       * **待补偿的指针锚点**（`{ pageNo, nx, ny, clientX, clientY }`）。
+       *
+       * 为什么要用 ref 传递：锚点必须在**缩放前**的几何上捕获，而当场
+       * 拿不到确定的缩放后页面；等 `scale` state 同步到 viewer、我们写完
+       * `currentScale` 之后才有新几何。中间隔着一次 React 渲染，
+       * 用 state 会多触发一轮渲染，用 ref 则是纯旁路，不参与渲染。
+       *
+       * 三个入口的写入方式：
+       *   · Ctrl+滚轮 / 双指捏合 —— 有 event.clientX/clientY，记在指针处；
+       *   · +/- 按钮 —— 没有指针，记在阅读区视口中心（见 captureCenterZoomAnchor）；
+       *   · 「适应宽度」—— 同上，走中心。
+       * 谁写的谁负责：消费后立即置 null，避免旧锚点影响下一次无关的缩放。
+       */
+      const zoomAnchorRef = useRef(null)
       /**
        * PDF 内链接的监听清理函数。
        *
@@ -4578,50 +4665,56 @@ window.__ModuleLoader__.load({
         // 只有当这次 scale 不是 viewer 自己发出来的，才写回去
         if (Math.abs(lastAppliedScaleRef.current - scale) < 0.001) return
         /**
-         * **写回之前先记住锚点，写回之后确认 pdf.js 有没有守住它。**
+         * **以光标所在点为原点缩放。**
          *
-         * pdf.js 的 #setScaleUpdatePages 本来就会保位：它按 `_location`
-         * （页号 + 页内偏移）重新 scrollPageIntoView。正常情况下我们什么都不用做。
-         * 但它有失效条件，而且失效时**没有任何报错**：
-         *   · `_location` 只在 update() 里写、在 refreshLocation() 里读，
-         *     而 refreshLocation() 仅在 `#staleLocation` 为真时才跑；
-         *   · 只要有一拍 update() 拿到的可见页不对（页视图刚建/刚重建、
-         *     或者滚动落在一个不滚的祖先上），`_location` 就是错的，
-         *     保位会照着错的位置滚 —— 表现就是「缩放后跳回第一页」。
-         * 所以这里直接按几何判据验一次：位置明显被挪走就自己滚回去。
-         * 判据用「当前页 + 页内偏移」而不是像素：缩放后像素本来就该变。
+         * 先澄清 pdf.js 的默认行为，它决定了我们要做什么、不做什么：
+         * #setScaleUpdatePages 确实会保位，但保的是「页号 + 页内偏移」这个
+         * **文档锚点**，它滚完之后页面顶部与视口顶部对齐 —— 也就是
+         * 「当前页贴顶」。这不是用户要的：用户要的是指针下的那个文档坐标点
+         * 在屏幕上原地不动（GeoGebra / 地图 / 图片查看器的标准行为）。
+         * 两者只在「视口顶部正好压在页首」时才碰巧一致，其余时候差得很远。
+         *
+         * 上一轮曾按「页号 + 页内顶部比例」做回滚，那正是把它做成了页面锚点，
+         * 所以修完的表现是「以当前页贴顶缩放」—— 方向错了，已整体替换。
+         *
+         * 正确做法：缩放前记下指针处的（页, nx, ny）与屏幕坐标，写完 scale、
+         * 等 pdf.js 重排稳定后，把该点重新对回原屏幕坐标（见 applyZoomAnchor）。
+         * 这里的锚点是消费式的：没有待处理锚点就什么都不做 —— pdf.js 自己的
+         * 保位已经够用，我们只在「用户明确从某个点缩放」时介入。
          */
-        const anchorPage = (() => {
-          try { return viewer.currentPageNumber } catch { return 0 }
-        })()
-        const anchorOffset = measureScrollOffsetByGeometry(hostRef.current, anchorPage)
+        const zoomAnchor = zoomAnchorRef.current
+        zoomAnchorRef.current = null
         lastAppliedScaleRef.current = scale
         viewer.currentScale = scale
+        if (!zoomAnchor) return
         /**
-         * 失败才补：等 pdf.js 把重排走完（同一帧内它已经滚过一次），
-         * 下一帧量一次。位置差得多才动手，避免和它抢方向、抖起来。
+         * 等 pdf.js 把重排走完再补偿，两跳 rAF：
+         *   第一跳 —— pdf.js 的 pageView.update() 已排队但布局可能还没落定；
+         *   第二跳 —— 此时的 getBoundingClientRect 才是新 scale 下的真几何。
+         * 只补这一次，不重试：增量补偿是一次线性校正，几何一旦稳定，
+         * 补偿量就是确定的；反复重试反而会在滚动事件与重排之间来回震荡。
          */
-        if (anchorPage > 1) {
-          const restoreAnchor = () => {
-            try {
-              if (!viewerRef.current) return
-              const pageNow = viewer.currentPageNumber
-              const offNow = measureScrollOffsetByGeometry(hostRef.current, pageNow)
-              const drifted = pageNow !== anchorPage
-                || Math.abs(offNow - anchorOffset) > 0.25
-              if (!drifted) return
-              scrollPageIntoView(hostRef.current, anchorPage, anchorOffset)
-              reportDiag({
-                event: 'zoom:reanchor',
-                from: pageNow,
-                to: anchorPage,
-                offset: Number(anchorOffset.toFixed(3)),
-              })
-            } catch { /* 补不到位最多是位置不理想，不影响可读 */ }
+        const settle = (n) => {
+          if (n > 0) {
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => settle(n - 1))
+            else setTimeout(() => settle(n - 1), 16)
+            return
           }
-          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreAnchor)
-          else setTimeout(restoreAnchor, 16)
+          const host = hostRef.current
+          if (!host) return
+          const moved = applyZoomAnchor(host, zoomAnchor)
+          if (!moved) return
+          zoomAtRef.current = perf.now()
+          reportDiag({
+            event: 'zoom:anchor',
+            page: zoomAnchor.pageNo,
+            nx: Number(zoomAnchor.nx.toFixed(4)),
+            ny: Number(zoomAnchor.ny.toFixed(4)),
+            dx: Number(moved.dx.toFixed(1)),
+            dy: Number(moved.dy.toFixed(1)),
+          })
         }
+        settle(2)
       }, [scale, status])
 
       /**
@@ -5182,6 +5275,25 @@ window.__ModuleLoader__.load({
       }, [annotMenu, annotPanel, selectAnnotation])
 
       /* ---------- 页码跳转 + 高亮 ---------- */
+      /**
+       * 取「阅读区视口中心」作为缩放锚点。
+       *
+       * +/- 按钮和「适应宽度」没有指针位置可用，但用户按下它们时眼睛盯的
+       * 是阅读区中间那块内容。若不给锚点，这两条路径就会退回 pdf.js 的
+       * 「当前页贴顶」保位 —— 那是本次要修掉的行为，所以按钮路径同样要锚定，
+       * 只是锚点取视口中心而不是鼠标点。
+       *
+       * 取容器的 bounding rect 而不是 host：host 是 overflow:hidden 的外框，
+       * 与真正可滚的 .zr-pdfviewer-container 通常重合，但以可滚层为准更稳。
+       */
+      const captureCenterZoomAnchor = useCallback(() => {
+        const host = hostRef.current
+        if (!host) return null
+        const r = host.getBoundingClientRect()
+        if (r.width <= 0 || r.height <= 0) return null
+        return captureZoomAnchor(host, r.left + r.width / 2, r.top + r.height / 2)
+      }, [])
+
       const gotoPage = useCallback((pageNo, rects) => {
         const target = Math.max(1, Math.min(pageNo, pageCount || pageNo))
         setJumpPage(target)
@@ -6544,6 +6656,15 @@ window.__ModuleLoader__.load({
           const step = event.deltaY > 0 ? -0.08 : 0.08
           // 手动缩放后退出「自适应宽度」模式，否则这个数字不会被写进 viewer
           fitModeRef.current = false
+          /**
+           * **在这里、趁几何还没变，把指针锚点记下来。**
+           *
+           * 这是「以光标所在点为原点缩放」的关键时机：此刻页面还是旧尺寸，
+           * event.clientX/clientY 正是用户眼下盯着的那个点。等到 state 同步
+           * effect 里再想捕获，页面早已按新 scale 重排，同一个屏幕点指向的
+           * 文档位置已经变了 —— 锚点就取错了。
+           */
+          zoomAnchorRef.current = captureZoomAnchor(hostRef.current, event.clientX, event.clientY)
           setScale((current) => Math.max(0.4, Math.min(3, Number((current + step).toFixed(3)))))
         }
         // 双指捏合在触摸屏上还有一套 touch 事件；阻止浏览器整页缩放
@@ -6633,8 +6754,8 @@ window.__ModuleLoader__.load({
           }),
           h('span', { style: { fontSize: 11, opacity: .7, whiteSpace: 'nowrap' } }, '/ ' + (pageCount || '?')),
           h('button', { className: 'zr-btn', onClick: () => gotoPage(jumpPage + 1), disabled: pageCount > 0 && jumpPage >= pageCount, title: t('nextPage') }, '›'),
-          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; setScale((s) => Math.min(3, +(s + 0.15).toFixed(2))) }, title: t('zoomIn') }, '+'),
-          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; setScale((s) => Math.max(0.4, +(s - 0.15).toFixed(2))) }, title: t('zoomOut') }, '−'),
+          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; zoomAnchorRef.current = captureCenterZoomAnchor(); setScale((s) => Math.min(3, +(s + 0.15).toFixed(2))) }, title: t('zoomIn') }, '+'),
+          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; zoomAnchorRef.current = captureCenterZoomAnchor(); setScale((s) => Math.max(0.4, +(s - 0.15).toFixed(2))) }, title: t('zoomOut') }, '−'),
           h('button', {
             className: 'zr-btn', title: t('fitWidth'),
             onClick: () => {
@@ -6648,10 +6769,39 @@ window.__ModuleLoader__.load({
                */
               const viewer = viewerRef.current
               if (viewer) {
+                /**
+                 * 「适应宽度」不走 scale state 那条同步 effect（它直接改
+                 * currentScaleValue，由官方用自己的公式算比例），所以锚点
+                 * 补偿要在这里现场做一次，否则这条路径仍会贴顶。
+                 * 同样两跳 rAF 等重排落定。
+                 */
+                const anchor = captureCenterZoomAnchor()
                 viewer.currentScaleValue = 'page-width'
                 fitModeRef.current = true
                 lastAppliedScaleRef.current = Number(viewer.currentScale.toFixed(3))
                 setScale(Number(viewer.currentScale.toFixed(3)))
+                const settleFit = (n) => {
+                  if (n > 0) {
+                    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => settleFit(n - 1))
+                    else setTimeout(() => settleFit(n - 1), 16)
+                    return
+                  }
+                  const host = hostRef.current
+                  if (!host || !anchor) return
+                  const moved = applyZoomAnchor(host, anchor)
+                  if (!moved) return
+                  zoomAtRef.current = perf.now()
+                  reportDiag({
+                    event: 'zoom:anchor',
+                    page: anchor.pageNo,
+                    nx: Number(anchor.nx.toFixed(4)),
+                    ny: Number(anchor.ny.toFixed(4)),
+                    dx: Number(moved.dx.toFixed(1)),
+                    dy: Number(moved.dy.toFixed(1)),
+                    via: 'fit-width',
+                  })
+                }
+                settleFit(2)
               }
             },
           }, '⤢'),
