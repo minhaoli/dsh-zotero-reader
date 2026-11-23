@@ -108,11 +108,19 @@ check('补偿不直接用 scrollRef.current 的 scrollTop',
 /* ---------- ④ 时机：缩放前捕获，写 currentScale 后补偿 ---------- */
 
 const syncIdx = src.indexOf('viewer.currentScale = scale')
-const captureCallBefore = src.lastIndexOf('captureZoomAnchor(', syncIdx)
-check('同步 effect 里在写 currentScale 之前就取好了锚点（从 ref 读出）',
-  src.lastIndexOf('const zoomAnchor = zoomAnchorRef.current', syncIdx) > 0
-    && captureCallBefore > 0,
-  '锚点必须在旧几何上捕获；写完之后再取，同一个屏幕点已指向别的文档位置')
+function syncPoint() {
+  return syncIdx
+}
+check('同步 effect 里在写 currentScale 之前就取好了锚点（从 ref 读出）', (() => {
+  /**
+   * 锚点现在是「手势级」的：捕获发生在滚轮/按钮入口（缩放前，几何还是旧的），
+   * 同步 effect 只负责读基准锚点 + 看待补偿标记。断言这两件事都在写
+   * currentScale 之前完成。
+   */
+  const readAnchor = src.indexOf('const zoomAnchor = zoomAnchorRef.current')
+  const readPending = src.indexOf('if (!zoomPendingRef.current) return')
+  return readAnchor > 0 && readPending > 0 && readPending < syncPoint()
+})(), '锚点必须在旧几何上捕获，effect 里只读不算')
 
 check('写完 currentScale 之后才补偿', (() => {
   /**
@@ -154,10 +162,59 @@ check('滚轮路径在 setScale 之前捕获',
   })(),
   'setScale 之后 React 会重排，锚点就取晚了')
 
-check('+/− 按钮没有指针，用阅读区视口中心',
-  /captureCenterZoomAnchor/.test(src)
-    && /zoomAnchorRef\.current = captureCenterZoomAnchor\(\)/.test(src),
-  '按钮没有 event 坐标；不锚定就会退回贴顶')
+check('+/− 按钮没有指针，用阅读区视口中心', (() => {
+  // 按钮现在同时设置基准锚点与待补偿标记（手势起点）
+  const zoomIn = src.indexOf("title: t('zoomIn')")
+  if (zoomIn < 0) return false
+  const seg = src.slice(src.lastIndexOf('h(\'button\'', zoomIn), zoomIn)
+  return /zoomAnchorRef\.current = a/.test(seg)
+    && /captureCenterZoomAnchor\(\)/.test(seg)
+    && /zoomPendingRef\.current = true/.test(seg)
+})(), '按钮没有 event 坐标；不锚定就会退回贴顶')
+
+/* ---------- 连续手势不振荡（本次修复的核心） ---------- */
+
+check('存在手势间隔阈值', /const ZOOM_GESTURE_GAP_MS = \d+/.test(src),
+  '没有阈值就无法区分「同一次手势的连续事件」与「两次独立缩放」')
+
+check('滚轮在同一手势内沿用首个锚点，不逐个事件重取', (() => {
+  const wheel = src.indexOf('const onWheel = (event) =>')
+  if (wheel < 0) return false
+  const tail = src.slice(wheel, wheel + 2400)
+  return /const sameGesture = \(nowMs - prev\.capturedAt\) < ZOOM_GESTURE_GAP_MS/.test(tail)
+    && /if \(!\(sameGesture && isSameAnchorPoint\(prev\.anchor, candidate\)\)\)/.test(tail)
+})(), '每个 wheel 都重取锚点，会让基准点逐次漂移 —— 这就是「一半对一半乱飘」')
+
+check('换基准需要判「是不是同一个物理点」', /function isSameAnchorPoint\(a, b\)/.test(src)
+  && /a\.pageNo !== b\.pageNo/.test(src),
+  '页号或屏幕坐标变了才算换了注视目标')
+
+check('补偿链是单条（后来的只登记、不另排一条链）',
+  /if \(zoomCompensationRef\.current != null\) \{[\s\S]{0,120}?pendingMergedRef\.current \+= 1/.test(src),
+  '每次 effect 各排一条 rAF 链，多条链会在同一批帧里接连补偿，方向互相打架')
+
+check('补偿基准在手势期间不被清掉', (() => {
+  // 旧的错误形态：effect 一进来就把锚点置 null
+  const bad = /const zoomAnchor = zoomAnchorRef\.current\s*\n\s*zoomAnchorRef\.current = null/
+  return !bad.test(src)
+})(), '清掉基准锚点后，下一个事件会在「已缩过一轮的页面」上重取，锚点必然漂')
+
+check('每次补偿都按当时几何重算绝对目标，不累加残差',
+  /wantX - anchor\.clientX/.test(src) && /wantY - anchor\.clientY/.test(src),
+  '绝对目标 = 不变量，多次执行收敛；累加残差会越过并反向')
+
+check('只有手势仍在继续时才追加一轮',
+  /const gestureLive = perf\.now\(\) - zoomAnchorRecentRef\.current\.capturedAt < ZOOM_GESTURE_GAP_MS/.test(src))
+
+check('诊断里记录被合并的轮次',
+  /merged: mergedCount/.test(src),
+  'zoom:anchor 条数少于 wheel 次数时，靠这个字段区分「合并」与「漏了」')
+
+check('换文档时清理补偿状态（否则新文档一次都不补）', (() => {
+  const cleanup = src.indexOf('zoomCompensationRef.current = null')
+  const destroy = src.indexOf("try { viewer?.destroy?.() }")
+  return cleanup > 0 && destroy > cleanup
+})(), '残留的旧 settle 闭包会让新文档的缩放全被判成「已有链在跑」')
 
 check('视口中心锚点按 host 的 bounding rect 计算',
   (() => {
