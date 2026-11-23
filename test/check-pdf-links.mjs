@@ -164,10 +164,23 @@ check('具名目标跳转后同步页码显示',
 const overIdx = src.indexOf('const onPdfLinkOver')
 check('有悬停处理器', overIdx > 0)
 check('悬停显示完整 href',
-  /const label = pageMatch[\s\S]{0,200}?: href/.test(src),
+  /\{ kind: 'link', text: href \}/.test(src),
   '被省略的中段只有完整 URL 才看得见')
 check('内部跳转显示成「第 N 页」而不是裸 #page=',
   /文档内跳转 · 第 \$\{pageMatch\[1\]\} 页/.test(src))
+/**
+ * 具名目标的卡片要能补出**页码**。
+ *
+ * 原来副行只印目标名（cite.andrews1997），用户看不出会跳到哪一页。
+ * 现在异步解析 dest 拿页号后补写第二行；断言它确实把页号算出来了，
+ * 而不是只显示名字。
+ */
+check('具名目标悬停补出目标页码',
+  /kind: 'line', text: `第 \$\{pageIndex \+ 1\} 页`/.test(src),
+  '只显示目标名等于没告诉用户会跳到哪')
+check('异步补页码前确认仍是当前链接',
+  /linkTipAnchor !== anchor/.test(src),
+  '鼠标已移开还回写会让卡片在错误位置闪出来')
 check('监听 mouseover / mouseout 并清理',
   /addEventListener\('mouseover', onPdfLinkOver\)/.test(src) &&
     /addEventListener\('mouseout', onPdfLinkOut\)/.test(src))
@@ -223,9 +236,72 @@ check('同一条链接内部冒泡不重复计算',
   'mouseover 从 <a> 的子元素冒泡上来，不去重就会反复重排延时')
 
 check('getBoundingClientRect 只在一处读（不在 mousemove 里反复读）',
-  (src.match(/getBoundingClientRect\(\)/g) || []).length >= 1 &&
-    /showLinkTip[\s\S]{0,900}?anchor\.getBoundingClientRect\(\)/.test(src),
+  (() => {
+    // 只看 showLinkTip 函数体：它在 showLinkTip 里读一次，别处不该再读
+    const at = src.indexOf('const showLinkTip')
+    if (at < 0) return false
+    const body = src.slice(at, at + 2600)
+    const end = body.indexOf('\n            const onPdfLinkClick')
+    const fn = end > 0 ? body.slice(0, end) : body
+    return /anchor\.getBoundingClientRect\(\)/.test(fn) &&
+      (fn.match(/getBoundingClientRect\(\)/g) || []).length === 1
+  })(),
   '矩形应当读一次并缓存，不能每次移动都读')
+
+/* ---------- 4b. 纵向落点：dest 坐标必须被消费 ---------- */
+
+/**
+ * 这一段是「跳转了但落点不对」的回归护栏。
+ *
+ * 症状：页号对（日志 page:14 scrolled:true），但视图停在页首 ——
+ * 因为 scrollPageIntoView 的 offset 硬编码传了 0，dest 里的 y 被丢掉。
+ *
+ * 三条都必须成立：按 dest[1].name 分支取 y、做左下原点→页顶的比例翻转、
+ * 且 offset 真的喂给了 scrollPageIntoView。
+ */
+check('按 dest[1].name 分支取纵向坐标',
+  /kind === 'XYZ'/.test(src) && /'FitH'/.test(src) && /'FitR'/.test(src),
+  'dest 的 y 位置随 /XYZ、/FitH、/FitR 而不同，不能只认一个下标')
+
+check('XYZ 取 dest[3] 作为 top（dest[2] 是 left，不是 top）',
+  /y = dest\[3\]/.test(src),
+  'XYZ 的参数序是 [page, /XYZ, left, top, zoom]，取错下标会横向错位')
+
+check('做了 PDF 左下原点 → 页顶比例的方向翻转',
+  /\(height - clamped\) \/ height/.test(src),
+  'dest 的 y 原点在左下，offset 从页顶起算，不翻转就会跳到镜像位置')
+
+check('页高取 viewport（PDF 点），不用 DOM 像素',
+  /getViewport\(\{ scale: 1 \}\)/ .test(src) && !/clientHeight[\s\S]{0,80}offset/.test(src.slice(src.indexOf('const destVOffset'), src.indexOf('const destVOffset') + 2600)),
+  'clientHeight 是 CSS 像素、随缩放变，会把落点算飞')
+
+check('offset 真的传进 scrollPageIntoView（不再硬编码 0）',
+  /scrollPageIntoView\(host, pageNo, offset \?\? 0\)/.test(src),
+  '原来写死 0，dest 的 y 白算了')
+
+check('诊断里带上 destKind / destY / offset',
+  /destKind: dest\?\.\[1\]\?\.name/.test(src) && /offset: offset \?\? 0/.test(src),
+  '落点不对下次要能从日志直接看出是解析失败还是换算错')
+
+/* ---------- 4c. 预览卡片：多行，不拼 innerHTML ---------- */
+
+check('预览是多行卡片（不再单行省略）',
+  /white-space:normal/.test(src) && /overflow-wrap:anywhere/.test(src) &&
+    !/\.zr-link-tip\{[^}]*white-space:nowrap/.test(src),
+  '单行 ellipsis 会把长文献信息截断')
+
+check('卡片限宽放到 min(560px,86vw)',
+  /\.zr-link-tip\{position:fixed;z-index:2147483000;max-width:min\(560px,86vw\)/.test(src))
+
+check('行内容用 createElement + textContent（不拼 innerHTML）',
+  /const renderTipLines = \(tip, lines\) =>/.test(src) &&
+    /div\.textContent = String\(row\.text\)/.test(src) &&
+    !/linkTip\.innerHTML|tip\.innerHTML/.test(src),
+  'PDF 里的链接文字是外部输入，innerHTML 会变成注入面')
+
+check('卡片有主行 / 正文行 / 链接行 / 次要行四种样式',
+  /zr-tip-title/.test(src) && /zr-tip-line/.test(src) &&
+    /zr-tip-link/.test(src) && /zr-tip-dim/.test(src))
 
 
 /* ---------- 5. 监听必须清理（否则累积） ---------- */

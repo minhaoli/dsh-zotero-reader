@@ -1364,6 +1364,12 @@ window.__ModuleLoader__.load({
         font-size:12px;color:var(--dsh-text-tertiary,#8a9096);pointer-events:none}
       /*
        * PDF 内链接的悬停预览。
+      /*
+       * 链接悬停预览卡片。
+       *
+       * 最初是单行省略条（nowrap + ellipsis），只能显示一小段地址：
+       * 长条目被截断、内部跳转只显示目标名，和 Zotero 自己的悬停卡片差很远。
+       * 改成多行卡片：限宽放宽到 min(560px,86vw)，可换行、行高 1.6。
        *
        * 用 position:fixed 而不是 absolute：宿主 .zr-pdfviewer-host 是
        * overflow:hidden，absolute 定位的提示在贴边时会被裁掉。
@@ -1371,16 +1377,25 @@ window.__ModuleLoader__.load({
        * 代价是滚动时位置不会跟着动 —— 但鼠标移出链接就会隐藏，
        * 实际不会在滚动中停留。
        */
-      .zr-link-tip{position:fixed;z-index:2147483000;max-width:min(520px,80vw);
-        padding:5px 9px;border-radius:6px;background:var(--dsh-bg-elevated,#2b2b2b);
-        border:1px solid var(--dsh-border,#3f3f3f);box-shadow:0 4px 14px rgba(0,0,0,.35);
-        font-size:11.5px;line-height:1.5;color:var(--dsh-text-primary,#e6e6e6);
-        pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+      .zr-link-tip{position:fixed;z-index:2147483000;max-width:min(560px,86vw);
+        padding:8px 11px;border-radius:8px;background:var(--dsh-bg-elevated,#2b2b2b);
+        border:1px solid var(--dsh-border,#3f3f3f);box-shadow:0 6px 20px rgba(0,0,0,.38);
+        font-size:12px;line-height:1.6;color:var(--dsh-text-primary,#e6e6e6);
+        pointer-events:none;white-space:normal;overflow-wrap:anywhere;
         opacity:0;transition:opacity .12s}
       .zr-link-tip[data-on="1"]{opacity:1}
+      /* 卡片主行：标题式引导，比正文略重 */
+      .zr-link-tip .zr-tip-title{font-weight:600;color:var(--dsh-text-primary,#e6e6e6);
+        display:block;margin-bottom:2px}
+      /* 卡片副行：文献信息 / 页码，允许折行 */
+      .zr-link-tip .zr-tip-line{display:block;color:var(--dsh-text-secondary,#b8b8b8)}
+      /* DOI / URL 那一行：蓝色下划线，模仿 Zotero 的可点样式（这里不可点，只做视觉区分） */
+      .zr-link-tip .zr-tip-link{display:block;color:var(--dsh-accent,#3d8bfd);
+        text-decoration:underline;overflow-wrap:anywhere}
+      /* 目标名这类次要信息 */
+      .zr-link-tip .zr-tip-dim{display:block;color:var(--dsh-text-tertiary,#8a8a8a);font-size:11px}
       /* 告警态：外部链接被宿主拒掉时用，颜色区分「这是个失败的提示」 */
-      .zr-link-tip[data-warn="1"]{border-color:var(--dsh-danger,#c0392b);color:var(--dsh-text-primary,#e6e6e6);
-        max-width:min(560px,86vw);white-space:normal}
+      .zr-link-tip[data-warn="1"]{border-color:var(--dsh-danger,#c0392b)}
       /* 工具条里阅读控件与批注工具之间的分隔线 */
       .zr-sep{width:1px;height:18px;background:var(--dsh-border,#3a3a3a);margin:0 2px;flex:0 0 auto}
       /* 调色板：八个小色块，当前颜色加描边 */
@@ -3721,6 +3736,61 @@ window.__ModuleLoader__.load({
              *   · 间接目标（/Dest 里存的是另一个名字）→ 字符串，要再查一层
              *   · dest[0] 通常是 page ref 对象，也兼容直接给页号（0 基）
              */
+            /**
+             * **从 dest 数组里解出纵向落点，换成页顶起算的比例。**
+             *
+             * pdf.js 的 goToDestination 自己会把这套算完（见 pdf_viewer.mjs 里
+             * `switch (destArray[1].name)` 那一段，XYZ 取 [2]=x、[3]=y、[4]=zoom），
+             * 但它最终的落点是 pdfViewer.scrollPageIntoView —— 侧栏里断掉的那条链。
+             * 所以这里照抄它的下标规则，只把结果换成本项目 offset 的语义。
+             *
+             * 两套坐标系方向相反，这是最容易写错的地方：
+             *   · dest 的 y 是 PDF 用户空间，**原点在左下**，单位 point；
+             *   · scrollPageIntoView 的 offset 是**页顶往下**的高度比例（0..1）。
+             * 所以 offset = (pageHeightPt - y) / pageHeightPt。
+             * pageHeightPt 必须取 viewport 的高度（PDF 点），**不能用 clientHeight**
+             * ——后者是 CSS 像素、随缩放变化，会把落点算飞。
+             *
+             * 实测样本（本库那篇 LaTeX 论文）：
+             *   cite.andrews1997 => [Ref(231,0), Name(XYZ), 44, 217, null]，
+             *   该页 viewport.height = 842.116 → offset ≈ 0.742，落在公式/条目位置。
+             *
+             * 参数为 null 是 PDF 规范里的「保持不变」，不是 0，所以逐项判。
+             * 取不到可靠 y 时返回 null，调用方退回页首。
+             */
+            const destVOffset = async (dest, pageNo) => {
+              const kind = dest?.[1]?.name
+              if (!kind) return null
+              let y = null
+              if (kind === 'XYZ') {
+                // [2]=left [3]=top [4]=zoom，任一可为 null（"保持不变"）
+                y = dest[3]
+              } else if (kind === 'FitH' || kind === 'FitBH') {
+                // [2]=top
+                y = dest[2]
+              } else if (kind === 'FitR') {
+                /**
+                 * [2..5] = left bottom right top，矩形框定。
+                 * 取矩形**上边**（dest[5]）作为落点 —— 读者要看的是框住的
+                 * 那段内容的首行，而不是它的底边。
+                 */
+                y = dest[5]
+              } else {
+                // Fit / FitB / FitV / FitBV：没有可用的纵向坐标
+                return null
+              }
+              if (typeof y !== 'number' || !Number.isFinite(y)) return null
+              try {
+                const page = await pdfRef.current?.doc?.getPage(pageNo)
+                const viewport = page?.getViewport?.({ scale: 1 })
+                const height = viewport?.height
+                if (!(typeof height === 'number' && height > 0)) return null
+                // 夹在页内：y 超出页高（个别生成器会写反）时不至于滚到离谱位置
+                const clamped = Math.min(height, Math.max(0, y))
+                return Math.min(0.98, Math.max(0, (height - clamped) / height))
+              } catch { return null }
+            }
+
             const jumpToNamedDest = async (rawName) => {
               const pdfDocument = pdfRef.current?.doc
               if (!pdfDocument) {
@@ -3764,8 +3834,24 @@ window.__ModuleLoader__.load({
                   setVisiblePage(pageNo)
                   setJumpPage(pageNo)
                 } catch { /* 页视图未建好时赋值会被丢弃，下面滚动兜住 */ }
-                const scrolled = scrollPageIntoView(host, pageNo, 0)
-                reportDiag({ event: 'link:dest', name, page: pageNo, scrolled })
+                /**
+                 * 纵向落点：不再固定传 0。原来那一句
+                 * `scrollPageIntoView(host, pageNo, 0)` 把 dest 里的坐标整个丢掉，
+                 * 于是永远停在页首 —— 页号是对的、位置是错的，用户看到的就是
+                 * 「跳转了但目标位置不对」。日志里 scrolled:true 也掩盖了这一点：
+                 * 它只说明「滚动生效了」，不说明「滚到了该去的地方」。
+                 */
+                const offset = await destVOffset(dest, pageNo)
+                const scrolled = scrollPageIntoView(host, pageNo, offset ?? 0)
+                reportDiag({
+                  event: 'link:dest',
+                  name,
+                  page: pageNo,
+                  destKind: dest?.[1]?.name ?? null,
+                  destY: dest?.[1]?.name === 'XYZ' ? dest[3] : (dest?.[1]?.name?.startsWith('FitH') ? dest[2] : null),
+                  offset: offset ?? 0,
+                  scrolled,
+                })
               } catch (e) {
                 /**
                  * 不再空吞：命名目标解析失败正是「点了没反应」的主要来源，
@@ -3805,9 +3891,41 @@ window.__ModuleLoader__.load({
               if (linkTip) linkTip.setAttribute('data-on', '0')
             }
 
-            const showLinkTip = (label, anchor, autoHideMs = 0, warn = false) => {
+            /**
+             * 把「行描述」渲染进提示卡片。
+             *
+             * 每一行是 `{ kind, text }`，kind 决定样式类：
+             *   title（主行）/ line（文献信息）/ link（DOI、URL）/ dim（目标名这类次要信息）
+             *
+             * **全部用 createElement + textContent**，绝不拼 innerHTML：
+             * PDF 里的链接文字、目标名、URL 都是不可信输入，
+             * 一个 `#cite.<img onerror=...>` 就能在插件上下文里执行脚本。
+             * textContent 只当文本，天然免疫。
+             */
+            const renderTipLines = (tip, lines) => {
+              tip.textContent = ''
+              for (const row of lines) {
+                if (!row || !row.text) continue
+                const div = document.createElement('div')
+                div.className = row.kind === 'title'
+                  ? 'zr-tip-title'
+                  : row.kind === 'link'
+                    ? 'zr-tip-link'
+                    : row.kind === 'dim'
+                      ? 'zr-tip-dim'
+                      : 'zr-tip-line'
+                div.textContent = String(row.text)
+                tip.appendChild(div)
+              }
+            }
+
+            /**
+             * @param {string|Array<{kind?:string,text:string}>} lines 纯文本或行描述数组
+             */
+            const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false) => {
               const tip = ensureTip()
-              tip.textContent = label
+              if (typeof lines === 'string') renderTipLines(tip, [{ kind: 'title', text: lines }])
+              else renderTipLines(tip, Array.isArray(lines) ? lines : [])
               tip.setAttribute('data-warn', warn ? '1' : '0')
               /**
                * 定位：优先放在链接上方；上方空间不够（贴近视口顶部）就放下方。
@@ -3815,18 +3933,26 @@ window.__ModuleLoader__.load({
                *
                * `getBoundingClientRect` 只在这里读一次 —— 它会强制布局，
                * 而链接是刚画出来的，前面压着一大批没偿还的 DOM 写入。
+               *
+               * 卡片是多行的，高度可能远超旧单行条，所以「上方够不够放」
+               * 要按实际高度算，否则贴近页顶时上半截会被视口切掉。
                */
               const tipW = Math.min(tip.offsetWidth || 240, window.innerWidth - 16)
+              const tipH = tip.offsetHeight || 40
               let left
               let top
               if (anchor) {
                 const r = anchor.getBoundingClientRect()
                 left = Math.max(8, Math.min(r.left, window.innerWidth - tipW - 8))
-                top = r.top - 30
+                top = r.top - tipH - 8
                 if (top < 8) top = r.bottom + 8
               } else {
                 left = Math.max(8, (window.innerWidth - tipW) / 2)
                 top = 56
+              }
+              // 下方空间也不够时，贴住视口底部，至少让最上面几行可见
+              if (top + tipH > window.innerHeight - 8) {
+                top = Math.max(8, window.innerHeight - tipH - 8)
               }
               tip.style.left = `${Math.round(left)}px`
               tip.style.top = `${Math.round(top)}px`
@@ -3994,12 +4120,69 @@ window.__ModuleLoader__.load({
                 const href = anchor.getAttribute('href') || ''
                 if (!href) return
                 const pageMatch = /^#page=(\d+)/i.exec(href)
-                const label = pageMatch
-                  ? `文档内跳转 · 第 ${pageMatch[1]} 页`
-                  : href.startsWith('#')
-                    ? `文档内跳转 · ${href.slice(1)}`
-                    : href
-                showLinkTip(label, anchor)
+                if (pageMatch) {
+                  showLinkTip([
+                    { kind: 'title', text: `文档内跳转 · 第 ${pageMatch[1]} 页` },
+                  ], anchor)
+                  return
+                }
+                if (href.startsWith('#')) {
+                  const rawName = href.slice(1)
+                  /**
+                   * 具名目标：先同步显示目标名，页码异步补上。
+                   *
+                   * 为什么不直接等着查完再显示：解析要跨 worker（getDestination
+                   * 是异步的），快则几毫秒、慢则几十毫秒，先出卡片再补页码
+                   * 观感更稳，也不至于让悬停变成一次强制等待。
+                   *
+                   * 路线说明：这里只显示**本文档内的目标页号**，不拉文献条目。
+                   * Zotero 那种「作者-年份-期刊-DOI」卡片要求被引文献在用户库里
+                   * 存着，而 PDF 的 /Dests 里只有目标名和一个页内坐标，没有 DOI；
+                   * 按 key 反查当前库对 `cite.andrews1997` 这类 LaTeX 命名目标
+                   * 也拿不到（它不是 Zotero 的 itemKey）。要做得改宿主加接口，
+                   * 成本与收益不匹配，故降级为页号。
+                   */
+                  const decName = (() => {
+                    try { return decodeURIComponent(rawName) } catch { return rawName }
+                  })()
+                  const lines = [
+                    { kind: 'title', text: '文档内跳转' },
+                    { kind: 'dim', text: decName },
+                  ]
+                  showLinkTip(lines, anchor)
+                  /**
+                   * 异步补页码。此时用户可能已经移开鼠标（卡片已隐藏、
+                   * linkTipAnchor 已换人），所以补写前要确认「还是这一条」。
+                   */
+                  void (async () => {
+                    try {
+                      const pdfDocument = pdfRef.current?.doc
+                      if (!pdfDocument) return
+                      let dest = await pdfDocument.getDestination(decName)
+                      if (typeof dest === 'string') dest = await pdfDocument.getDestination(dest)
+                      if (!Array.isArray(dest) || dest.length === 0) return
+                      const destRef = dest[0]
+                      let pageIndex
+                      if (Number.isInteger(destRef)) pageIndex = destRef
+                      else {
+                        const cached = pdfDocument.cachedPageNumber?.(destRef)
+                        pageIndex = Number.isInteger(cached) && cached > 0
+                          ? cached - 1
+                          : await pdfDocument.getPageIndex(destRef)
+                      }
+                      if (!Number.isInteger(pageIndex) || pageIndex < 0) return
+                      // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
+                      if (linkTipAnchor !== anchor || !linkTip || !anchor.isConnected) return
+                      showLinkTip([
+                        { kind: 'title', text: '文档内跳转' },
+                        { kind: 'line', text: `第 ${pageIndex + 1} 页` },
+                        { kind: 'dim', text: decName },
+                      ], anchor)
+                    } catch { /* 解析不出来就保持目标名，不打扰用户 */ }
+                  })()
+                  return
+                }
+                showLinkTip([{ kind: 'link', text: href }], anchor)
               }, HOVER_TIP_DELAY)
             }
             const onPdfLinkOut = (event) => {
