@@ -1638,6 +1638,35 @@ window.__ModuleLoader__.load({
       } catch { return 0 }
     }
 
+    /**
+     * 视口顶部落在某页内的比例，**按几何量**，不依赖调用方传对滚动容器。
+     *
+     * 与 measureScrollOffset 的区别只有一点：滚动祖先由 findScrollParent 现找。
+     * 为什么需要另一份：那个函数的第一个参数是 `scrollRef.current`，而 ScrollRef
+     * 挂在 `.zr-page` 上 —— 它并不是真正吃滚动的节点（`.pdfViewer` 才是）。
+     * 用它算偏移会恒得 0，用在「缩放后位置有没有漂」的判据里就等于判据失灵。
+     *
+     * 这里还兜住「连续滚动」的情况：整页高度为 0 时（页视图还没建好）退回按
+     * 页间距折算，而不是直接报 0。
+     */
+    function measureScrollOffsetByGeometry(hostEl, pageNo) {
+      try {
+        if (!hostEl || !pageNo) return 0
+        const pageEl = hostEl.querySelector(`.page[data-page-number="${pageNo}"]`)
+        if (!pageEl) return 0
+        const scroller = findScrollParent(pageEl)
+        if (!scroller) return 0
+        // 视口顶部相对该页内容原点的偏移（负值表示页首还在下方）
+        const delta = scroller.getBoundingClientRect().top
+          - pageEl.getBoundingClientRect().top
+        const pageH = pageEl.clientHeight || pageEl.offsetHeight || 0
+        if (pageH <= 0) return 0
+        const rel = delta / pageH
+        if (!Number.isFinite(rel)) return 0
+        return Math.min(0.98, Math.max(0, rel))
+      } catch { return 0 }
+    }
+
     function Reader(props) {
       const bound = props.bound ?? ((k) => k)
       const t = (key, vars) => {
@@ -3044,6 +3073,32 @@ window.__ModuleLoader__.load({
        */
       const resumeTargetRef = useRef(0)
       /**
+       * `pagesinit` 的「恢复阅读位置」这一次文档是否已经执行过。
+       *
+       * 定位「缩放后被拽回去」时最容易走错的一步，是把 pagesinit 当成每次布局
+       * 都会重发的通用事件 —— 它**不是**。查 pdf_viewer.mjs 可见它只有一处派发点
+       * （setDocument 里 firstPagePromise.then 的尾部，L8660），而 PDFViewer.refresh()
+       * 只做 pageView.update() + this.update()，根本不派发 pagesinit。
+       * 所以缩放不会重跑恢复，原先挂着的 `{ once: true }` 在这一点上是对的。
+       *
+       * 真正会重跑的，是**首屏恢复落不了地时那条 24 次重试链**（applyResume）：
+       * 状态条一出现（触发 setReloadToken → setDocument 再跑一遍），新文档又拿到
+       * 一个 resumePage，而页码恢复只要没落地就会继续按它滚 —— 用户此刻的缩放
+       * 正好落在这段时间里，于是视图被拽回去，看上去就是「重新从第一页排」。
+       *
+       * 这个标记用来保证：一次文档装载最多允许 pagesinit 做一次「恢复滚页」。
+       * 之后任何一次 pagesinit 都只做清理（揭遮罩），不再动滚动位置。
+       */
+      const resumeByInitRef = useRef(false)
+      /**
+       * 上一次「用户主动改缩放」的时刻（performance.now()）。
+       *
+       * 缩放之后 pdf.js 需要几帧把每页 viewport 重算完，这段时间里我们自己的
+       * 滚动/重试若还按旧的恢复目标动作，就会把用户刚放好的位置拽走。
+       * 用时间戳而不是布尔量：它是一个「刚刚在缩放」的窗口，会自然过期。
+       */
+      const zoomAtRef = useRef(0)
+      /**
        * PDF 内链接的监听清理函数。
        *
        * 监听器建在 viewer 的 effect 里（那里才拿到 host 与 linkService），
@@ -3394,7 +3449,57 @@ window.__ModuleLoader__.load({
             eventBus.on(
               'pagesinit',
               () => {
-                if (disposed || resumePage <= 1) return
+                /**
+                 * ---------- pagesinit 的完整生命周期（静态推演结论） ----------
+                 *
+                 * ① 谁派发：只有 PDFViewer.setDocument 的 firstPagePromise 链尾部
+                 *    （pdf_viewer.mjs L8660），紧跟其后是 `if (this.defaultRenderingQueue)
+                 *    this.update()`。两句同一个微任务，pagesinit 在前 —— 所以在这里
+                 *    改滚动位置，能让 update() 第一次算可见页就算对，第 1 页不会被画。
+                 * ② 派发几次：**一个文档一次**。PDFViewer.refresh()（refresh(noUpdate)）
+                 *    只做 pageView.update() + this.update()，不派发 pagesinit；
+                 *    `setScaleUpdatePages` 走的就是 refresh(true, {scale})。
+                 *    于是「缩放 → refresh → pagesinit → 拽回旧页」这条链**不存在**。
+                 * ③ 谁在重发：只有 setDocument 再跑一遍 —— status 回 loading、
+                 *    reloadToken 变化（刷新按钮/切可见补跑）、切文献。
+                 * 所以本回调的次数 == 文档装载次数，滚动位置只应该在**第一次**
+                 * 装载时被写一次；后续装载是用户主动触发的，恢复由 applyResume
+                 * 那条有判据的重试链负责，不归这里管。
+                 */
+                if (disposed) return
+                const already = resumeByInitRef.current
+                resumeByInitRef.current = true
+                /**
+                 * ---------- 与「滚页」分开的清理：每次都要做 ----------
+                 *
+                 * 原先这里在 `resumePage <= 1` 时直接 return，等于把清理一起跳过了。
+                 * 目标页是第 1 页时遮罩本就没挂（见下面的 restore-mask 分支），
+                 * 但**上一轮装载**若挂着遮罩而没等到 pagerendered，清理就会被漏掉，
+                 * 阅读区会一直停在「正在恢复阅读位置…」。所以清理先无条件跑。
+                 */
+                if (resumePage <= 1 || resumeTargetRef.current <= 1) {
+                  try {
+                    if (host?.dataset?.restoring === '1') {
+                      delete host.dataset.restoring
+                      reportDiag({ event: 'viewer:restore-mask', on: false, by: 'pagesinit' })
+                    }
+                  } catch { /* 揭不开最多多遮一会儿，交给 4 秒兜底 */ }
+                }
+                const willScroll = !already && resumePage > 1
+                /**
+                 * 别刷屏：每个文档最多打一次。这条记录就是现场判断
+                 * 「这一轮到底是谁在滚页」的唯一依据，字段要一次给全。
+                 */
+                reportDiag({
+                  event: 'pagesinit',
+                  willScroll,
+                  already,
+                  resumePage,
+                  currentPage: (() => {
+                    try { return viewer.currentPageNumber } catch { return 0 }
+                  })(),
+                })
+                if (!willScroll) return
                 /**
                  * pagesinit 时页容器刚进 DOM，个别情况下高度还没最终确定，
                  * 量出来的 pageTop 会偏。重试几帧再放弃 —— 每帧都重新量，
@@ -3422,6 +3527,16 @@ window.__ModuleLoader__.load({
              * 一次 pageNumber=1 的 pagechanging（见下方监听的说明）。
              */
             resumeDoneRef.current = false
+            /**
+             * 同一处复位 pagesinit 的「已消费」标记。
+             *
+             * 生命周期跟 resumeDoneRef 走是对的：两者都在 setDocument **之前**复位，
+             * 因为 setDocument 内部就会同步派发 pagesinit（首屏页就绪时立即派发），
+             * 晚一步复位就等于把上一轮的状态带进这一轮语义里。
+             * 区别只在语义粒度：resumeDoneRef 管「这条恢复重试链是否允许写盘」，
+             * 这里管「pagesinit 是否已经消费过它那一次恢复」。
+             */
+            resumeByInitRef.current = false
             viewer.setDocument(pdf.doc)
             linkService.setDocument(pdf.doc, null)
             reportDiag({ event: 'viewer:doc-set', pages: pdf.doc.numPages })
@@ -3648,6 +3763,15 @@ window.__ModuleLoader__.load({
               if (disposed) return
               // 官方 scale 是相对 PDF 点位的 CSS 单位，和我们的 scale 语义一致
               const next = Number(e.scale.toFixed(3))
+              /**
+               * 记下「刚刚在缩放」。
+               *
+               * 这里是所有缩放的唯一汇聚点（+/-、Ctrl+滚轮、适应宽度、捏合都从
+               * 官方抛出来）。缩放之后 pdf.js 要花若干帧重算每页 viewport，
+               * 这段时间里任何按恢复目标做的滚动都会把用户刚放好的位置拽走 ——
+               * 下面的 rAF 补滚据此判定要不要让路。
+               */
+              zoomAtRef.current = perf.now()
               lastAppliedScaleRef.current = next
               scaleRef.current = e.scale
               setScale(next)
@@ -3789,6 +3913,16 @@ window.__ModuleLoader__.load({
                 }
               }
               const runDecorate = () => {
+                /**
+                 * **刚缩放过就别在下一帧补装饰。**
+                 *
+                 * 装饰只影响观感（批注块位置），它不参与 pdf.js 的布局决策；
+                 * 而此刻 pdf.js 正在按新 scale 重排每一页，我们若在这一帧里
+                 * 清空并重建某页的批注层，就是在它重排的过程中改 DOM。
+                 * 让给缩放：缩放停下来后 pagerendered 还会再触发一次，
+                 * 那一拍补画即可，形状由 decoratePage 按当前 scale 算。
+                 */
+                if (perf.now() - zoomAtRef.current < 240) return
                 decoratePageRef.current?.(pageNo)
                 // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
                 paintSelectRef.current?.(annotSelectedRef.current)
@@ -4214,8 +4348,51 @@ window.__ModuleLoader__.load({
         }
         // 只有当这次 scale 不是 viewer 自己发出来的，才写回去
         if (Math.abs(lastAppliedScaleRef.current - scale) < 0.001) return
+        /**
+         * **写回之前先记住锚点，写回之后确认 pdf.js 有没有守住它。**
+         *
+         * pdf.js 的 #setScaleUpdatePages 本来就会保位：它按 `_location`
+         * （页号 + 页内偏移）重新 scrollPageIntoView。正常情况下我们什么都不用做。
+         * 但它有失效条件，而且失效时**没有任何报错**：
+         *   · `_location` 只在 update() 里写、在 refreshLocation() 里读，
+         *     而 refreshLocation() 仅在 `#staleLocation` 为真时才跑；
+         *   · 只要有一拍 update() 拿到的可见页不对（页视图刚建/刚重建、
+         *     或者滚动落在一个不滚的祖先上），`_location` 就是错的，
+         *     保位会照着错的位置滚 —— 表现就是「缩放后跳回第一页」。
+         * 所以这里直接按几何判据验一次：位置明显被挪走就自己滚回去。
+         * 判据用「当前页 + 页内偏移」而不是像素：缩放后像素本来就该变。
+         */
+        const anchorPage = (() => {
+          try { return viewer.currentPageNumber } catch { return 0 }
+        })()
+        const anchorOffset = measureScrollOffsetByGeometry(hostRef.current, anchorPage)
         lastAppliedScaleRef.current = scale
         viewer.currentScale = scale
+        /**
+         * 失败才补：等 pdf.js 把重排走完（同一帧内它已经滚过一次），
+         * 下一帧量一次。位置差得多才动手，避免和它抢方向、抖起来。
+         */
+        if (anchorPage > 1) {
+          const restoreAnchor = () => {
+            try {
+              if (!viewerRef.current) return
+              const pageNow = viewer.currentPageNumber
+              const offNow = measureScrollOffsetByGeometry(hostRef.current, pageNow)
+              const drifted = pageNow !== anchorPage
+                || Math.abs(offNow - anchorOffset) > 0.25
+              if (!drifted) return
+              scrollPageIntoView(hostRef.current, anchorPage, anchorOffset)
+              reportDiag({
+                event: 'zoom:reanchor',
+                from: pageNow,
+                to: anchorPage,
+                offset: Number(anchorOffset.toFixed(3)),
+              })
+            } catch { /* 补不到位最多是位置不理想，不影响可读 */ }
+          }
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreAnchor)
+          else setTimeout(restoreAnchor, 16)
+        }
       }, [scale, status])
 
       /**
@@ -4247,13 +4424,28 @@ window.__ModuleLoader__.load({
          * 几何读取就要付一次强制重排。这跟文本层排序叠加起来，就是滑动时
          * 每页卡好几秒的另一半原因。
          *
-         * 用「页号 + 尺寸 + 缩放 + 高亮 + 批注快照」做签名，相同就整体跳过。
+         * 用「页号 + 缩放 + 高亮 + 批注快照」做签名，相同就整体跳过。
          * 序号变化（新增/删除/改色）会改变签名，所以不会漏刷。
+         *
+         * **不要再把 pw/ph 放进签名。** 原来签名里有 Math.round(pw)、Math.round(ph)，
+         * 而缩放过程中每页尺寸是连续变化的：滚轮一次能连抛十几条 scalechanging，
+         * 每一帧的 clientWidth 都不一样，签名于是帧帧失效 —— 批注层被反复
+         * `innerHTML = ''` 再全量重建，正是「缩放时又卡又闪」的直接来源。
+         * 位置真正依赖的是**缩放比**（pageHeightPt * k 就还原出全部坐标），
+         * 尺寸只是它的派生量，所以签名记缩放，不记尺寸。
+         * 拿不到官方 viewport 时才退回按 pw 反算 —— 那是同一套语义的退路。
          */
+        const pageScale = (() => {
+          try {
+            const pv = viewerRef.current?.getPageView?.(pageNo - 1)
+            if (pv?.scale > 0) return Number(pv.scale.toFixed(4))
+          } catch { /* 退回下面的估算 */ }
+          const base = pageSizesRef.current.get(pageNo)
+          return base?.w > 0 ? Number((pw / base.w).toFixed(4)) : 0
+        })()
         const sig = [
           pageNo,
-          Math.round(pw),
-          Math.round(ph),
+          pageScale,
           highlight && highlight.page === pageNo ? JSON.stringify(highlight.rects) : '',
           annotationsRef.current
             .filter((a) => a.pageIndex === pageNo - 1)
