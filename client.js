@@ -1657,6 +1657,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 连续缩放手势的判定间隔（ms）。
+     *
+     * 一次滚轮手势会连发 3–5 个 wheel 事件，彼此间隔几十毫秒。间隔小于这个值
+     * 就认为是**同一次手势**，沿用第一次捕获的锚点；超过就当作新手势重新捕获。
+     * 取 320ms：明显长于同一手势内的间隔，又短于人的两次独立缩放操作。
+     */
+    const ZOOM_GESTURE_GAP_MS = 320
+
+    /**
      * 找出屏幕坐标 (x, y) 底下是第几页。
      *
      * 先用 elementFromPoint —— 它给的正是「用户眼睛看到的那一页」，天然处理了
@@ -1755,6 +1764,19 @@ window.__ModuleLoader__.load({
         if (Math.abs(dy) > 0.5) scroller.scrollTop += dy
         return { dx, dy }
       } catch { return null }
+    }
+
+    /**
+     * 判断两个锚点是否「其实是同一个点」。
+     *
+     * 同一个手势里若要沿用旧锚点，必须确认锚点仍是同一个物理位置：
+     * 页号相同，且屏幕坐标几乎没变。若用户在同一次手势里把指针挪到了另一页，
+     * 那就是换了注视目标，应当以新的为准 —— 否则会补偿到用户不再看的地方。
+     */
+    function isSameAnchorPoint(a, b) {
+      if (!a || !b) return false
+      if (a.pageNo !== b.pageNo) return false
+      return Math.abs(a.clientX - b.clientX) <= 2 && Math.abs(a.clientY - b.clientY) <= 2
     }
 
     function Reader(props) {
@@ -3254,6 +3276,38 @@ window.__ModuleLoader__.load({
        * 谁写的谁负责：消费后立即置 null，避免旧锚点影响下一次无关的缩放。
        */
       const zoomAnchorRef = useRef(null)
+      /**
+       * **本次连续手势的锚点**（与 zoomAnchorRef 的分工见下）。
+       *
+       * 为什么要分成两个 ref —— 这是「连续缩放一半对一半乱飘」的修法核心：
+       *
+       * 原来只有一个消费式锚点：缩放 effect 一读完就置 null，下一个 wheel 事件
+       * 再捕获新锚点。可连续滚轮时 `setScale` → React 会合并同一帧内的多次
+       * state 更新，effect 只跑一次（这一半是好的）；跨帧时 effect 跑多次，
+       * 每次都会对**同一个物理点**重新捕获锚点 —— 但那时页面已经缩过一轮，
+       * 同一个屏幕点指向的文档位置早已不同。于是各次补偿各按不同基准、
+       * 互相追赶。实测日志里 dy 在 +1031 与 −1029 之间来回跳，正是这种振荡。
+       *
+       * 现在拆成：
+       *   · zoomAnchorRef —— 手势里的**基准锚点**，整个手势期间保持不变；
+       *   · zoomPendingRef —— 「有缩放待补偿」的标记，只表示要不要跑补偿链。
+       * 补偿不再清掉基准锚点，所以整段手势始终以同一个 (页, nx, ny) 为基准；
+       * 每次补偿都用**当时**的 scale 重算绝对目标位置（不是累加上次的残差），
+       * 因此多次执行不会互相追赶，最终必然收敛到「那一点仍在原屏幕位置」。
+       */
+      const zoomAnchorRecentRef = useRef({ capturedAt: 0, anchor: null })
+      const zoomPendingRef = useRef(false)
+      /**
+       * 当前在跑的补偿链句柄（非 null 表示「已有一条链在排队/执行」）。
+       *
+       * 存在的唯一目的就是判重：连续滚轮会在同一小段时间里反复触发同步 effect，
+       * 若每次都排一条自己的 rAF 链，多条链会在同一批帧里接连补偿 ——
+       * 这是「一半对一半乱飘」的另一半原因。有了它，后来的只登记、不排链，
+       * 由既有的那条链在下一拍读到最新 scale 时一并处理。
+       */
+      const zoomCompensationRef = useRef(null)
+      /** 被既有链合并掉的缩放轮次计数，随下一次补偿一并写进诊断。 */
+      const pendingMergedRef = useRef(0)
       /**
        * PDF 内链接的监听清理函数。
        *
@@ -4821,6 +4875,19 @@ window.__ModuleLoader__.load({
             clearTimeout(saveScaleTimerRef.current)
             saveScaleTimerRef.current = null
           }
+          /**
+           * 换文档/重载时把缩放补偿状态一起清掉。
+           *
+           * 不清的后果很具体：`zoomCompensationRef` 里挂的若是上一个 viewer
+           * 的 settle 闭包，新文档的第一次缩放会被判成「已有链在跑」而全部
+           * 走合并分支、一次都不补偿 —— 表现为「这篇文献怎么缩放都没反应」，
+           * 且日志里一条 zoom:anchor 都没有，很难往这个方向想。
+           */
+          zoomCompensationRef.current = null
+          zoomPendingRef.current = false
+          pendingMergedRef.current = 0
+          zoomAnchorRef.current = null
+          zoomAnchorRecentRef.current = { capturedAt: 0, anchor: null }
           try { viewer?.destroy?.() } catch { /* 已销毁 */ }
           viewerRef.current = null
           eventBusRef.current = null
@@ -4862,40 +4929,103 @@ window.__ModuleLoader__.load({
          *
          * 正确做法：缩放前记下指针处的（页, nx, ny）与屏幕坐标，写完 scale、
          * 等 pdf.js 重排稳定后，把该点重新对回原屏幕坐标（见 applyZoomAnchor）。
-         * 这里的锚点是消费式的：没有待处理锚点就什么都不做 —— pdf.js 自己的
-         * 保位已经够用，我们只在「用户明确从某个点缩放」时介入。
          */
+        /**
+         * 锚点分两层（原因见 zoomAnchorRecentRef 的注释）：
+         *   · 基准锚点 zoomAnchorRef —— 整段手势共用，不在补偿时清掉；
+         *   · 待补偿标记 zoomPendingRef —— 只决定要不要跑补偿链。
+         *
+         * 这样连续滚轮时，无论 effect 被触发几次，基准点始终是用户最初
+         * 注视的那个物理位置；每次补偿都用**当次 scale** 重算绝对目标，
+         * 因此不存在「上次的残差叠上来」导致的振荡。
+         */
+        /**
+         * 先把「这次要不要补、补哪个点」读出来，再动 scale。
+         *
+         * 读顺序有意义：写完 currentScale 之后页面几何立刻开始变，虽然
+         * 这里读的是 ref（不受几何影响），但把判定放在写之前，能保证
+         * 「判定依据 = 用户缩放前的那一刻」，也避免后来人误以为锚点是在
+         * 新几何上取的。
+         */
+        if (!zoomPendingRef.current) return
         const zoomAnchor = zoomAnchorRef.current
-        zoomAnchorRef.current = null
+        if (!zoomAnchor) return
         lastAppliedScaleRef.current = scale
         viewer.currentScale = scale
-        if (!zoomAnchor) return
+        /**
+         * 补偿链是**单条链式重排**，不是「每次 effect 各排一个队列」：
+         * 已经有链在跑时只更新标记，由链的下一拍读到最新 scale。
+         * 被合并掉的那些轮次要留下计数，随下一次补偿写进诊断 ——
+         * 否则用户看到 zoom:anchor 条数比 wheel 次数少，无法判断是合并还是漏了。
+         */
+        if (zoomCompensationRef.current != null) {
+          pendingMergedRef.current += 1
+          return
+        }
         /**
          * 等 pdf.js 把重排走完再补偿，两跳 rAF：
          *   第一跳 —— pdf.js 的 pageView.update() 已排队但布局可能还没落定；
          *   第二跳 —— 此时的 getBoundingClientRect 才是新 scale 下的真几何。
-         * 只补这一次，不重试：增量补偿是一次线性校正，几何一旦稳定，
-         * 补偿量就是确定的；反复重试反而会在滚动事件与重排之间来回震荡。
          */
         const settle = (n) => {
+          zoomCompensationRef.current = settle
           if (n > 0) {
             if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => settle(n - 1))
             else setTimeout(() => settle(n - 1), 16)
             return
           }
+          /**
+           * **补偿改的是滚动位置，而滚动会让 pdf.js 的保位基准跟着变。**
+           *
+           * 补偿会改 scrollTop，pdf.js 的 watchScroll 随之把 `_staleLocation`
+           * 置真，于是下一次 #setScaleUpdatePages 会先按 `_getVisiblePages()`
+           * 重新取一次 `_location`。若那次保位恰好落在我们的两次补偿之间，
+           * 它就会照着一个「刚被我们改过的位置」去滚 —— 两次补偿方向相反，
+           * 正是日志里 dy 在 +1031/−1029 之间翻转的成因。
+           *
+           * 对策两条：
+           *   ① 同一次补偿只做一次（上面已用单条链保证），不做无条件的
+           *      「补到对为止」，避免和它来回抢；
+           *   ② 手势仍在继续时才追一轮，且追的每一轮都按**最新 scale** 重算
+           *      绝对目标（applyZoomAnchor 内部是 `want - client`，不是在上一轮
+           *      结果上累加），所以既不会越过、也不会反向。
+           */
           const host = hostRef.current
-          if (!host) return
+          if (!host) { zoomCompensationRef.current = null; return }
           const moved = applyZoomAnchor(host, zoomAnchor)
-          if (!moved) return
-          zoomAtRef.current = perf.now()
-          reportDiag({
-            event: 'zoom:anchor',
-            page: zoomAnchor.pageNo,
-            nx: Number(zoomAnchor.nx.toFixed(4)),
-            ny: Number(zoomAnchor.ny.toFixed(4)),
-            dx: Number(moved.dx.toFixed(1)),
-            dy: Number(moved.dy.toFixed(1)),
-          })
+          const mergedCount = pendingMergedRef.current
+          pendingMergedRef.current = 0
+          if (moved) {
+            zoomAtRef.current = perf.now()
+            reportDiag({
+              event: 'zoom:anchor',
+              page: zoomAnchor.pageNo,
+              nx: Number(zoomAnchor.nx.toFixed(4)),
+              ny: Number(zoomAnchor.ny.toFixed(4)),
+              dx: Number(moved.dx.toFixed(1)),
+              dy: Number(moved.dy.toFixed(1)),
+              merged: mergedCount,
+            })
+          }
+          /**
+           * **继续追还是收手，只看「还是不是同一个手势」。**
+           *
+           * 手势还在继续（最近一次捕获距现在不足 ZOOM_GESTURE_GAP_MS）时再排一轮，
+           * 读到的就是最新 scale。手势结束后不再重排：pdf.js 自己的保位足够，
+           * 多补反而会和它抢。
+           */
+          const gestureLive = perf.now() - zoomAnchorRecentRef.current.capturedAt < ZOOM_GESTURE_GAP_MS
+          zoomPendingRef.current = false
+          if (gestureLive && pendingMergedRef.current > 0) {
+            settle(1)
+            return
+          }
+          zoomCompensationRef.current = null
+          // 手势彻底结束时释放基准锚点，下一次缩放重新捕获
+          if (!gestureLive) {
+            zoomAnchorRef.current = null
+            zoomAnchorRecentRef.current = { capturedAt: 0, anchor: null }
+          }
         }
         settle(2)
       }, [scale, status])
@@ -6840,14 +6970,28 @@ window.__ModuleLoader__.load({
           // 手动缩放后退出「自适应宽度」模式，否则这个数字不会被写进 viewer
           fitModeRef.current = false
           /**
-           * **在这里、趁几何还没变，把指针锚点记下来。**
+           * **在缩放前捕获锚点，且整段手势只捕获一次。**
            *
-           * 这是「以光标所在点为原点缩放」的关键时机：此刻页面还是旧尺寸，
-           * event.clientX/clientY 正是用户眼下盯着的那个点。等到 state 同步
-           * effect 里再想捕获，页面早已按新 scale 重排，同一个屏幕点指向的
-           * 文档位置已经变了 —— 锚点就取错了。
+           * 时机：此刻页面还是旧尺寸，event.clientX/clientY 正是用户眼下盯着
+           * 的那个点。等到 state 同步 effect 里再取，页面已按新 scale 重排，
+           * 同一个屏幕点指向的文档位置已经变了 —— 锚点就取错了。
+           *
+           * 只捕获一次（手势锁定）：一次连续手势会连发 3–5 个 wheel 事件，
+           * 若每个事件都重取锚点，第二次起取到的是「已经缩过一轮之后的页面」，
+           * 基准点于是逐次漂移 —— 实测日志里同一段手势的锚点页从 12 跳到 11
+           * 再到 12、dy 在 +1031 与 −1029 之间翻转，就是这么来的。
+           * 现在同一手势沿用第一个锚点；指针真的移到另一页/另一处才换基准
+           * （isSameAnchorPoint 判的就是「是不是同一个物理点」）。
            */
-          zoomAnchorRef.current = captureZoomAnchor(hostRef.current, event.clientX, event.clientY)
+          const nowMs = perf.now()
+          const candidate = captureZoomAnchor(hostRef.current, event.clientX, event.clientY)
+          const prev = zoomAnchorRecentRef.current
+          const sameGesture = (nowMs - prev.capturedAt) < ZOOM_GESTURE_GAP_MS
+          if (!(sameGesture && isSameAnchorPoint(prev.anchor, candidate))) {
+            zoomAnchorRef.current = candidate
+          }
+          zoomAnchorRecentRef.current = { capturedAt: nowMs, anchor: zoomAnchorRef.current }
+          zoomPendingRef.current = true
           setScale((current) => Math.max(0.4, Math.min(3, Number((current + step).toFixed(3)))))
         }
         // 双指捏合在触摸屏上还有一套 touch 事件；阻止浏览器整页缩放
@@ -6937,8 +7081,8 @@ window.__ModuleLoader__.load({
           }),
           h('span', { style: { fontSize: 11, opacity: .7, whiteSpace: 'nowrap' } }, '/ ' + (pageCount || '?')),
           h('button', { className: 'zr-btn', onClick: () => gotoPage(jumpPage + 1), disabled: pageCount > 0 && jumpPage >= pageCount, title: t('nextPage') }, '›'),
-          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; zoomAnchorRef.current = captureCenterZoomAnchor(); setScale((s) => Math.min(3, +(s + 0.15).toFixed(2))) }, title: t('zoomIn') }, '+'),
-          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; zoomAnchorRef.current = captureCenterZoomAnchor(); setScale((s) => Math.max(0.4, +(s - 0.15).toFixed(2))) }, title: t('zoomOut') }, '−'),
+          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; const a = captureCenterZoomAnchor(); zoomAnchorRef.current = a; zoomAnchorRecentRef.current = { capturedAt: perf.now(), anchor: a }; zoomPendingRef.current = true; setScale((s) => Math.min(3, +(s + 0.15).toFixed(2))) }, title: t('zoomIn') }, '+'),
+          h('button', { className: 'zr-btn', onClick: () => { fitModeRef.current = false; const a = captureCenterZoomAnchor(); zoomAnchorRef.current = a; zoomAnchorRecentRef.current = { capturedAt: perf.now(), anchor: a }; zoomPendingRef.current = true; setScale((s) => Math.max(0.4, +(s - 0.15).toFixed(2))) }, title: t('zoomOut') }, '−'),
           h('button', {
             className: 'zr-btn', title: t('fitWidth'),
             onClick: () => {
@@ -6964,14 +7108,16 @@ window.__ModuleLoader__.load({
                 lastAppliedScaleRef.current = Number(viewer.currentScale.toFixed(3))
                 setScale(Number(viewer.currentScale.toFixed(3)))
                 const settleFit = (n) => {
+                  zoomCompensationRef.current = settleFit
                   if (n > 0) {
                     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => settleFit(n - 1))
                     else setTimeout(() => settleFit(n - 1), 16)
                     return
                   }
                   const host = hostRef.current
-                  if (!host || !anchor) return
+                  if (!host || !anchor) { zoomCompensationRef.current = null; return }
                   const moved = applyZoomAnchor(host, anchor)
+                  zoomCompensationRef.current = null
                   if (!moved) return
                   zoomAtRef.current = perf.now()
                   reportDiag({
