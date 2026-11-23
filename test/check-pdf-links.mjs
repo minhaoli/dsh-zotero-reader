@@ -93,8 +93,31 @@ check('外部链接会 preventDefault',
 check('外部链接用 _blank 交给宿主转交系统浏览器',
   /window\.open\(href, '_blank'/.test(blockCodeEarly))
 
-check('新窗口带 noopener（不泄漏 window.opener）',
-  /noopener/.test(blockCodeEarly))
+/**
+ * 这条断言原来叫「新窗口带 noopener（不泄漏 window.opener）」，测的是
+ * `window.open(href, '_blank', 'noopener,noreferrer')`。
+ *
+ * 那个写法本身就是 bug：按 HTML 规范，features 里带 noopener / noreferrer 时
+ * window.open **必须返回 null**，于是 `blocked: !opened` 恒为真 ——
+ * 日志看着像「宿主每次都拦」，实际一次都没拦，判据完全失效。
+ *
+ * 所以检查的实质要反过来：**不能**带这两个 feature，并且 blocked 必须来自真实返回值。
+ * 安全性由宿主的 setWindowOpenHandler（一律 deny）保证，不靠这个参数。
+ */
+check('window.open 不带 noopener/noreferrer（否则返回值恒为 null，blocked 变假信号）',
+  /window\.open\(href, '_blank'\)/.test(blockCodeEarly) &&
+    !/window\.open\([^)]*'[^']*noopener/.test(blockCodeEarly),
+  'noopener/noreferrer 会让 window.open 按规范返回 null，blocked: !opened 永远是 true')
+
+check('blocked 取自真实返回值（window.open 结果为 null 才算被拦）',
+  /const blocked = !opened/.test(blockCodeEarly) &&
+    /reportDiag\(\{ event: 'link:open'[^}]*blocked \}\)/.test(blockCodeEarly) ||
+    /blocked(?::\s*blocked|\s*\})/.test(blockCodeEarly),
+  'blocked 若恒为真，日志就无法区分「宿主拦了」和「其实打开了」')
+
+check('被宿主拒绝时给出可见反馈（不再静默）',
+  /if \(blocked\)[\s\S]{0,800}?showLinkTip\(/.test(blockCodeEarly),
+  'http/mailto/tel 必然被宿主 deny，静默拒绝的观感与「点了没反应」相同')
 
 check('识别 http(s)/mailto/tel 等外层协议',
   /\(\?:\^\?\)|https\?|mailto|tel/.test(block) || /mailto\|tel/i.test(block))
@@ -106,6 +129,35 @@ check('内部链接解析 #page=N', /#page=\(\\d\+\)/.test(block) || /#page=/.te
 check('内部跳转调用 scrollPageIntoView（不依赖 pdf.js 那条断掉的链）',
   /scrollPageIntoView\(host, n, 0\)/.test(block),
   'pdf.js 自己的滚动链在侧栏里是断的，本项目为此专门实现了 scrollPageIntoView')
+
+/**
+ * 具名目标（LaTeX 的 #eq1 / #cite.xxx）。
+ *
+ * 原来这一支是 `linkService.navigateTo(href.slice(1))` 包在空 catch 里 ——
+ * 而这个版本的 pdf_viewer.mjs **没有 navigateTo 这个方法**（全文 0 处引用），
+ * 于是每次点击都抛 TypeError 被吞掉：日志只有 link:click，画面纹丝不动。
+ *
+ * 断言因此分两条：必须自己解析 dest；且不得再出现 navigateTo。
+ */
+check('具名目标自己解析（getDestination + getPageIndex）',
+  /jumpToNamedDest/.test(block) &&
+    /getDestination\(/.test(src) &&
+    /getPageIndex\(/.test(src),
+  'navigateTo 在此版本不存在，只能自己解析 /Dests')
+
+check('不再调用不存在的 linkService.navigateTo',
+  !/linkService\.navigateTo/.test(stripCommentsEarly(src)),
+  'navigateTo 在 pdf_viewer.mjs 中不存在，调用必抛 TypeError 并被空 catch 吞掉')
+
+check('具名目标失败会留痕（不再空 catch）',
+  /link:dest-fail/.test(src),
+  '空 catch 让「点了没反应」在日志里完全隐形')
+
+check('具名目标跳转后同步页码显示',
+  /viewer\.currentPageNumber = pageNo/.test(src) &&
+    /setVisiblePage\(pageNo\)/.test(src) &&
+    /setJumpPage\(pageNo\)/.test(src),
+  '只滚动不改页码会让工具条停留在旧页')
 
 /* ---------- 4. 悬停预览 ---------- */
 
@@ -149,6 +201,32 @@ check('提示有上下翻转（贴近视口顶部时放下方）',
   /if \(top < 8\) top = r\.bottom \+ 8/.test(src))
 
 check('提示左右夹在视口内', /Math\.min\(r\.left, window\.innerWidth - tipW - 8\)/.test(src))
+
+/**
+ * 悬停必须是**延时 + 去重**的。
+ *
+ * 性能日志：`HTMLAnchorElement.patchedGBCR <- onPdfLinkOver` 18 次累计 4751ms，
+ * 单次最高 447ms —— 每次 mouseover 都立刻 getBoundingClientRect 强制布局，
+ * 而 mouseover 会从 <a> 的子元素反复冒泡上来，扫过一行字就是一串调用。
+ *
+ * 修法三条都要在：延时、同锚点去重、矩形只读一次。
+ */
+check('悬停延时触发（快速扫过不算矩形）',
+  /HOVER_TIP_DELAY = 150/.test(src) &&
+    /linkTipTimer = setTimeout\(/.test(src),
+  '不延时的话每次 mouseover 都会强制布局')
+
+check('mouseout 清掉延时', /clearTimeout\(linkTipTimer\)/.test(src))
+
+check('同一条链接内部冒泡不重复计算',
+  /anchor === linkTipAnchor/.test(src),
+  'mouseover 从 <a> 的子元素冒泡上来，不去重就会反复重排延时')
+
+check('getBoundingClientRect 只在一处读（不在 mousemove 里反复读）',
+  (src.match(/getBoundingClientRect\(\)/g) || []).length >= 1 &&
+    /showLinkTip[\s\S]{0,900}?anchor\.getBoundingClientRect\(\)/.test(src),
+  '矩形应当读一次并缓存，不能每次移动都读')
+
 
 /* ---------- 5. 监听必须清理（否则累积） ---------- */
 
