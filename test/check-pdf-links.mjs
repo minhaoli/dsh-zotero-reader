@@ -1141,10 +1141,33 @@ check('判定邻栏空白时排除页眉/页脚',
     /v\.y > edgeBand && v\.y < heightPt - edgeBand/.test(src),
   '页眉会被误判成邻栏内容，导致 fig1 不跨栏')
 
-check('区域上下各外扩 40%（留上下文，保留滚动）',
-  /const pad = h \* 0\.4/.test(src),
-  '用户要求浮窗可滑动，纯抠图会贴死边框')
+/**
+ * **外扩改成「受高度预算约束的自适应」，不是固定比例。**
+ *
+ * 固定 40% 把 fig8 区域高从 203pt 撑到 391pt，scale 被 availH/regionH
+ * 卡成 2.25（只 +3%），比不外扩（+84%）差得多。
+ * 现在只在「不牺牲缩放」的前提下才外扩。
+ */
+check('外扩受高度预算约束（不是固定比例）',
+  /const wantPad = Math\.max\(12, Math\.min\(baseRegion\.h \* 0\.25, 80\)\)/.test(src) &&
+    /const hBudget = availH0 !== Infinity && targetScaleW > 0/.test(src) &&
+    /const padY = Math\.max\(0, Math\.min\(wantPad, maxPadByHeight, maxPadByText\)\)/.test(src),
+  '固定 40% 会把纵向长图的高度撑爆，scale 被卡死')
 
+check('外扩不越过相邻文本块（不把正文裁进图里）',
+  /maxPadByText = Math\.max\(0, Math\.min\(roomAbove, roomBelow\)\)/.test(src),
+  '外扩进正文会让「图」里混入整段文字')
+
+check('推导函数返回未外扩的紧致区域（外扩统一由渲染层做）',
+  /kindName: 'figure', crossColumn,/.test(src) &&
+    !/const pad = h \* 0\.4/.test(src),
+  '两处各自外扩会出现口径不一致')
+
+check('记录跨栏判定原因（邻栏空 / 只有页眉 / 有内容）',
+  /crossColumnReason: canvas\.dataset\?\.crossColumnReason/.test(src) &&
+    /'other-col-only-header'/.test(src) &&
+    /'other-col-occupied'/.test(src),
+  '8% 页边判据万一误判，日志要能说明是哪种情况')
 check('跨栏/倍率上限/区域尺寸进诊断',
   /crossColumn: canvas\.dataset\?\.crossColumn === '1'/.test(src) &&
     /scaleCap: Number\(canvas\.dataset\?\.scaleCap/.test(src),

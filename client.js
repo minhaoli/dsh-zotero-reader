@@ -4653,10 +4653,13 @@ window.__ModuleLoader__.load({
                      * 判据：距页面上下边缘 8% 以内的文本视为边缘装饰。
                      */
                     const edgeBand = heightPt * 0.08
-                    const overlap = otherCol.filter(
-                      (v) => v.y >= yBot - 2 && v.y <= yTop + 2
-                        && v.y > edgeBand && v.y < heightPt - edgeBand,
+                    const overlapRaw = otherCol.filter(
+                      (v) => v.y >= yBot - 2 && v.y <= yTop + 2,
                     )
+                    const overlap = overlapRaw.filter(
+                      (v) => v.y > edgeBand && v.y < heightPt - edgeBand,
+                    )
+                    const overlapRawCount = overlapRaw.length
                     const crossColumn = overlap.length === 0
                     let x0 = colX0
                     let x1 = colX1
@@ -4665,22 +4668,35 @@ window.__ModuleLoader__.load({
                       x1 = Math.min(widthPt, Math.max(x1, Math.max(...otherCol.map((v) => v.x + v.w)) + 6))
                     }
                     /**
-                     * ---- ④ 上下各外扩 40% ----
-                     * 钳在页面内，且不越过已找到的相邻文本块
-                     * （yTop 上方 / yBot 下方的第一个文本块）。
+                     * ---- ④ 返回**未外扩**的紧致区域 ----
+                     *
+                     * 外扩不在这里做：它需要知道 `availH` 与目标倍率，
+                     * 而那两个值只有 `renderDestBitmap` 才有。
+                     * 早先在 inferDestRegion 里按固定 40% 外扩，导致
+                     * fig8 的区域高从 203pt 撑到 391pt，`scale` 被
+                     * `availH/regionH` 卡成 2.25（只 +3%），比不外扩还差。
+                     *
+                     * 现在由 renderDestBitmap 用「受高度预算约束」的
+                     * 自适应外扩统一处理（见那里的说明）。
                      */
-                    const pad = h * 0.4
-                    let yLo = Math.max(0, yBot - pad)
-                    let yHi = Math.min(heightPt, yTop + pad)
-                    // 不越过本栏内更近的文本块
-                    for (const it of colItems) {
-                      if (it.y < yBot && it.y + 6 > yLo && it.y < yBot) yLo = Math.max(yLo, it.y + 6)
-                      if (it.y > yTop && it.y - 6 < yHi && it.y > yTop) yHi = Math.min(yHi, it.y - 6)
-                    }
-                    if (yHi - yLo > 20) {
+                    if (yTop - yBot > 20) {
+                      /**
+                       * 顺带把「上下最近的文本块」带出去，供外扩时避让
+                       * （外扩不能把正文裁进图里）。
+                       */
+                      let blockAbove = null   // yTop 上方最近的文本块 y
+                      let blockBelow = null   // yBot 下方最近的文本块 y
+                      for (const it of colItems) {
+                        if (it.y > yTop && (blockAbove === null || it.y < blockAbove)) blockAbove = it.y
+                        if (it.y < yBot && (blockBelow === null || it.y > blockBelow)) blockBelow = it.y
+                      }
                       return {
-                        x: x0, y: yLo, w: x1 - x0, h: yHi - yLo,
+                        x: x0, y: yBot, w: x1 - x0, h: yTop - yBot,
                         kindName: 'figure', crossColumn,
+                        blockAbove, blockBelow, pageH: heightPt,
+                        crossColumnReason: crossColumn
+                          ? (overlapRawCount > 0 ? 'other-col-only-header' : 'other-col-empty')
+                          : 'other-col-occupied',
                       }
                     }
                   }
@@ -4719,12 +4735,20 @@ window.__ModuleLoader__.load({
                     yBot = it.y
                   }
                   if (yTop - yBot > 20) {
-                    const pad = (yTop - yBot) * 0.4
-                    const yLo = Math.max(0, yBot - pad)
-                    const yHi = Math.min(heightPt, yTop + pad)
+                    /**
+                     * 同样返回紧致区域，外扩交给 renderDestBitmap 统一做。
+                     */
+                    let blockAbove = null
+                    let blockBelow = null
+                    for (const it of colItems) {
+                      if (it.y > yTop && (blockAbove === null || it.y < blockAbove)) blockAbove = it.y
+                      if (it.y < yBot && (blockBelow === null || it.y > blockBelow)) blockBelow = it.y
+                    }
                     return {
-                      x: colX0, y: yLo, w: colX1 - colX0, h: yHi - yLo,
+                      x: colX0, y: yBot, w: colX1 - colX0, h: yTop - yBot,
                       kindName: 'equation', crossColumn: false,
+                      crossColumnReason: 'single-column',
+                      blockAbove, blockBelow, pageH: heightPt,
                     }
                   }
                 }
@@ -4851,18 +4875,55 @@ window.__ModuleLoader__.load({
                 const inferred = await inferDestRegion(dest, widthPt, heightPt)
                 const baseRegion = inferred || destRegionPts(dest, widthPt, heightPt)
                 /**
-                 * **上下各外扩 15% 留上下文。**
+                 * **可用宽高先算出来**，因为下面的自适应外扩要用它们做预算。
+                 */
+                const availW0 = typeof opts?.targetCssWidth === 'number' && opts.targetCssWidth > 0
+                  ? opts.targetCssWidth
+                  : (typeof opts?.availW === 'number' && opts.availW > 0 ? opts.availW : bitmap.cssWidth)
+                const availH0 = typeof opts?.availH === 'number' && opts.availH > 0 ? opts.availH : Infinity
+                const MAX_SCALE = 4
+                /**
+                 * **自适应外扩：只在「不牺牲缩放」的前提下才扩。**
                  *
                  * 用户要求「落在悬浮窗上需要有滑动悬浮窗页面的功能」，
-                 * 纯抠图会贴死边框、滚动条变成死的。
+                 * 所以要留一点上下文；但固定比例的外扩会毁掉放大效果 ——
+                 * 实测 fig8：区域高 203pt，外扩 40% 撑到 391pt，
+                 * `scale` 被 `availH/regionH = 879/391 = 2.25` 卡死，
+                 * 只 +3%，比不外扩（4.00 -> +84%）差得多。
                  *
-                 * 为什么是 15% 而不是 40%：实测外扩比例直接影响 contain 倍率 ——
-                 *   fig1（宽区域）：15% 与 40% 都是 2.49x（宽度先撞上限），无差别
-                 *   fig8（窄区域）：15% -> 3.00x(+31%)，40% -> 2.26x(-1%)，变差
-                 * 因为窄区域外扩后宽高比更窄、高度先撞上限。
-                 * 15% 是「既有上下文、又不牺牲放大」的平衡点。
+                 * 所以改成按预算算：先看「填满宽度」需要多大倍率，
+                 * 那个倍率下允许的最大区域高度是 `availH / targetScaleW`；
+                 * 超出这个高度的部分就不扩了。
+                 * 窄区域（fig1 高 137pt）预算充足 → 照给；
+                 * 纵向长图（fig8 高 203pt）已接近高度瓶颈 → 少扩或不扩。
                  */
-                const padY = baseRegion.h * 0.15
+                const wantPad = Math.max(12, Math.min(baseRegion.h * 0.25, 80))  // 12~80pt
+                const targetScaleW = Math.min(
+                  availW0 / Math.max(1, baseRegion.w),
+                  MAX_SCALE,
+                  bitmapMaxWidthPx / Math.max(1, baseRegion.w),
+                )
+                const hBudget = availH0 !== Infinity && targetScaleW > 0
+                  ? availH0 / targetScaleW
+                  : Infinity
+                const maxPadByHeight = hBudget !== Infinity
+                  ? Math.max(0, (hBudget - baseRegion.h) / 2)
+                  : wantPad
+                /**
+                 * 上限 2：不越过相邻文本块（否则会把正文裁进图里）。
+                 */
+                let maxPadByText = wantPad
+                if (inferred) {
+                  const pageH = inferred.pageH || heightPt
+                  const roomAbove = inferred.blockAbove != null
+                    ? Math.max(0, inferred.blockAbove - (baseRegion.y + baseRegion.h) - 4)
+                    : Math.max(0, pageH - (baseRegion.y + baseRegion.h))
+                  const roomBelow = inferred.blockBelow != null
+                    ? Math.max(0, baseRegion.y - inferred.blockBelow - 4)
+                    : baseRegion.y
+                  maxPadByText = Math.max(0, Math.min(roomAbove, roomBelow))
+                }
+                const padY = Math.max(0, Math.min(wantPad, maxPadByHeight, maxPadByText))
                 const region = {
                   x: baseRegion.x,
                   w: baseRegion.w,
@@ -4877,13 +4938,15 @@ window.__ModuleLoader__.load({
                  * 填满宽度：纵向图（fig8 窄高）会溢出。
                  * contain 让整个区域完整可见、长边贴边、短边留白。
                  *
-                 * 上限 3x：再高肉眼无增益，反而轮廓发虚。
+                 * 上限 4x（受画布像素预算再兜一次）：再高肉眼无增益，反而轮廓发虚。
                  */
                 const aspect = region.w / Math.max(1e-6, region.h)
-                const availW = typeof opts?.targetCssWidth === 'number' && opts.targetCssWidth > 0
-                  ? opts.targetCssWidth
-                  : (typeof opts?.availW === 'number' && opts.availW > 0 ? opts.availW : bitmap.cssWidth)
-                const availH = typeof opts?.availH === 'number' && opts.availH > 0 ? opts.availH : Infinity
+                /**
+                 * 复用前面为「外扩预算」算好的可用宽高，避免重复推导
+                 * （两处各算一遍容易出现口径不一致）。
+                 */
+                const availW = availW0
+                const availH = availH0
                 /**
                  * **contain 的倍率上限：4，且受画布像素预算兜底。**
                  *
@@ -4897,7 +4960,6 @@ window.__ModuleLoader__.load({
                  * 172×4×dpr2 = 1376px 刚好卡在 1400 的边缘，再加一列就溢出。
                  * 所以实际生效上限取两者较小值。
                  */
-                const MAX_SCALE = 4
                 const scaleCap = Math.min(MAX_SCALE, bitmapMaxWidthPx / Math.max(1, region.w))
                 const scaleFit = Math.min(availW / region.w, availH / region.h, scaleCap)
                 let cssW = Math.max(40, region.w * scaleFit)
@@ -4964,6 +5026,7 @@ window.__ModuleLoader__.load({
                   out.dataset.scale = String(Math.round(scaleFit * 100) / 100)
                   out.dataset.scaleCap = String(Math.round(scaleCap * 100) / 100)
                   out.dataset.crossColumn = inferred ? (inferred.crossColumn ? '1' : '0') : '0'
+                  out.dataset.crossColumnReason = inferred ? (inferred.crossColumnReason || '') : ''
                 } catch { /* ignore */ }
                 return out
               } catch { return null }
@@ -6508,6 +6571,8 @@ const placeBox = (el, l, t, wd, ht) => {
                             regionKind: canvas.dataset?.regionKind ?? null,
                             /** 是否跨栏（figure 的横向是否扩到了邻栏） */
                             crossColumn: canvas.dataset?.crossColumn === '1',
+                            /** 跨栏判定的原因：邻栏空 / 邻栏只有页眉 / 邻栏有内容 */
+                            crossColumnReason: canvas.dataset?.crossColumnReason ?? null,
                             viewportW: Math.round(window.innerWidth),
                             regionW: Number(canvas.dataset?.regionW ?? 0) || null,
                             regionH: Number(canvas.dataset?.regionH ?? 0) || null,
