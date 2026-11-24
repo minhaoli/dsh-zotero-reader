@@ -798,8 +798,9 @@ check('wasOn 分支按实际高度重新决定位置（修盖住链接）',
     const seg = src.slice(at, at + 7000)
     const wasOn = seg.indexOf('if (wasOn) {')
     if (wasOn < 0) return false
-    const branch = seg.slice(wasOn, wasOn + 2200)
-    return /const actualH = tip\.offsetHeight/.test(branch) &&
+    const branch = seg.slice(wasOn, wasOn + 3400)
+    return /const actualH = opts\?\.bitmap/.test(branch) &&
+      /Number\(opts\?\.popupH\) > 0/.test(branch) &&
       /computeTipPlacement\(anchor, actualH, Boolean/.test(branch) &&
       /tip\.style\.top = /.test(branch)
   })(),
@@ -823,9 +824,9 @@ check('换了链接时 wasOn 分支强制重算横向',
     const seg = src.slice(at, at + 7000)
     const wasOn = seg.indexOf('if (wasOn) {')
     if (wasOn < 0) return false
-    const branch = seg.slice(wasOn, wasOn + 2200)
+    const branch = seg.slice(wasOn, wasOn + 3400)
     return /anchor !== tipPlacedAnchor/.test(branch) &&
-      /placeHorizontal\(tip, anchor, opts\)/.test(branch)
+      /horiz = placeHorizontal\(tip, anchor, opts\)/.test(branch)
   })(),
   '不重算横向，所有引用会挤在同一个 x')
 
@@ -892,10 +893,11 @@ check('文字预览不被高度截断（内容全部放下去）',
 /**
  * 用户的原话：「悬浮窗的页面大概是 pdf 的 80% 就可以了」。
  */
-check('图片浮窗宽度为页面的 90%',
-  /const isBitmap = Boolean\(opts\?\.bitmap\)/.test(src) &&
-    /targetW = Math\.min\(baseW \* 0\.9, window\.innerWidth - 16\)/.test(src),
-  '用户先要 80%，后改 90%')
+check('位图宽度来自 popupW 单一几何源（不再按 0.9×页宽 自算）',
+  /const popupW = Number\(opts\?\.popupW\)/.test(src) &&
+    /if \(!\(popupW > 0\)\) return null/.test(src) &&
+    !/baseW \* 0\.9/.test(src),
+  '渲染 1240 而浮窗 630 就是两套几何打架')
 
 check('位图浮窗横向居中于页面（文字才跟链接）',
   /const pageCenter = pageRect && pageRect\.width > 0/.test(src) &&
@@ -989,10 +991,11 @@ check('放哪边、多高、top 由单个函数一次给出（首帧与复核共
  * 没记浮窗最终写入的 left/width，于是「日志里 x 在变」被当成
  * 「浮窗 x 在变」—— 实际 DOM 上只在第一次写过。
  */
-check('tip:place 记录浮窗最终的 left 与宽度',
-  /left: horiz \? Math\.round\(horiz\.left\) : null/.test(src) &&
-    /tipW: horiz \? Math\.round\(horiz\.width\) : null/.test(src),
-  '只记 linkLeft 会让人误以为浮窗 x 已跟随链接')
+check('tip:place 记录浮窗最终的 left 与宽度（缺失时读 DOM 兜底）',
+  /horiz && typeof horiz\.left === 'number'/.test(src) &&
+    /tipEl\.getBoundingClientRect\(\)\.left/.test(src) &&
+    /tipEl\.getBoundingClientRect\(\)\.width/.test(src),
+  'reflow 路径一片 left:null 就没法核对')
 
 check('tip:place 记录视口尺寸',
   /viewportW: Math\.round\(window\.innerWidth\)/.test(src) &&
@@ -1014,7 +1017,7 @@ check('wasOn 回流也发定位诊断',
     const seg = src.slice(at, at + 7000)
     const wasOn = seg.indexOf('if (wasOn) {')
     if (wasOn < 0) return false
-    return /reportTipPlace\(anchor, placed, opts/.test(seg.slice(wasOn, wasOn + 2400))
+    return /reportTipPlace\(anchor, placed, opts/.test(seg.slice(wasOn, wasOn + 3400))
   })(),
   '不发诊断就看不到换链接时的定位过程')
 
@@ -1065,24 +1068,25 @@ check('滚轮只在真能滚时才拦截（不误吞）',
   })(),
   '无条件 preventDefault 会让纯文字浮窗上滚不动 PDF')
 
-check('canvas 显示尺寸用 contain（完整装下，不填满宽也不填满高）',
-  /const scaleFit = Math\.min\(availW \/ region\.w, availH \/ region\.h, scaleCap\)/.test(src) &&
-    /let cssW = Math\.max\(40, region\.w \* scaleFit\)/.test(src) &&
+check('canvas 显示尺寸来自 geo（单一几何源）',
+  /const cssW = geo\.popupW/.test(src) &&
+    /const cssH = geo\.popupH/.test(src) &&
     /out\.style\.width = `\$\{Math\.round\(cssW\)\}px`/.test(src),
-  '填满高度会算出 3136px 宽必须横向滚；填满宽度则纵向图溢出')
+  'canvas 尺寸必须与 popupW 同源，否则会被 max-width 压扁')
 
-check('contain 有 4x 上限，且受画布像素预算兜底',
-  /const MAX_SCALE = 4/.test(src) &&
-    /const scaleCap = Math\.min\(MAX_SCALE, bitmapMaxWidthPx \/ Math\.max\(1, region\.w\)\)/.test(src),
+check('contain 有 4x 上限 + 画布像素预算兜底（在 geo 里）',
+  /const scaleCap = Math\.min\(4, bitmapMaxWidthPx \/ Math\.max\(1, region\.w\)\)/.test(src) &&
+    /const scale = Math\.min\(availW \/ region\.w, availH \/ region\.h, scaleCap\)/.test(src),
   '只调常量不够：窄区域 4x 会超出 1400px 画布预算')
 
-check('距离区域含已有更高分辨率时按显示宽度重渲',
-  /if \(needPxW > curPxW \* 1\.15\)/.test(src),
-  '按固定宽度渲染再放大到 3x，canvas 像素不够会发虚')
+check('渲染分辨率按 popupW 给（不再按固定宽度重渲）',
+  /const canvas = await renderDestBitmap\(dest, pageNo, \{/.test(src) &&
+    /geo,/.test(src),
+  '几何已一次算定，渲染只按它执行')
 
-check('FitR 用区域自身宽高比（不是整页比例）',
-  /const aspect = region\.w \/ Math\.max\(1e-6, region\.h\)/.test(src),
-  'FitR 可能只有半页，用整页比例会算错')
+check('contain 用区域自身宽高比（FitR 可能只有半页）',
+  /const scale = Math\.min\(availW \/ region\.w, availH \/ region\.h, scaleCap\)/.test(src),
+  '用整页比例会把 FitR 半页矩形算错')
 
 check('不再写死 targetCssWidth = 520',
   !/const targetCssWidth = 520/.test(src) &&
@@ -1122,8 +1126,9 @@ check('按 dest[2] 定栏（left 落在中线哪一侧）',
  * 只在 caption 所在栏判断空白 —— 这是 fig8 那个坑的修法。
  * 若要求「全宽无文本」才认图区，单栏图永远不成立。
  */
-check('纵向区间只在本栏内扫（不看邻栏）',
-  /for \(const it of colItems\) \{\s*\n\s*if \(it\.y <= label\.y \+ 1\) continue/.test(src),
+check('空白带只在本栏内扫（不看邻栏）',
+  /const scanSameCol = colItems/.test(src) &&
+    /const scanItems = scanSameCol\.filter/.test(src),
   '把邻栏正文当障碍的话，单栏图永远推不出来')
 
 check('邻栏在该区间为空才跨栏（fig1），否则保持本栏（fig8）',
@@ -1150,7 +1155,7 @@ check('判定邻栏空白时排除页眉/页脚',
  */
 check('外扩受高度预算约束（不是固定比例）',
   /const wantPad = Math\.max\(12, Math\.min\(baseRegion\.h \* 0\.25, 80\)\)/.test(src) &&
-    /const hBudget = availH0 !== Infinity && targetScaleW > 0/.test(src) &&
+    /const hBudget = availH > 0 && targetScaleW > 0/.test(src) &&
     /const padY = Math\.max\(0, Math\.min\(wantPad, maxPadByHeight, maxPadByText\)\)/.test(src),
   '固定 40% 会把纵向长图的高度撑爆，scale 被卡死')
 
@@ -1172,6 +1177,37 @@ check('跨栏/倍率上限/区域尺寸进诊断',
   /crossColumn: canvas\.dataset\?\.crossColumn === '1'/.test(src) &&
     /scaleCap: Number\(canvas\.dataset\?\.scaleCap/.test(src),
   '下次要能从日志直接看出是否跨栏、倍率被谁卡住')
+/* ---------- 4o. 单一几何源（popupW 与 canvasCssW 必须相等） ---------- */
+
+/**
+ * 用户实测日志把矛盾暴露得很清楚：`canvasCssW:1240` 但 `popupW:630`。
+ * canvas 是浮窗的两倍宽，被 max-width:100% 压扁一半，图自然又扁又小。
+ * 根因是渲染层与显示层各算一套几何。
+ */
+check('几何集中在一个函数算（computeBitmapGeometry）',
+  /const computeBitmapGeometry = async \(dest, pageNo, availW, availH\) =>/.test(src) &&
+    /const geo = await computeBitmapGeometry\(dest, pageNo, POPUP_MAX_W, POPUP_MAX_H\)/.test(src),
+  '渲染层与显示层各算一套几何就是 1240 vs 630 的来源')
+
+check('渲染复用调用方算好的 geo（不再自推一遍）',
+  /const geo = opts\?\.geo \|\| await computeBitmapGeometry\(/.test(src) &&
+    /const cssW = geo\.popupW/.test(src),
+  '两处各算一遍必然分叉')
+
+check('showLinkTip 带 popupW/popupH（供 placeHorizontal 直接用）',
+  /bitmap: true,\s*\n\s*popupW: geo\.popupW,\s*\n\s*popupH: geo\.popupH,/.test(src))
+
+/**
+ * reflow 把 780 打成 120：位图分支用 offsetHeight 当 desiredH，
+ * 而位图刚插入时那还是占位态高度（96~120）。
+ */
+check('位图 reflow 的 desiredH 用 popupH（绝不读 offsetHeight）',
+  /const actualH = opts\?\.bitmap\s*\n\s*\? \(Number\(opts\?\.popupH\) > 0 \? Number\(opts\.popupH\) : \(tip\.offsetHeight \|\| 120\)\)/.test(src),
+  'offsetHeight 是占位态高度，会把 780 打回 120')
+
+check('几何自检字段（popupW 与 canvasCssW 必须相等）',
+  /geoConsistent:/.test(src) && /Math\.abs\(cw - tipRect\.width\) <= 2/.test(src),
+  '两个值不相等就是几何又分叉了')
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
 
 /**

@@ -4618,18 +4618,11 @@ window.__ModuleLoader__.load({
                 }
                 if (label) {
                   /**
-                   * 上界：只在本栏内向上扫，遇到第一个文本块就停。
-                   * 不看邻栏 —— 邻栏内容与本图无关（那是 fig8 的坑）。
-                   */
-                  let yTop = heightPt
-                  for (const it of colItems) {
-                    if (it.y <= label.y + 1) continue      // 只看 caption 上方
-                    if (it.y < yTop) yTop = it.y
-                  }
-                  /**
                    * 下界：caption 自身那几行（间距小、连续）。
+                   * 先算它，因为上界判定要用到「caption 末行」。
                    */
                   let yBot = label.y - 4
+                  let captionBottom = label.y
                   const captionRows = colItems
                     .filter((it) => it.y < label.y && it.y > label.y - 90)
                     .sort((a, b) => b.y - a.y)
@@ -4637,27 +4630,121 @@ window.__ModuleLoader__.load({
                   for (const it of captionRows) {
                     if (prevY - it.y > 22) break           // 间距突变 → 正文开始
                     yBot = it.y - 4
+                    captionBottom = it.y
                     prevY = it.y
+                  }
+                  /**
+                   * **上界：按「连续空白带」判定，不按「第一个文本块」。**
+                   *
+                   * 原表述「向上扫到第一个文本块」在 fig5 上暴露了缺陷：
+                   * caption 在 y=596.4，上方有 150pt 连续空白（图本体），
+                   * 再往上才是页眉 y=801.5 —— 按字面会取到页眉，
+                   * 区域高 227pt，把整块空白连页眉都包进来。
+                   *
+                   * 图本体的特征恰恰是「整块连续空白」，所以改成：
+                   * 从 caption 上沿逐带（10pt）向上扫，
+                   *   · 该带在**图区宽度范围**内全无文本 → 继续向上
+                   *   · 遇到有文本的带 → 停，yTop 取上一个全空带的上边
+                   *   · 一路空到页顶 → yTop = 页顶
+                   * 并剔除页眉页脚（上下 8% 边缘带内的文本不参与）。
+                   *
+                   * 实测 fig5 → yTop=576（150pt 空白带上沿）；
+                   * fig1 的空白带是 [662,782]，规则同样给出正确结果。
+                   */
+                  const edgeBandTop = heightPt * 0.08
+                  const edgeBandBot = heightPt * 0.08
+                  /**
+                   * 图区横向范围：跨栏与否还未定，先用本栏 + 可能的邻栏
+                   * 一起看 —— 空白带在任一栏有字都算「有内容」，
+                   * 这样才能把「图跨栏」和「邻栏有正文」区分开。
+                   */
+                  const widthLo = 0
+                  const widthHi = widthPt
+                  /**
+                   * **空白带判定只在「本栏 + （若跨栏）邻栏」范围内做。**
+                   *
+                   * 实测 fig8：caption 在右栏 y=397.4，而它左上方 y=408.2
+                   * 有左栏正文（"Moreover, extending the model..."）。
+                   * 若全宽扫描，这条左栏正文会把 fig8 的图区上界压到 42pt ——
+                   * 但那正文属于左栏另一块内容，与右栏的图无关。
+                   *
+                   * 所以按栏扫：先只看本栏；跨栏判定在下面单独做
+                   * （用同一纵向区间检查邻栏）。
+                   */
+                  const scanSameCol = colItems
+                  /** 参与空白判定的文本：剔除页眉页脚 */
+                  const scanItems = scanSameCol.filter(
+                    (v) => v.y > edgeBandBot && v.y < heightPt - edgeBandTop,
+                  )
+                  const STEP = 10
+                  let yTop = heightPt
+                  /**
+                   * 起点必须是 **caption 末行之上**，不能是 `label.y + 1` ——
+                   * caption 往往有第二行（fig5 的 y=587.4），从 label.y+1
+                   * 起扫第一步就撞到那行，yTop 会停在 caption 内部。
+                   */
+                  let cursor = Math.max(label.y, captionBottom) + 2
+                  const capTop = label.y
+                  /**
+                   * 页眉的上沿：边缘带里最高的那条文本。扫描到它就停 ——
+                   * 否则一路空到页顶，区域会把整块页眉下方空白也算进去。
+                   */
+                  let headerBottom = heightPt
+                  for (const v of items) {
+                    if (v.y <= heightPt - edgeBandTop) continue
+                    if (v.y < headerBottom) headerBottom = v.y
+                  }
+                  const scanCeil = Math.min(heightPt, headerBottom)
+                  while (cursor < scanCeil) {
+                    const bandLo = cursor
+                    const bandHi = Math.min(scanCeil, cursor + STEP)
+                    const hasText = scanItems.some(
+                      /**
+                       * 容差要**向下收紧**：caption 顶行就在 cursor 下方
+                       * 1~2pt 处，若用 `bandLo - 1` 会把 caption 自身
+                       * 算进这一带（实测 fig5 起步那一带就命中了
+                       * `FIGURE 5` y=596.4），扫描当场停住、yTop 贴着 caption。
+                       */
+                      (v) => v.y > bandLo + 0.5 && v.y <= bandHi + 1
+                        && v.x + v.w > widthLo && v.x < widthHi,
+                    )
+                    if (hasText) break
+                    cursor = bandHi
+                  }
+                  yTop = Math.min(scanCeil, cursor)
+                  /** 空白带至少要有点高度，否则退回「本栏第一个文本块」的旧逻辑 */
+                  if (yTop - yBot < 20) {
+                    let fallback = heightPt
+                    for (const it of colItems) {
+                      if (it.y <= capTop + 1) continue
+                      if (it.y < fallback) fallback = it.y
+                    }
+                    yTop = fallback
                   }
                   const h = yTop - yBot
                   if (h > 30) {
                     /**
                      * ---- ③ 横向：邻栏在同一纵向区间是否为空 ----
-                     * 空 → 跨栏（fig1）；非空 → 保持本栏（fig8）。
+                     * 空 → 跨栏（fig1/fig5）；非空 → 保持本栏（fig8）。
                      *
-                     * **要排除页眉/页脚。** 实测 fig1：右栏在 y∈[640,801]
-                     * 区间里只有一条页眉（DOI 号，y=801），若把它算作
-                     * 「邻栏有内容」就会拒绝跨栏 —— 但页眉属于版面边缘，
-                     * 与图区无关，不该挡路。
-                     *
-                     * 判据：距页面上下边缘 8% 以内的文本视为边缘装饰。
+                     * **两个要排除的对象：**
+                     *   · 页眉/页脚：距上下边缘 8% 内的文本是版面装饰，
+                     *     不该挡路（实测 fig1 右栏只有一条 DOI 页眉）。
+                     *   · **caption 自身**：实测 fig5 的 caption 横跨到
+                     *     x=531（右栏 y=587.4 有两个 item），若算作
+                     *     「邻栏有内容」就会拒绝跨栏 —— 但那是 caption
+                     *     的右半截，不是图区的障碍。
+                     *     只排除 caption 行，不能扩大成「整个区间都不看右栏」，
+                     *     那等于永远跨栏。
                      */
                     const edgeBand = heightPt * 0.08
+                    const inCaptionRange = (v) => v.y >= captionBottom - 8 && v.y <= label.y + 8
                     const overlapRaw = otherCol.filter(
                       (v) => v.y >= yBot - 2 && v.y <= yTop + 2,
                     )
                     const overlap = overlapRaw.filter(
-                      (v) => v.y > edgeBand && v.y < heightPt - edgeBand,
+                      (v) => v.y > edgeBand && v.y < heightPt - edgeBand
+                        && !inCaptionRange(v),
                     )
                     const overlapRawCount = overlapRaw.length
                     const crossColumn = overlap.length === 0
@@ -4850,68 +4937,44 @@ window.__ModuleLoader__.load({
              *   给了就按它渲染与显示，没给退回 520（向后兼容）。
              * @returns {Promise<HTMLCanvasElement|null>}
              */
-            const renderDestBitmap = async (dest, pageNo, opts = null) => {
+            /**
+             * **位图浮窗的几何：唯一一处计算 popupW / popupH。**
+             *
+             * 之前几何分散在三处（renderDestBitmap 算 canvas 尺寸、
+             * placeHorizontal 按 0.9×页宽 算浮窗宽、wasOn 再用 offsetHeight
+             * 重算高度），结果是日志里 `canvasCssW=1240` 而 `popupW=630`
+             * —— canvas 被 `max-width:100%` 压扁一半，图自然又扁又小。
+             *
+             * 现在集中在这里算一次：region → contain 缩放 → popupW/popupH，
+             * 下游（placeHorizontal / renderDestBitmap / showLinkTip）全部复用。
+             *
+             * @returns {Promise<{region, scale, popupW, popupH}|null>}
+             */
+            const computeBitmapGeometry = async (dest, pageNo, availW, availH) => {
               try {
                 const pdfDocument = pdfRef.current?.doc
                 if (!pdfDocument) return null
-                /**
-                 * **先算渲染分辨率。**
-                 *
-                 * 顺序很重要：要先把「显示多大」算出来，才知道该按什么分辨率
-                 * 渲染。旧顺序是先按固定宽度渲染、再算显示尺寸 ——
-                 * 于是 contain 放大到 3x 时 canvas 像素根本不够，图会发虚。
-                 *
-                 * 这里先要一个基准位图拿到页面点尺寸，再用它推区域与显示尺寸，
-                 * 需要更高分辨率时再渲一次（分辨率变化会走缓存的新 key）。
-                 */
-                let bitmap = await renderPageBitmap(pdfDocument, pageNo, opts?.targetCssWidth)
-                if (!bitmap) return null
-                const { widthPt, heightPt } = bitmap
-                /**
-                 * ---- 区域：优先文本层推导，其次 dest 矩形，最后整页 ----
-                 * 推导出的区域通常比整页小得多（fig1 实测高 148pt vs 整页 842），
-                 * 区域越小 contain 的倍率越高，图才真正变大。
-                 */
+                const page = await pdfDocument.getPage(pageNo)
+                const base = page.getViewport({ scale: 1 })
+                const widthPt = base.width
+                const heightPt = base.height
                 const inferred = await inferDestRegion(dest, widthPt, heightPt)
                 const baseRegion = inferred || destRegionPts(dest, widthPt, heightPt)
                 /**
-                 * **可用宽高先算出来**，因为下面的自适应外扩要用它们做预算。
+                 * 自适应外扩：只在「不牺牲缩放」的前提下才扩。
+                 * 固定 40% 会把 fig8 的区域高从 203pt 撑到 391pt，
+                 * scale 被 availH/regionH 卡成 2.25（只 +3%）。
                  */
-                const availW0 = typeof opts?.targetCssWidth === 'number' && opts.targetCssWidth > 0
-                  ? opts.targetCssWidth
-                  : (typeof opts?.availW === 'number' && opts.availW > 0 ? opts.availW : bitmap.cssWidth)
-                const availH0 = typeof opts?.availH === 'number' && opts.availH > 0 ? opts.availH : Infinity
-                const MAX_SCALE = 4
-                /**
-                 * **自适应外扩：只在「不牺牲缩放」的前提下才扩。**
-                 *
-                 * 用户要求「落在悬浮窗上需要有滑动悬浮窗页面的功能」，
-                 * 所以要留一点上下文；但固定比例的外扩会毁掉放大效果 ——
-                 * 实测 fig8：区域高 203pt，外扩 40% 撑到 391pt，
-                 * `scale` 被 `availH/regionH = 879/391 = 2.25` 卡死，
-                 * 只 +3%，比不外扩（4.00 -> +84%）差得多。
-                 *
-                 * 所以改成按预算算：先看「填满宽度」需要多大倍率，
-                 * 那个倍率下允许的最大区域高度是 `availH / targetScaleW`；
-                 * 超出这个高度的部分就不扩了。
-                 * 窄区域（fig1 高 137pt）预算充足 → 照给；
-                 * 纵向长图（fig8 高 203pt）已接近高度瓶颈 → 少扩或不扩。
-                 */
-                const wantPad = Math.max(12, Math.min(baseRegion.h * 0.25, 80))  // 12~80pt
+                const wantPad = Math.max(12, Math.min(baseRegion.h * 0.25, 80))
                 const targetScaleW = Math.min(
-                  availW0 / Math.max(1, baseRegion.w),
-                  MAX_SCALE,
+                  availW / Math.max(1, baseRegion.w),
+                  4,
                   bitmapMaxWidthPx / Math.max(1, baseRegion.w),
                 )
-                const hBudget = availH0 !== Infinity && targetScaleW > 0
-                  ? availH0 / targetScaleW
-                  : Infinity
+                const hBudget = availH > 0 && targetScaleW > 0 ? availH / targetScaleW : Infinity
                 const maxPadByHeight = hBudget !== Infinity
                   ? Math.max(0, (hBudget - baseRegion.h) / 2)
                   : wantPad
-                /**
-                 * 上限 2：不越过相邻文本块（否则会把正文裁进图里）。
-                 */
                 let maxPadByText = wantPad
                 if (inferred) {
                   const pageH = inferred.pageH || heightPt
@@ -4931,53 +4994,61 @@ window.__ModuleLoader__.load({
                   h: Math.min(heightPt, baseRegion.y + baseRegion.h + padY) - Math.max(0, baseRegion.y - padY),
                 }
                 /**
-                 * **contain 定尺寸（不是填满宽、也不是填满高）。**
-                 *
-                 * 填满高度：fig1 区域宽高比 4.02，会算出 3136px 宽，
-                 * 必须横向滚动画 —— 读图灾难。
-                 * 填满宽度：纵向图（fig8 窄高）会溢出。
-                 * contain 让整个区域完整可见、长边贴边、短边留白。
-                 *
-                 * 上限 4x（受画布像素预算再兜一次）：再高肉眼无增益，反而轮廓发虚。
+                 * contain：完整装下，长边贴边、短边留白。
+                 * 上限 4 且受画布像素预算兜底。
                  */
-                const aspect = region.w / Math.max(1e-6, region.h)
+                const scaleCap = Math.min(4, bitmapMaxWidthPx / Math.max(1, region.w))
+                const scale = Math.min(availW / region.w, availH / region.h, scaleCap)
+                const popupW = Math.round(region.w * scale)
+                const popupH = Math.round(region.h * scale)
+                return {
+                  region,
+                  scale,
+                  scaleCap,
+                  popupW: Math.max(160, Math.min(popupW, availW)),
+                  popupH: Math.max(120, Math.min(popupH, availH)),
+                  regionKind: inferred ? inferred.kindName : (dest?.[1]?.name === 'FitR' ? 'fitr' : 'page'),
+                  crossColumn: inferred ? Boolean(inferred.crossColumn) : false,
+                  crossColumnReason: inferred ? (inferred.crossColumnReason || '') : '',
+                }
+              } catch { return null }
+            }
+            const renderDestBitmap = async (dest, pageNo, opts = null) => {
+              try {
+                const pdfDocument = pdfRef.current?.doc
+                if (!pdfDocument) return null
                 /**
-                 * 复用前面为「外扩预算」算好的可用宽高，避免重复推导
-                 * （两处各算一遍容易出现口径不一致）。
-                 */
-                const availW = availW0
-                const availH = availH0
-                /**
-                 * **contain 的倍率上限：4，且受画布像素预算兜底。**
+                 * **先算渲染分辨率。**
                  *
-                 * 取 4 的依据（实测）：3x 时 eq1 只有 516×360（比整页 −6%，
-                 * 荒谬），4x 到 688×480（+25%）才正常；fig1 单栏 +76%；
-                 * 而 fig8 在 4x 时已撞 availH（879），再高也没用 —— 说明 4
-                 * 已接近瓶颈，5x 只多 1.56 倍渲染量换边际清晰度。
+                 * 顺序很重要：要先把「显示多大」算出来，才知道该按什么分辨率
+                 * 渲染。旧顺序是先按固定宽度渲染、再算显示尺寸 ——
+                 * 于是 contain 放大到 3x 时 canvas 像素根本不够，图会发虚。
                  *
-                 * **但只调常量不够**：它和 bitmapMaxWidthPx 表达的是同一件事
-                 * （别渲染太大）。窄区域（如公式 172pt）4x 后
-                 * 172×4×dpr2 = 1376px 刚好卡在 1400 的边缘，再加一列就溢出。
-                 * 所以实际生效上限取两者较小值。
+                 * 这里先要一个基准位图拿到页面点尺寸，再用它推区域与显示尺寸，
+                 * 需要更高分辨率时再渲一次（分辨率变化会走缓存的新 key）。
                  */
-                const scaleCap = Math.min(MAX_SCALE, bitmapMaxWidthPx / Math.max(1, region.w))
-                const scaleFit = Math.min(availW / region.w, availH / region.h, scaleCap)
-                let cssW = Math.max(40, region.w * scaleFit)
-                let cssH = Math.max(24, region.h * scaleFit)
+                let bitmap = await renderPageBitmap(pdfDocument, pageNo, opts?.targetCssWidth)
+                if (!bitmap) return null
+                const { widthPt, heightPt } = bitmap
                 /**
-                 * 放大后若需要更高分辨率（cssW×dpr 超过当前 canvas 的裁切宽），
-                 * 按新宽度重渲一次。缓存 key 已带宽度，不会命中旧图。
+                 * **复用调用方算好的几何（单一几何源）。**
+                 *
+                 * region / scale / popupW 都由 `computeBitmapGeometry` 一次算定，
+                 * 这里不再自己推一遍 —— 两处各算一遍正是
+                 * 「canvasCssW=1240 而 popupW=630」的根源。
+                 * 仅在调用方没给 geo 时（例如其它调用路径）才回退自算。
                  */
-                try {
-                  const dprNow = Math.min(2, Math.max(1, window.devicePixelRatio || 1))
-                  const needPxW = Math.ceil(cssW * dprNow)
-                  const curPxW = Math.ceil(region.w * bitmap.scale)
-                  if (needPxW > curPxW * 1.15) {
-                    const better = await renderPageBitmap(pdfDocument, pageNo, Math.ceil(cssW))
-                    if (better) bitmap = better
-                  }
-                } catch { /* 用现有分辨率也够 */ }
-                const scale = bitmap.scale
+                const geo = opts?.geo || await computeBitmapGeometry(
+                  dest, pageNo,
+                  typeof opts?.availW === 'number' ? opts.availW : (opts?.targetCssWidth || 1240),
+                  typeof opts?.availH === 'number' ? opts.availH : 880,
+                )
+                if (!geo) return null
+                const region = geo.region
+                const cssW = geo.popupW
+                const cssH = geo.popupH
+                const scaleFit = geo.scale
+                const scaleCap = geo.scaleCap
                 const canvas = bitmap.canvas
                 // PDF 点 → 位图像素（横向不需要翻转，纵向见下）
                 const sx = Math.max(0, Math.floor(region.x * scale))
@@ -5942,10 +6013,28 @@ const placeBox = (el, l, t, wd, ht) => {
               let left
               let targetW
               if (isBitmap) {
-                // 位图：0.9 × 页宽，居中于页面
-                const baseW = pageRect && pageRect.width > 0 ? pageRect.width : Math.min(560, window.innerWidth - 16)
-                targetW = Math.min(baseW * 0.9, window.innerWidth - 16)
+                /**
+                 * **位图宽度只能来自 `opts.popupW`（单一几何源）。**
+                 *
+                 * 原来这里自己按「0.9 × 页宽」算，而渲染层按
+                 * `POPUP_MAX_W = min(innerWidth*0.9, 1240)` 渲染 canvas ——
+                 * 两套几何。实测日志：`canvasCssW=1240` 而 `popupW=630`，
+                 * canvas 是浮窗的两倍宽，被 `max-width:100%` 压扁一半，
+                 * 看起来又扁又小。这就是用户说的「图太小」。
+                 *
+                 * 现在 popupW 在渲染之前由「region × scale」一次算定，
+                 * 一路传进来；`placeHorizontal` 不再自算，也不再兜底重算
+                 * —— 兜底就是分叉的起点。缺失时直接返回 null，
+                 * 让 bug 暴露而不是静默降级。
+                 */
+                const popupW = Number(opts?.popupW)
+                if (!(popupW > 0)) return null
+                targetW = Math.min(popupW, window.innerWidth - 16)
                 targetW = Math.max(160, targetW)
+                /**
+                 * 位置：居中于**页面**（figure 通常跨栏/居中），
+                 * 而不是跟随链接 x。
+                 */
                 const pageCenter = pageRect && pageRect.width > 0
                   ? (pageRect.left + pageRect.right) / 2
                   : window.innerWidth / 2
@@ -5988,6 +6077,31 @@ const placeBox = (el, l, t, wd, ht) => {
               tip.style.left = `${Math.round(left)}px`
               tip.style.width = `${Math.round(targetW)}px`
               /**
+               * **写完 DOM 之后再夹一次。**
+               *
+               * 用户截图里浮窗左侧被裁出屏幕，但日志 `left=924`、
+               * `tipW=630`、`viewportW=1601` 数学上没超 —— 说明
+               * **实际渲染宽度与 targetW 不一致**（canvas 比 targetW 宽时
+               * 会把浮窗撑开），于是 left 得按真实宽度重算。
+               *
+               * 读一次真实矩形，若越界就用实际宽度重新夹并写回。
+               */
+              try {
+                const real = tip.getBoundingClientRect()
+                if (real.width > 0) {
+                  const clampedLeft = Math.max(8, Math.min(
+                    parseFloat(tip.style.left) || left,
+                    window.innerWidth - real.width - 8,
+                  ))
+                  if (Math.abs(clampedLeft - (parseFloat(tip.style.left) || left)) > 0.5) {
+                    tip.style.left = `${Math.round(clampedLeft)}px`
+                    left = clampedLeft
+                  }
+                  // 记录真实宽度（可能被 canvas 撑开），诊断用它
+                  targetW = real.width
+                }
+              } catch { /* 量不到就用理论值 */ }
+              /**
                * 记下「这个横向位置是为谁摆的」。换了链接时靠它识别回流。
                */
               tipPlacedAnchor = anchor || null
@@ -6002,7 +6116,7 @@ const placeBox = (el, l, t, wd, ht) => {
              * 实际 DOM 上 left 只在第一次写过。所以这里必须同时记
              * 链接矩形与浮窗矩形，并标明走的是哪条路径（首次 / 同位图回流 / 换链接回流）。
              */
-            const reportTipPlace = (anchor, placed, opts, path, horiz, desiredHValue) => {
+            const reportTipPlace = (anchor, placed, opts, path, horiz, desiredHValue, tipEl) => {
               if (!anchor) return
               try {
                 const ar = anchor.getBoundingClientRect()
@@ -6026,9 +6140,20 @@ const placeBox = (el, l, t, wd, ht) => {
                   desiredH: typeof desiredHValue === 'number' ? Math.round(desiredHValue) : null,
                   chosenH: placed ? Math.round(placed.height) : null,
                   chosenTop: placed ? Math.round(placed.top) : null,
-                  /** 浮窗最终写入的值 —— 这是上一轮缺的关键字段 */
-                  left: horiz ? Math.round(horiz.left) : null,
-                  tipW: horiz ? Math.round(horiz.width) : null,
+                  /**
+                   * 浮窗最终值：优先用本次写入的结果；没有就**读 DOM 实际值**。
+                   *
+                   * 日志里 `reflow` 路径一片 `left:null, tipW:null`，
+                   * 就是因为没传 horiz 时不兜底 —— 那等于回流过程完全不可核对。
+                   */
+                  left: (() => {
+                    if (horiz && typeof horiz.left === 'number') return Math.round(horiz.left)
+                    try { return Math.round(tipEl.getBoundingClientRect().left) } catch { return null }
+                  })(),
+                  tipW: (() => {
+                    if (horiz && typeof horiz.width === 'number') return Math.round(horiz.width)
+                    try { return Math.round(tipEl.getBoundingClientRect().width) } catch { return null }
+                  })(),
                   viewportW: Math.round(window.innerWidth),
                   viewportH: Math.round(window.innerHeight),
                   bitmap: Boolean(opts?.bitmap),
@@ -6090,27 +6215,33 @@ const placeBox = (el, l, t, wd, ht) => {
                 tip.style.visibility = ''
                 if (anchor) {
                   /**
-                   * 位图到位后用**实际量到的高度**重新决定放哪边、高度多少。
-                   * 传入的 desiredH 是实际内容高度，函数内部会再按该侧可用空间收窄。
+                   * **位图分支的 desiredH 必须用 popupH，绝不读 offsetHeight。**
                    *
-                   * 注意读取前要**先清掉上一轮的 maxHeight**：否则 offsetHeight
-                   * 被旧上限夹住，量不到真实内容高度，高度只会越收越窄（棘轮效应）。
+                   * 实测日志把 780 打成 120 就是这个：
+                   *   path:"fresh"  chosenH:780   ← 首次按 POPUP_MAX_H 算的
+                   *   path:"reflow" chosenH:120   ← 6ms 后按 offsetHeight 重算
+                   * 位图刚插入时 `tip.offsetHeight` 还是占位态的高度（96~120），
+                   * 用它当 desiredH，`computeTipPlacement` 就按它收窄，
+                   * 位图到位后反而把浮窗压成 120 —— 用户说的「高度只有现在的 1/3」。
+                   *
+                   * 文字浮窗内容已经排好，offsetHeight 是可靠的，仍用它。
                    */
                   tip.style.maxHeight = 'none'
-                  const actualH = tip.offsetHeight || 120
+                  const actualH = opts?.bitmap
+                    ? (Number(opts?.popupH) > 0 ? Number(opts.popupH) : (tip.offsetHeight || 120))
+                    : (tip.offsetHeight || 120)
                   const placed = computeTipPlacement(anchor, actualH, Boolean(opts?.bitmap))
                   tip.style.maxHeight = `${Math.round(placed.height)}px`
                   tip.style.top = `${Math.round(placed.top)}px`
-                  if (anchorChanged) {
+                  if (anchorChanged || opts?.bitmap) {
                     /**
-                     * 换了链接：横向也要重算。
-                     * 这一步是「所有引用 x 都一样」的修法 —— 相邻引用之间
-                     * 移动时 data-on 仍是 '1'，只有这里强制重写 left 才能
-                     * 让每条引用弹在自己的位置。
+                     * 换了链接 → 必须重算横向（相邻引用 x 各家不同）；
+                     * 位图分支再走一次也安全：popupW 是同一个值，
+                     * 写进去不会改变宽度，只是让 left 按真实宽度重新夹一次。
                      */
                     horiz = placeHorizontal(tip, anchor, opts)
                   }
-                  reportTipPlace(anchor, placed, opts, anchorChanged ? 'reflow-moved' : 'reflow', horiz, actualH)
+                  reportTipPlace(anchor, placed, opts, anchorChanged ? 'reflow-moved' : 'reflow', horiz, actualH, tip)
                 }
                 cancelHideTip()
                 if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
@@ -6187,8 +6318,16 @@ const placeBox = (el, l, t, wd, ht) => {
                */
               let top
               const horiz = placeHorizontal(tip, anchor, opts)
+              /**
+               * 位图浮窗拿不到 popupW 就不显示 —— 说明几何算错了，
+               * 与其画一个尺寸不对的框，不如让它明显失败。
+               */
+              if (opts?.bitmap && !horiz) {
+                reportDiag({ event: 'tip:skip', reason: 'no-popupW' })
+                return
+              }
               /** 首次定位的诊断，与 wasOn 回流共用同一个出口 */
-              reportTipPlace(anchor, placement, opts, 'fresh', horiz, desiredH)
+              reportTipPlace(anchor, placement, opts, 'fresh', horiz, desiredH, tip)
               /**
                * **纵向直接用 placement.top。**
                *
@@ -6499,25 +6638,40 @@ const placeBox = (el, l, t, wd, ht) => {
                        * 文字预览（参考文献）那条仍保留页码信息 —— 那里
                        * 没有图，页码是唯一的位置线索。
                        */
-                      showLinkTip([], anchor, 0, false, { bitmap: true })
                       /**
-                       * **位图浮窗的固定上限尺寸（基于视口，不再绑页面宽度）。**
+                       * **单一几何源：先定浮窗尺寸，再据此渲染。**
                        *
-                       * 用户原话「图片、公式弹出窗口固定吧，现在太小了」——
-                       * 「固定」在这里是**尺寸稳定**：同一个 figure 反复悬停
-                       * 必须得到完全相同的尺寸，不能因为悬停位置/缩放历史而跳。
+                       * 顺序必须是这样（原来是先渲染再摆放，于是
+                       * canvasCssW=1240 而 popupW=630，两套几何打架）：
+                       *   1. inferDestRegion → region(pt)
+                       *   2. 算 contain 缩放与 popupW/popupH
+                       *   3. showLinkTip 带上 popupW
+                       *   4. renderDestBitmap 用同一个 popupW 渲染
                        *
-                       * 原来宽度取 0.9 × 页面宽（≈630px），这是「图总是小」的
-                       * 另一半原因：contain 的收益上限完全由可用宽决定，
-                       * 宽度被页宽绑死，区域再小也放不大。
-                       * 改成基于视口：宽 min(innerWidth*0.9, 1240)、高 min(innerHeight*0.88, 880)。
+                       * popupW/popupH 只在这里算一次，下游全部复用；
+                       * placeHorizontal 不再自算宽度，缺失时直接不显示。
                        */
                       const POPUP_MAX_W = Math.min(window.innerWidth * 0.9, 1240)
                       const POPUP_MAX_H = Math.min(window.innerHeight * 0.88, 880)
+                      const geo = await computeBitmapGeometry(dest, pageNo, POPUP_MAX_W, POPUP_MAX_H)
+                      if (!geo) {
+                        reportDiag({ event: 'tip:skip', reason: 'no-geometry' })
+                        return
+                      }
+                      /**
+                       * 先出骨架：带上 popupW 让 placeHorizontal 一次摆对，
+                       * 不再出现「先按 630 摆、渲染完变 1240」的分叉。
+                       */
+                      showLinkTip([], anchor, 0, false, {
+                        bitmap: true,
+                        popupW: geo.popupW,
+                        popupH: geo.popupH,
+                      })
                       const canvas = await renderDestBitmap(dest, pageNo, {
                         targetCssWidth: POPUP_MAX_W,
                         availW: POPUP_MAX_W,
                         availH: POPUP_MAX_H,
+                        geo,
                       })
                       const preview = canvas ? null : await extractDestPreview(dest, pageNo)
                       // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
@@ -6527,12 +6681,13 @@ const placeBox = (el, l, t, wd, ht) => {
                       if (canvas) {
                         /**
                          * 有图就以图为主体，**不附文字行**。
-                         *
-                         * 配合 `showLinkTip` 里的 wasOn 分支：它会按新的
-                         * 实际高度重算 top，所以位图插进来之后浮窗会重新
-                         * 摆正，不会向下长出去盖住链接。
+                         * 这里重发一次是为了让 wasOn 分支按 popupH 复核纵向。
                          */
-                        showLinkTip([], anchor, 0, false, { bitmap: true })
+                        showLinkTip([], anchor, 0, false, {
+                          bitmap: true,
+                          popupW: geo.popupW,
+                          popupH: geo.popupH,
+                        })
                         putTipBitmap(tip, canvas, await destVOffset(dest, pageNo))
                         /**
                          * **canvas 实际尺寸诊断。**
@@ -6566,6 +6721,17 @@ const placeBox = (el, l, t, wd, ht) => {
                             /** 浮窗与 canvas 最终尺寸：核对 contain 是否达到预期 */
                             popupW: Math.round(tipRect.width),
                             popupH: Math.round(tipRect.height),
+                            /**
+                             * **几何自检：popupW 与 canvasCssW 必须相等。**
+                             * 不相等就说明几何又分叉了（上一轮 630 vs 1240）。
+                             */
+                            geoConsistent: (() => {
+                              const cw = Number(canvas.dataset?.cssW ?? 0)
+                              const ch = Number(canvas.dataset?.cssH ?? 0)
+                              return cw > 0 && ch > 0
+                                ? (Math.abs(cw - tipRect.width) <= 2 && Math.abs(ch - tipRect.height) <= 2)
+                                : null
+                            })(),
                             scale: Number(canvas.dataset?.scale ?? 0),
                             scaleCap: Number(canvas.dataset?.scaleCap ?? 0),
                             regionKind: canvas.dataset?.regionKind ?? null,
