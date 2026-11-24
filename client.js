@@ -5495,15 +5495,24 @@ const placeBox = (el, l, t, wd, ht) => {
              */
 
             /**
-             * 悬停多久之后才算矩形。
+             * 悬停多久之后才显示浮窗。
              *
-             * 原来每次 mouseover 立刻算 —— 而 mouseover 会从 `<a>` 里的子元素
-             * 反复冒泡上来，鼠标扫过一行字就是一串调用。性能日志里
-             * `HTMLAnchorElement.patchedGBCR <- onPdfLinkOver` 18 次累计 4751ms，
-             * 单次最高 447ms，全是这一处的强制布局。
-             * 150ms：人真的停在链接上才会看到提示，快速扫过不触发任何计算。
+             * 原来每次 mouseover 立刻算矩形 —— 而 mouseover 会从 `<a>` 里的
+             * 子元素反复冒泡上来，鼠标扫过一行字就是一串调用。性能日志里
+             * `HTMLAnchorElement.patchedGBCR <- onPdfLinkOver` 18 次累计
+             * 4751ms、单次最高 447ms，全是这一处的强制布局。
+             *
+             * 500ms 是用户定下的：**光标停留在超链接上超过 0.5 秒才显示**。
+             * 位图预览要渲染一整页，成本远高于纯文字提示；而且手在正文上
+             * 移动时不停弹出浮窗也很吵。快速扫过链接不触发任何计算。
+             *
+             * 注意别和另外两个时间混了（三个数字各管一段）：
+             *   · 本常量 500ms —— 悬停多久**显示**
+             *   · scheduleHideTip 里 300ms —— 移开后多久**消失**
+             *   · 删 title 是为了挡原生提示（它约 500ms 后自己弹出），
+             *     那个时机由浏览器决定，不归这里管
              */
-            const HOVER_TIP_DELAY = 150
+            const HOVER_TIP_DELAY = 500
 
             const onPdfLinkOver = (event) => {
               const anchor = event.target?.closest?.('a[href]')
@@ -5516,7 +5525,7 @@ const placeBox = (el, l, t, wd, ht) => {
                * 于是悬停时同时出现两个框：我们的地址框 + 原文文字框。
                *
                * 原生提示要等约 500ms 才弹，在 mouseover 这一拍删掉就弹不出来。
-               * 这一步必须**立即**做，不能挪进下面的延时里 —— 延时 150ms 之后
+               * 这一步必须**立即**做，不能挪进下面的延时里 —— 延时 500ms 之后
                * 原生提示框可能已经排上队了。
                */
               if (anchor.hasAttribute('title')) anchor.removeAttribute('title')

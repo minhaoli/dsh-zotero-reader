@@ -266,7 +266,7 @@ check('不再按链接 left 定位（旧行为已移除）',
  * 修法三条都要在：延时、同锚点去重、矩形只读一次。
  */
 check('悬停延时触发（快速扫过不算矩形）',
-  /HOVER_TIP_DELAY = 150/.test(src) &&
+  /HOVER_TIP_DELAY = 500/.test(src) &&
     /linkTipTimer = setTimeout\(/.test(src),
   '不延时的话每次 mouseover 都会强制布局')
 
