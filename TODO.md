@@ -245,3 +245,105 @@ PDF 页本身是 canvas，底色由 pdf.js 决定，换主题只影响栏内 UI 
 `clearJumpFlash` 本身不推进代际（它既被 cleanup 调、也被新一代开始调，若推进会让 seq 与 jumpFlashSeq 永远差一位）。
 
 日志判读：`jump:flash-skip` 的 `reason` 分 `stale`（被新跳转取代）/ `no-page-el`（页未渲染）/ `zero-size`（尺寸为 0），都带 `seq`；成功路径的 `jump:flash` 也带 `seq`，一次跳转的完整生命周期能串起来看。
+---
+
+# 2026-11-24 夜间：浮窗改造与参考文献定位
+
+## 已完成（本轮）
+
+### 浮窗尺寸与内容（`8d1371e` / `415cd1c` / `3e112df` / `6bd8603`）
+
+用户否定了「裁剪目标区域再放大」的方向（原话「放这么大是什么意思」），改为整页显示：
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| 尺寸来源 | 区域 contain 放大 | `pageRect.width*0.9 × pageRect.height*0.3` |
+| 实测尺寸 | 1240×720 | 630×297 |
+| 内容 | 裁剪区域 | 整页，可滚动，打开时定位到目标 |
+
+- `computePopupSize` 是尺寸唯一来源，`renderPagePreview` 复用 `renderPageBitmap` 渲染整页
+- 废弃但保留 `computeBitmapGeometry` / `destRegionPts` / `inferDestRegion`（跳转高亮仍在用，只解除浮窗依赖）
+- 顺带修掉隐藏崩溃：旧 `renderDestBitmap` 里 `scale`/`availW` 未定义，整个函数被 `catch` 吞成 `null`，`node --check` 查不出
+- 5px 裁切：`shotClientW=706` vs `shotScrollW=711`，纵向滚动条占位导致 canvas 横向溢出。canvas 入槽后量 `shot.clientWidth` 重设宽度
+
+### 参考文献条目完整（`54bde1c`）
+
+- `linkPreviewChars` 从 120 提到 600 兜底，但主判据改为**条目边界**
+- 判停用正向证据：见到「年份 (19xx)/(20xx)」+「页码范围或 DOI」即条目完整
+- `best` 命中 `References` 章节标题时跳到下一个条目起始
+- 实测不可用的两个判据（别再试）：悬挂缩进（首行续行 `x0` 都是 49）、行距（条目内外都约 8pt）
+
+### 表格区域（`189527a`）
+
+- 图和表结构相反，判据必须分开：图找连续空白带（向上扫），表找连续多列行（向下扫）
+- `#tab3` 的 `regionH` 从 64 修到 211
+
+---
+
+## 待办（按优先级）
+
+### 1. 参考文献预览张冠李戴 —— 根因已查明，算法已验证，**未实现**
+
+`cite.anderson1983` 显示的是 Anderson 2004 / 1998 的内容。调查报告（真实 PDF `G5I7K9DR/actrembed2026.pdf`，649562 字节与日志 `pdf:bytes:649562` 吻合）查明：
+
+**根因是分栏，不是打分公式。**
+
+第 14 页左右栏在同一基线上都有文字，拆行条件 `gap > 100` 而实测栏间隙仅 14.2pt，**永不触发**，左右栏被拼成一行 `x0=49.4 x1=546.0`。再按行中点判栏：该行中点 `297.7049`，页面中线 `297.6300`，**只差 0.0749pt** 被判成右栏；而 `destX=44` 判左栏，目标行被整行剔除。
+
+若未被剔除，原打分本会赢：`6.58` vs `13.09`。
+
+**已验证的算法（54/54 正确，现有 30/54）**：
+
+```js
+// 1) 按列起点分栏，不用 gap 阈值
+const starts = dominantItemXClusters(page);        // p14 -> [49, 305]
+const colOf = x => lastIndexWhere(starts[i] <= x);
+// 2) 目标列 = 距 dest.left 最近的列起点
+const tcol = nearestStart(starts, dest.left);
+// 3) 目标行 = 该列中 y <= dest.top 里 y 最大的行（不是最近的！）
+const target = lines.filter(l => l.col === tcol && l.y <= dest.top + 0.6)
+                    .reduce((m,l) => l.y > m.y ? l : m);
+// 4) 可选自校验：dest 名形如 cite.<surname><year>，与文本互证
+```
+
+**为什么 `max y ≤ top` 而不是最近距离**：`dest.top` 是行框**顶边**，基线在其下方。实测 `top - baseline` 中位数 3.96pt，参考文献条目稳定在 3.4~4.3pt。而 `References` 基线 315.4 在 `top=305` **上方** 10.4pt，序关系下不可能胜出——不需要任何 magic 阈值。
+
+不变式：`0 < dest.top - baseline <= 该行字号`，96 个去重目标成立 83/96，13 个反例全是图/公式/标题（`top` 是块顶边而非行顶）。
+
+**另有 8 个目标是反向错**（右栏 dest 命中左栏同基线文字，`y` 相同所以不报错只内容错）：`cite.neely1977`→Dunn(1971)、`cite.devlin2018bert`、`cite.behnamghader2024llm2vec`→Anderson(1983)、`cite.daily2001`、`cite.skrjanec2023`、`cite.plaut1995`、`cite.pennington2014glove`、`cite.penedo2024*`。
+
+**局限**：只在单篇 PDF（Frontiers 双栏 15 页）验证过。单栏版 `starts` 只有 1 个值，规则退化为纯 `max y ≤ top`，逻辑仍成立但未验证。
+
+### 2. 推送 GitHub —— **网络不通，未完成**
+
+53 个提交未推送。`git push origin main` 三次失败：`Recv failure: Connection was reset` / `Empty reply from server` / `Could not connect to github.com:443 after 21113 ms`。
+
+需要用户确认是否挂 VPN。
+
+### 3. 表格观感待确认
+
+新尺寸下表格也是「整页缩到 630 宽」，表体会比旧的裁剪放大版小很多。若表格需要例外（放大到可读），需要单独调。
+
+### 4. `check-pdf-links.mjs` 的锚点脆弱
+
+用 `src.indexOf('if (canvas) {')` 定位位图分支。本轮新增代码里出现同样的字符串，把锚点带偏，导致「位图浮窗不再带底部文字行」误报失败。当前靠改代码写法绕开，未修测试本身。
+
+建议改成更具体的锚点（如 `indexOf('有图就以图为主体')` 或按函数边界切分）。
+
+### 5. 沿用旧 TODO 的未完成项
+
+- 四色主题（亮/暗/暖/跟随系统）
+- 按功能分别配置 LLM（翻译/解释/提问/文档翻译）
+- Zotero 云端 Web API（不启动 Zotero）
+- 全文搜索
+- 设置页面扩展（模型/apikey/主题）
+- pdf.js worker 起不来（性能最大项，用户说不着急）
+- `ResizeObserver loop` 噪声
+
+---
+
+## 本轮踩到的坑
+
+**测试锚点脆弱**：`check-pdf-links.mjs` 用源码字符串 `indexOf` 定位分支，新增同名代码就会撞。修改 `client.js` 时如果加了测试里用到的字符串，先跑测试。
+
+**`node --check` 查不出未定义变量**：`renderDestBitmap` 里 `scale`/`availW` 未定义，语法合法，被 `catch` 吞成返回 `null`。表现为「有时不显示」，无任何报错。这类问题只能靠真实运行日志发现。
