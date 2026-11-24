@@ -4802,12 +4802,14 @@ window.__ModuleLoader__.load({
             /**
              * **延迟消失句柄（0.5s）。**
              *
-             * 鼠标离开链接后不立刻隐藏，而是等 0.5s：这段时间里从链接
-             * 划到别处或回头再看一眼，浮窗都不会闪。回到链接上时
-             * cancelHideTip 会把它取消。
+             * 鼠标离开后不立刻隐藏，而是等 0.5s：这段时间里从链接划到
+             * 浮窗里滚动看内容、或回头再看一眼，浮窗都不会闪。
              *
-             * 浮窗本身不可交互（pointer-events:none），所以这里只有
-             * 链接一侧的两个事件参与判定。
+             * **链接与浮窗都算「在里面」**（用户澄清过的语义：光标不落在
+             * 悬浮窗以及超链接上连续超过 0.5s 才关闭）。所以两侧事件都参与：
+             * 链接 mouseout / 浮窗 mouseleave → 排消失；
+             * 链接 mouseover / 浮窗 mouseenter → 取消。
+             * 这要求浮窗 `pointer-events:auto`（见 CSS 里那段说明）。
              */
             let linkHideTimer = 0
             const cancelHideTip = () => {
