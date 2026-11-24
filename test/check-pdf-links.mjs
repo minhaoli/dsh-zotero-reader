@@ -910,14 +910,15 @@ check('文字预览仍保留页码（那条没有图，页码是唯一位置线�
  * 根因：tipH 用的是位图插入前的占位高度（min-height:96px），
  * 等真位图（几百 px）进来，浮窗向下长出去，底边盖住链接。
  */
-check('位图浮窗用预估高度定位（不是占位高度）',
-  /const estimateBitmapTipH = \(\) =>/.test(src) &&
-    /const tipH = opts\?\.bitmap\s*\n\s*\? estimateBitmapTipH\(\)/.test(src),
-  '拿 96px 占位高度算 top，位图一进来就会向下盖住链接')
+check('位图浮窗高度上限按可用空间算（不写死，否则链接在视口偏下时必被盖住）',
+  /const computeTipMaxH = \(anchor\) =>/.test(src) &&
+    /const bitmapMaxH = opts\?\.bitmap \? computeTipMaxH\(anchor\) : 0/.test(src) &&
+    /shotNow\.style\.maxHeight/.test(src),
+  '固定上限 min(46vh,420px) 在链接偏下时放不下，必然压住链接所在行')
 
-check('预估高度按位图区上限算',
-  /Math\.min\(window\.innerHeight \* 0\.46, 420\)/.test(src),
-  '要和 .zr-tip-shot 的 max-height 保持一致')
+check('高度上限保留 46vh/420 的天花板与 120px 下限',
+  /Math\.min\(viewportH \* 0\.46, 420\)/.test(src) && /Math\.max\(120,/.test(src),
+  '要和 .zr-tip-shot 的 max-height 语义一致，且不能小到看不清内容')
 
 check('纵向定位抽成 computeTipTop（首帧与复核共用）',
   /const computeTipTop = \(anchor, h\) =>/.test(src) &&

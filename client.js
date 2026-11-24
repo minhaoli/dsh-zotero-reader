@@ -5229,25 +5229,6 @@ const placeBox = (el, l, t, wd, ht) => {
              * @param {HTMLElement|null} anchor 锚定元素；null 表示居中
              * @param {{bitmap?: boolean}} [opts] bitmap: 预留位图槽位（加载态）
              */
-/**
-             * 位图浮窗的**预估高度**（像素）。
-             *
-             * 为什么需要：位图是异步渲染的，首次定位时槽位里只有一个
-             * `data-loading` 占位（min-height:96px）。若拿这个 96px 去算
-             * top，等真位图插进来（几百 px 高）浮窗就会向下长出去，
-             * 把链接本身盖住 —— 用户报的「窗口还是会覆盖住超链接」正是它。
-             *
-             * 估算依据：`.zr-tip-shot` 的 max-height 是 min(46vh,420px)，
-             * 位图多数情况下会顶到这个上限（现在是整页裁切，必然超）。
-             * 所以直接按上限估，取两者较小值。
-             */
-            const estimateBitmapTipH = () => {
-              try {
-                const cap = Math.min(window.innerHeight * 0.46, 420)
-                // 位图浮窗不放文字行了，高度就是位图区本身
-                return Math.max(96, cap)
-              } catch { return 300 }
-            }
 
             /**
              * **纵向定位：上方优先，放不下翻到下方，并保证不越过视口。**
@@ -5306,6 +5287,37 @@ const placeBox = (el, l, t, wd, ht) => {
               // 最终夹进视口
               top = Math.max(8, Math.min(top, Math.max(8, viewportH - h - 8)))
               return top
+            }
+            /**
+             * **按可用空间算浮窗高度上限。**
+             *
+             * 这是「浮窗盖住超链接」的第二层根因，比第一层更根本。
+             *
+             * 第一层修的是「用占位高度而非最终高度定位」——那之后位置算对了，
+             * 但**高度上限是固定值** `min(46vh,420px)`。链接若在视口偏下处，
+             * 上方只剩约 300px，而浮窗要 420px，无论怎么摆都必然有一段
+             * 压到链接所在行 —— 用户截图里正是这种情况：链接在图注上方，
+             * 浮窗下方那一截盖住了它。
+             *
+             * 所以上限要跟着**可用空间**走：
+             *     可用高度 = max(上方空间, 下方空间) - 间隙 - 边距
+             * 收回来的高度交给 `.zr-tip-shot` 的滚动条，内容依然都能看到
+             * （用户要的「可以自由滑动」正是为此），只是不用一次铺满。
+             *
+             * 下限 120px：再小就看不清内容了，那种情况宁可盖一点点。
+             */
+            const computeTipMaxH = (anchor) => {
+              const gap = 20
+              const viewportH = window.innerHeight
+              const cap = Math.min(viewportH * 0.46, 420)
+              if (!anchor) return cap
+              try {
+                const r = anchor.getBoundingClientRect()
+                const above = r.top - gap - 8
+                const below = viewportH - r.bottom - gap - 8
+                const room = Math.max(above, below)
+                return Math.max(120, Math.min(room, cap))
+              } catch { return cap }
             }
             const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false, opts = null) => {
               const tip = ensureTip()
@@ -5383,8 +5395,23 @@ const placeBox = (el, l, t, wd, ht) => {
                * 位图浮窗按「位图区上限」预估；文字浮窗内容已经渲染好了，
                * 直接用实际高度即可。
                */
+              /**
+               * **先把高度上限压到可用空间内，再按它算预估值。**
+               *
+               * 顺序不能反：若先按固定上限 `min(46vh,420px)` 预估、再收高度，
+               * `tipH` 就会比实际大，`top` 按大值算出来会离链接太远；
+               * 反之若只收高度不改预估，浮窗又会长出去盖住链接。
+               *
+               * 位图浮窗的高度上限来自 `computeTipMaxH`（跟着可用空间走），
+               * 文字浮窗内容已排好，用实际高度即可。
+               */
+              const bitmapMaxH = opts?.bitmap ? computeTipMaxH(anchor) : 0
+              if (opts?.bitmap) {
+                const shotNow = tip.querySelector('.zr-tip-shot')
+                if (shotNow) shotNow.style.maxHeight = `${Math.round(bitmapMaxH)}px`
+              }
               const tipH = opts?.bitmap
-                ? estimateBitmapTipH()
+                ? bitmapMaxH
                 : (tip.offsetHeight || 40)
               /**
                * 页面矩形：优先用锚点所在页，拿不到再退到可见页。
