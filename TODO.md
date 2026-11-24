@@ -199,3 +199,49 @@ PDF 页本身是 canvas，底色由 pdf.js 决定，换主题只影响栏内 UI 
 4. **去掉外圈黑框**。`.zr-link-tip` 的 `border` + `box-shadow`、`.zr-tip-shot` 的 `border` 都去掉，观感改成「位图直接浮在页面上」，不要容器感。
 
 由 links-agent 在 `fix-popup` 分支实现。
+---
+
+## 浮窗与高亮的修正（2026-11-24 晚，已完成）
+
+### TDZ：一个错误造成三个症状（`5f0b66d`）
+
+`ensureTip()` 里 `addEventListener('wheel', onTipWheel)`，而 `const onTipWheel` 声明在其后 12 行。首次调用就抛 `ReferenceError: Cannot access 'onTipWheel' before initialization`，**静默中断了它之后的 mouseenter / mouseleave / appendChild**。于是同时表现为：滚轮穿透到 PDF、浮窗不再消失。
+
+`const` 箭头函数没有提升。这份 9000 行单文件里必须严格先定义后使用。
+
+现有测试抓不到这类错误的三个原因：`node --check` 只看语法（先使用后声明语法合法）；`harness-render` 用 React stub 不执行那条真实注册路径；`check-*.mjs` 全是正则匹配源码文本，看不出执行顺序。
+
+试过写 TDZ 静态检查器，两版都误报严重（`'...right now'` 里的 `now`、函数参数 `pageNo` 被当成引用），已删除——留着误报的检查器比没有更糟。`check-pdf-links.mjs` 里只保留了一条窄断言：`onTipWheel` 的定义必须在 `ensureTip` 注册 wheel 之前。
+
+### 参考文献退回文字预览（`7deb5c3`）
+
+用户原话「只有图、公式需要悬浮窗」，据此把 `#cite.*` 全挡掉后发现用户仍要提示，确认后改为三级分流：
+
+| 目标 | 行为 |
+|---|---|
+| `isPreviewableDest` 为真（fig/equation/table） | 位图浮窗 |
+| 为假但仍具名（`#xxx` 非 `#page=N`） | 文字预览（不渲染位图） |
+| `#page=N` | 不弹 |
+| 外链 | 显示 URL |
+
+改法要点：`dest`/`pageNo` 解析提前到两条路径共用、删掉位图分支的重复解析，使「先解析、再分流、只有位图路径才渲染」成为代码结构本身的性质，而非靠注释约束。
+
+### 落点高亮的真因（`7deb5c3`）
+
+不是 TDZ 连带、不是 `mix-blend-mode` 配色。真因是**调用时机**：`jumpToNamedDest` 里刚调完 `scrollPageIntoView` 就同步调 `flashJumpTarget`，而 pdf.js 的目标页懒渲染，页元素要等滚过去之后才创建，于是 `if (!pageEl) return` 静默返回，整链还包在 `try/catch` 里连报错都没有。
+
+日志佐证：`link:dest` 有 6 条、`preview` 都有内容，但从未有过闪烁记录。
+
+修法：页元素不存在时挂 `pagerendered` 等一次 + 400ms 兜底，`once` 语义摘监听。诊断三态：`no-page-el` / `zero-size` / 成功时记几何。
+
+### 迟到的 retry 会清掉新高亮（`d0763f0`）
+
+审查时发现的竞态：`retry` 延迟执行、最后会再次调 `flashJumpTarget`，而它开头调 `clearJumpFlash()`。连续快速跳转两次时，第一次的 retry 迟到跑，会清掉第二次刚建立的高亮——症状与原 bug 相同但更偶发。
+
+修法是代际标记 `jumpFlashSeq`：顶层调用自增开启新一代，retry 递归传同一代，入口判 `seq !== jumpFlashSeq` 即作废。
+
+**关键细节**：`clearJumpFlash()` 必须放在代际判据**之后**。原顺序是它开头就清，那样即使加了 stale 判据也无效——过期 retry 会先清掉新高亮再走到判据返回。先判后清才对。
+
+`clearJumpFlash` 本身不推进代际（它既被 cleanup 调、也被新一代开始调，若推进会让 seq 与 jumpFlashSeq 永远差一位）。
+
+日志判读：`jump:flash-skip` 的 `reason` 分 `stale`（被新跳转取代）/ `no-page-el`（页未渲染）/ `zero-size`（尺寸为 0），都带 `seq`；成功路径的 `jump:flash` 也带 `seq`，一次跳转的完整生命周期能串起来看。
