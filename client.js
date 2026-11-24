@@ -1395,9 +1395,31 @@ window.__ModuleLoader__.load({
         padding:8px 11px;border-radius:8px;background:var(--dsh-bg-elevated,#2b2b2b);
         border:1px solid var(--dsh-border,#3f3f3f);box-shadow:0 6px 20px rgba(0,0,0,.38);
         font-size:12px;line-height:1.6;color:var(--dsh-text-primary,#e6e6e6);
-        pointer-events:none;white-space:normal;overflow-wrap:anywhere;
-        opacity:0;transition:opacity .12s}
-      .zr-link-tip[data-on="1"]{opacity:1}
+        /*
+         * **必须接收鼠标事件。**
+         *
+         * 原来是 none（纯文字提示，挡住 PDF 点击是纯粹的损失）。
+         * 现在浮窗里是可滚动的位图预览 —— 鼠标要能移进去滚动它，
+         * 而且「链接与浮窗之间来回移动不掉」要求浮窗自己也能触发
+         * mouseenter/mouseleave。所以改成 auto。
+         */
+        pointer-events:auto;white-space:normal;overflow-wrap:anywhere;
+        opacity:0;visibility:hidden;transition:opacity .12s}
+      .zr-link-tip[data-on="1"]{opacity:1;visibility:visible}
+      /*
+       * 位图预览区：按 dest 坐标裁出的那一块 PDF 页面。
+       *
+       * 用 overflow:auto 让用户能自己滑动看目标附近更多内容
+       * （用户的原话「可以自由滑动」）。canvas 用块级布局，
+       * 宽高按裁切比例设好，滚动由这一层负责。
+       */
+      .zr-link-tip .zr-tip-shot{display:block;margin:0 0 6px;overflow:auto;
+        max-height:min(58vh,460px);background:#fff;border-radius:4px;
+        border:1px solid var(--dsh-border,#3f3f3f)}
+      .zr-link-tip .zr-tip-shot canvas{display:block;max-width:none}
+      /* 位图加载中的占位，避免浮窗先塌成一条线再突然撑开 */
+      .zr-link-tip .zr-tip-shot[data-loading="1"]{min-height:96px;
+        background:var(--dsh-bg-elevated,#2b2b2b);border-style:dashed}
       /* 卡片主行：标题式引导，比正文略重 */
       .zr-link-tip .zr-tip-title{font-weight:600;color:var(--dsh-text-primary,#e6e6e6);
         display:block;margin-bottom:2px}
@@ -3988,6 +4010,201 @@ window.__ModuleLoader__.load({
              *
              * 拿不到行元素时退回「按 offset 估一个横条」，至少给个方向感。
              */
+            /**
+             * **把目标页渲染成位图，并按 dest 坐标裁出区块。**
+             *
+             * 为什么需要它：文字预览对正文够用，但 figure、公式、表格
+             * 这类内容在文本层里只剩「FIGURE 8」「B3 to M3a prediction shifts...」
+             * 这种碎片，用户看到的是「figure 显示还是不对」。他要的是
+             * Zotero 那种**把那一块画出来的效果**。
+             *
+             * 两个硬约束：
+             *   · **只渲染目标那一页**（用户明确要求）。不做相邻页预取，
+             *     不整篇渲染 —— 每次悬停最多付一页的渲染成本。
+             *   · 按 (pageNo) 缓存**整页位图**，同一页的不同目标复用同一张，
+             *     只换裁切。这样连续悬停同一页的多个链接几乎零成本。
+             *
+             * 缓存放普通 Map（不用 hook）：这段代码在 setDocument 的异步
+             * 装载链路里，调 hook 会抛 React #321。换文档时随闭包一起丢弃，
+             * cleanup 里也显式 clear 一次。
+             */
+            const pageBitmapCache = new Map()
+            /**
+             * 正在渲染的页：pageNo → Promise。
+             *
+             * pdf.js 明确禁止同一个 canvas 同时跑两次 render —— 会抛
+             * 「Cannot use the same canvas during multiple render() operations」。
+             * 而悬停是快速的：鼠标扫过同页多个链接时，第二次会赶在第一次
+             * 完成之前进来。缓存只挡得住「已完成」的，挡不住在途的。
+             */
+            const pageBitmapPending = new Map()
+            /** 一页位图最多占多少像素（宽），防止巨型页面把内存吃光。 */
+            const bitmapMaxWidthPx = 1400
+
+            /**
+             * 渲染某页到离屏 canvas，返回 { canvas, scale, widthPt, heightPt }。
+             * scale 取 devicePixelRatio 但夹到 2 以内 —— 再高只是白烧内存。
+             */
+            const renderPageBitmap = async (pdfDocument, pageNo) => {
+              const cached = pageBitmapCache.get(pageNo)
+              if (cached) return cached
+              // 同一页的并发请求共用一次渲染，别让两个 render() 撞在同一个 canvas 上
+              const pending = pageBitmapPending.get(pageNo)
+              if (pending) return pending
+              const job = (async () => {
+                const page = await pdfDocument.getPage(pageNo)
+                const base = page.getViewport({ scale: 1 })
+                const dpr = typeof window !== 'undefined' && window.devicePixelRatio
+                  ? Math.min(2, Math.max(1, window.devicePixelRatio))
+                  : 1
+                /**
+                 * 目标：显示宽度约等于浮窗宽度，再乘 dpr 保证清晰。
+                 * 夹住上限，避免 A0 大图或超大页面把 canvas 撑爆。
+                 */
+                const targetCssWidth = 520
+                let scale = (targetCssWidth * dpr) / base.width
+                scale = Math.max(0.3, Math.min(scale, bitmapMaxWidthPx / base.width, 4))
+                const viewport = page.getViewport({ scale })
+                const canvas = document.createElement('canvas')
+                canvas.width = Math.max(1, Math.floor(viewport.width))
+                canvas.height = Math.max(1, Math.floor(viewport.height))
+                const ctx = canvas.getContext('2d', { alpha: false })
+                if (!ctx) return null
+                // 白底：PDF 的透明区域在深色浮窗里会变成灰块
+                ctx.fillStyle = '#ffffff'
+                ctx.fillRect(0, 0, canvas.width, canvas.height)
+                const task = page.render({ canvasContext: ctx, viewport, canvas })
+                await task.promise
+                const result = { canvas, scale, widthPt: base.width, heightPt: base.height }
+                pageBitmapCache.set(pageNo, result)
+                return result
+              })()
+              pageBitmapPending.set(pageNo, job)
+              try {
+                return await job
+              } finally {
+                pageBitmapPending.delete(pageNo)
+              }
+            }
+
+            /**
+             * 按 dest 算出「该显示页面的哪一块」，单位是 PDF 点。
+             *
+             * 各种 dest 类型的可用信息不同：
+             *   · FitR 直接给了矩形 [left, bottom, right, top]，最省事；
+             *   · XYZ / FitH 只有一个锚点 y，横向和高度都得自己估；
+             *   · 都没有就整页。
+             *
+             * **高度要给足**：figure、公式往往比一行高得多，只给一条的话
+             * 用户看到的还是「一条碎片」。所以以锚点为中心上下各取一段，
+             * 宁可多给上下文。
+             */
+            const destRegionPts = (dest, widthPt, heightPt) => {
+              const kind = dest?.[1]?.name
+              const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+              if (kind === 'FitR') {
+                const left = num(dest[2])
+                const bottom = num(dest[3])
+                const right = num(dest[4])
+                const top = num(dest[5])
+                if (left !== null && bottom !== null && right !== null && top !== null) {
+                  // 矩形外扩一点留白，别把边框裁掉
+                  const pad = 8
+                  return {
+                    x: Math.max(0, left - pad),
+                    y: Math.max(0, bottom - pad),
+                    w: Math.min(widthPt, right + pad) - Math.max(0, left - pad),
+                    h: Math.min(heightPt, top + pad) - Math.max(0, bottom - pad),
+                  }
+                }
+              }
+              /**
+               * 锚点型：XYZ 的 y 在 dest[3]，FitH/FitBH 在 dest[2]。
+               * PDF 坐标系原点左下，所以要沿 y 上下取一段。
+               */
+              let anchorY = null
+              if (kind === 'XYZ') anchorY = num(dest[3])
+              else if (kind === 'FitH' || kind === 'FitBH') anchorY = num(dest[2])
+              if (anchorY === null) {
+                // 没有可用坐标：整页
+                return { x: 0, y: 0, w: widthPt, h: heightPt }
+              }
+              /**
+               * 高度取页高的 42%（约半屏），并保证下限。
+               * 用户的诉求是「图片、公式都要是这样的」——
+               * 一条十几像素的横条对 figure 毫无意义。
+               */
+              const h = Math.max(120, Math.min(heightPt, heightPt * 0.42))
+              /**
+               * **区块以锚点为中心、上下对称取。**
+               *
+               * 为什么不能只往一个方向取：实测同一篇论文里，不同目标的
+               * 锚点语义并不一致 ——
+               *   · `fig8` 锚点 y=409，``FIGURE 8`` 标签在 y=397，
+               *     图在标签下方（PDF 坐标 y 更小）；
+               *   · `eq1` 锚点 y=85，±25pt 内直接就是公式本体
+               *     「Ai = Bi + C∑…」，上下都有内容；
+               *   · `cite.*` 锚点落在文献条目上，条目本身跨好几行。
+               *
+               * 所以「以锚点为上沿往下取」（对 figure 有效）会把公式上方
+               * 的推导切掉，「往上取」又会把图切掉。对称取是唯一能同时
+               * 覆盖三种情况的策略：锚点附近的内容一定在块内。
+               *
+               * 代价是块内可能多带一些上下文——这恰恰是任务要求的
+               * 「宁可多给上下文也不要只显示一条」。
+               */
+              let y = anchorY - h / 2
+              y = Math.max(0, Math.min(heightPt - h, y))
+              /**
+               * 横向：默认整页宽。figure 常居中或跨栏，
+               * 按 dest.x 去裁会把图裁掉半边，得不偿失。
+               */
+              return { x: 0, y, w: widthPt, h }
+            }
+
+            /**
+             * 生成一个已裁好的 canvas 元素（直接能塞进浮窗）。
+             * @returns {Promise<HTMLCanvasElement|null>}
+             */
+            const renderDestBitmap = async (dest, pageNo) => {
+              try {
+                const pdfDocument = pdfRef.current?.doc
+                if (!pdfDocument) return null
+                const bitmap = await renderPageBitmap(pdfDocument, pageNo)
+                if (!bitmap) return null
+                const { canvas, scale, widthPt, heightPt } = bitmap
+                const region = destRegionPts(dest, widthPt, heightPt)
+                // PDF 点 → 位图像素（横向不需要翻转，纵向见下）
+                const sx = Math.max(0, Math.floor(region.x * scale))
+                const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(region.w * scale)))
+                /**
+                 * 纵向要翻转：region.y 是 PDF 左下原点、从页底量起，
+                 * 而 canvas 的 y 从顶部往下。整块区域在 canvas 里的顶边是
+                 *   (pageHeightPt - region.y - region.h) * scale
+                 * 用它的 ceil/floor 尺寸算绘制高度，保证不越过画布边界。
+                 */
+                const syFromTop = Math.max(0, Math.floor((heightPt - region.y - region.h) * scale))
+                const copyH = Math.max(1, Math.min(
+                  canvas.height - syFromTop,
+                  Math.ceil(region.h * scale),
+                ))
+                const out = document.createElement('canvas')
+                out.width = sw
+                out.height = copyH
+                const ctx = out.getContext('2d', { alpha: false })
+                if (!ctx) return null
+                ctx.fillStyle = '#ffffff'
+                ctx.fillRect(0, 0, out.width, out.height)
+                ctx.drawImage(canvas, sx, syFromTop, sw, copyH, 0, 0, sw, copyH)
+                /**
+                 * 显示尺寸按 CSS 像素给（不是位图像素），否则 dpr=2 时会显示成两倍大。
+                 */
+                out.style.width = `${Math.round(out.width / scale)}px`
+                out.style.height = `${Math.round(out.height / scale)}px`
+                return out
+              } catch { return null }
+            }
+
             const jumpFlashMs = 1000
             /** 当前闪烁元素与定时器，必须能被 cleanup 清掉。 */
             let jumpFlashEl = null
@@ -4237,6 +4454,13 @@ window.__ModuleLoader__.load({
               linkTip = document.createElement('div')
               linkTip.className = 'zr-link-tip'
               linkTip.setAttribute('data-on', '0')
+              /**
+               * 浮窗要能接收鼠标事件（CSS 里已改成 pointer-events:auto），
+               * 并且自己参与「延迟消失」的判定：
+               * 鼠标从链接移进浮窗时不能消失，否则想滚动看一眼都做不到。
+               */
+              linkTip.addEventListener('mouseenter', () => { cancelHideTip() })
+              linkTip.addEventListener('mouseleave', () => { scheduleHideTip() })
               document.body.appendChild(linkTip)
               return linkTip
             }
@@ -4247,6 +4471,18 @@ window.__ModuleLoader__.load({
             let linkTipAnchor = null
             /** 自动隐藏句柄（只有告警用）。 */
             let linkWarnTimer = 0
+            /**
+             * **延迟消失句柄（0.5s）。**
+             *
+             * 直接 mouseout 就隐藏的话，鼠标从链接移到浮窗（想滚动看一眼）
+             * 中途必然经过空隙，浮窗当场消失。用户实测 Zotero 的行为是
+             * 「连续 0.5 秒既不在链接上、也不在浮窗上才消失」，所以我们
+             * 用同一个定时器：链接与浮窗的进入事件取消它，离开事件重排它。
+             */
+            let linkHideTimer = 0
+            const cancelHideTip = () => {
+              if (linkHideTimer) { clearTimeout(linkHideTimer); linkHideTimer = 0 }
+            }
 
             /**
              * 统一的提示写入与定位。
@@ -4257,8 +4493,26 @@ window.__ModuleLoader__.load({
             const hideLinkTip = () => {
               if (linkTipTimer) { clearTimeout(linkTipTimer); linkTipTimer = 0 }
               if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
+              cancelHideTip()
               linkTipAnchor = null
+              // 位图槽位的加载态也一并复位，下次悬停重新开始
+              try {
+                const shot = linkTip?.querySelector?.('.zr-tip-shot')
+                if (shot) shot.removeAttribute('data-loading')
+              } catch { /* ignore */ }
               if (linkTip) linkTip.setAttribute('data-on', '0')
+            }
+
+            /**
+             * 0.5 秒后隐藏 —— 期间若鼠标回到链接或浮窗上会被 cancelHideTip 取消。
+             * 必须声明在 hideLinkTip 之后（它引用了它）。
+             */
+            const scheduleHideTip = () => {
+              cancelHideTip()
+              linkHideTimer = setTimeout(() => {
+                linkHideTimer = 0
+                hideLinkTip()
+              }, 500)
             }
 
             /**
@@ -4290,13 +4544,45 @@ window.__ModuleLoader__.load({
             }
 
             /**
-             * @param {string|Array<{kind?:string,text:string}>} lines 纯文本或行描述数组
+             * 把 canvas 放进浮窗的位图槽位。
+             *
+             * 槽位始终存在（固定顺序：位图在上、文字在下），
+             * 这样异步位图到达时不用重排整张卡片，滚动位置也不会跳。
              */
-            const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false) => {
+            const putTipBitmap = (tip, canvas) => {
+              let shot = tip.querySelector('.zr-tip-shot')
+              if (!shot) {
+                shot = document.createElement('div')
+                shot.className = 'zr-tip-shot'
+                tip.insertBefore(shot, tip.firstChild)
+              }
+              shot.textContent = ''
+              shot.removeAttribute('data-loading')
+              if (canvas) shot.appendChild(canvas)
+              return shot
+            }
+
+            /**
+             * @param {string|Array<{kind?:string,text:string}>} lines 纯文本或行描述数组
+             * @param {HTMLElement|null} anchor 锚定元素；null 表示居中
+             * @param {{bitmap?: boolean}} [opts] bitmap: 预留位图槽位（加载态）
+             */
+            const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false, opts = null) => {
               const tip = ensureTip()
               if (typeof lines === 'string') renderTipLines(tip, [{ kind: 'title', text: lines }])
               else renderTipLines(tip, Array.isArray(lines) ? lines : [])
               tip.setAttribute('data-warn', warn ? '1' : '0')
+              /**
+               * 位图槽位：需要时先放一个加载态占位。
+               *
+               * 为什么要占位而不是等位图到了再插：不占位的话卡片会先按
+               * 文字高度定位，位图一进来整块往下长，浮窗会「跳」一下；
+               * 而且定位用错了高度就可能顶出视口。
+               */
+              if (opts?.bitmap) {
+                const shot = putTipBitmap(tip, null)
+                shot.setAttribute('data-loading', '1')
+              }
               /**
                * 定位：优先放在链接上方；上方空间不够（贴近视口顶部）就放下方。
                * 左右夹在视口内，避免长 URL 把提示顶出屏幕。
@@ -4327,6 +4613,11 @@ window.__ModuleLoader__.load({
               tip.style.left = `${Math.round(left)}px`
               tip.style.top = `${Math.round(top)}px`
               tip.setAttribute('data-on', '1')
+              /**
+               * 显示出来就说明鼠标在链接上（或刚离开但在 0.5s 窗口内），
+               * 此时不该有挂起的消失任务。
+               */
+              cancelHideTip()
               if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
               if (autoHideMs > 0) linkWarnTimer = setTimeout(() => hideLinkTip(), autoHideMs)
             }
@@ -4479,6 +4770,10 @@ window.__ModuleLoader__.load({
                * 原生提示框可能已经排上队了。
                */
               if (anchor.hasAttribute('title')) anchor.removeAttribute('title')
+              /**
+               * 鼠标回到链接上 → 取消挂起的消失（与浮窗共用 0.5s 判定）。
+               */
+              cancelHideTip()
               // 同一条链接内部移动（冒泡）不算换目标，否则会不停重排延时
               if (anchor === linkTipAnchor) return
               if (linkTipTimer) clearTimeout(linkTipTimer)
@@ -4499,25 +4794,25 @@ window.__ModuleLoader__.load({
                 if (href.startsWith('#')) {
                   const rawName = href.slice(1)
                   /**
-                   * 具名目标的预览：**显示目标处那段正文**。
+                   * **具名目标的预览 = 位图 + 文字。**
                    *
-                   * 原来卡片里是「文档内跳转 / 第 N 页 / fig8」这类元信息，
-                   * 用户的原话是「我希望是具体的内容预览呀」。那段文字本来
-                   * 就在 PDF 文本层里 —— 不需要 DOI，也不需要查 Zotero 库，
-                   * 对 `#fig8`、`#eq1`、`#cite.andrews1997` 一视同仁。
+                   * 用户的原话是「figure 显示还是不对…图片、公式都要是这样的」。
+                   * 只给文字解决不了这一点：figure 在文本层里只剩
+                   * 「FIGURE 8」「B3 to M3a prediction shifts...」这种碎片。
+                   * 所以主体改成**把目标区域画出来**（canvas），
+                   * 文字退成补充信息（页码 + 目标名）。
                    *
-                   * 分两步：先同步出「加载中」的骨架（悬停要即时反馈），
-                   * 再异步解析 dest 取文字后补上。取不到就退回元信息。
+                   * 顺序：先出带占位槽的浮窗（悬停要即时反馈），
+                   * 再异步解析 dest → 渲染位图 → 塞进槽位。
                    */
                   const decName = (() => {
                     try { return decodeURIComponent(rawName) } catch { return rawName }
                   })()
                   showLinkTip([
-                    { kind: 'title', text: '文档内跳转' },
-                    { kind: 'dim', text: '正在读取目标内容…' },
-                  ], anchor)
+                    { kind: 'dim', text: '正在渲染目标区域…' },
+                  ], anchor, 0, false, { bitmap: true })
                   /**
-                   * 异步补内容。此时用户可能已经移开鼠标（卡片已隐藏、
+                   * 异步补位图与文字。此时用户可能已经移开鼠标（卡片已隐藏、
                    * linkTipAnchor 已换人），所以回写前要确认「还是这一条」。
                    */
                   void (async () => {
@@ -4538,17 +4833,32 @@ window.__ModuleLoader__.load({
                       }
                       if (!Number.isInteger(pageIndex) || pageIndex < 0) return
                       const pageNo = pageIndex + 1
-                      const preview = await extractDestPreview(dest, pageNo)
+                      /**
+                       * **只渲染目标这一页**（用户明确要求），不预取邻页。
+                       * 页位图按 pageNo 缓存，同页的不同目标复用同一张图。
+                       */
+                      const canvas = await renderDestBitmap(dest, pageNo)
+                      const preview = canvas ? null : await extractDestPreview(dest, pageNo)
                       // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
                       if (linkTipAnchor !== anchor || !linkTip || !anchor.isConnected) return
-                      /**
-                       * 有正文就以正文为卡片主体（这才是用户要的「内容预览」），
-                       * 页码与目标名退成次要信息；取不到文字则保留元信息。
-                       */
-                      if (preview) {
+                      const tip = ensureTip()
+                      const caption = `第 ${pageNo} 页 · ${decName}`
+                      if (canvas) {
+                        /**
+                         * 有图就以图为主体。先按最终内容（含位图槽位）布局，
+                         * 再把 canvas 塞进槽位 —— 这样定位基于最终高度，
+                         * 不会先按文字高度摆好、图一进来就顶出视口。
+                         */
+                        showLinkTip([
+                          { kind: 'dim', text: caption },
+                          { kind: 'line', text: '可滚动查看，点链接跳转' },
+                        ], anchor, 0, false, { bitmap: true })
+                        putTipBitmap(tip, canvas)
+                      } else if (preview) {
+                        // 位图失败（少见）时退回文字预览，总比空窗好
                         showLinkTip([
                           { kind: 'line', text: preview },
-                          { kind: 'dim', text: `第 ${pageNo} 页 · ${decName}` },
+                          { kind: 'dim', text: caption },
                         ], anchor)
                       } else {
                         showLinkTip([
@@ -4557,7 +4867,7 @@ window.__ModuleLoader__.load({
                           { kind: 'dim', text: decName },
                         ], anchor)
                       }
-                    } catch { /* 解析不出来就保持目标名，不打扰用户 */ }
+                    } catch { /* 渲染不出来就保持占位，不打扰用户 */ }
                   })()
                   return
                 }
@@ -4569,7 +4879,14 @@ window.__ModuleLoader__.load({
               if (!anchor) return
               // 指针在本链接的子元素之间移动时也会触发 mouseout，那不是离开
               if (event.relatedTarget && anchor.contains?.(event.relatedTarget)) return
-              hideLinkTip()
+              /**
+               * **不立刻隐藏，改为 0.5s 后隐藏。**
+               *
+               * 鼠标要从链接移到浮窗上滚动，中途必然经过空隙；立即隐藏的话
+               * 用户根本够不到浮窗。这 0.5s 里若鼠标进了浮窗或回到链接，
+               * cancelHideTip 会把任务取消（见 ensureTip 里的 mouseenter）。
+               */
+              scheduleHideTip()
             }
 
             host.addEventListener('click', onPdfLinkClick, true)
@@ -4581,8 +4898,10 @@ window.__ModuleLoader__.load({
               try { host.removeEventListener('mouseout', onPdfLinkOut) } catch { /* ignore */ }
               try { if (linkTipTimer) clearTimeout(linkTipTimer) } catch { /* ignore */ }
               try { if (linkWarnTimer) clearTimeout(linkWarnTimer) } catch { /* ignore */ }
+              try { if (linkHideTimer) clearTimeout(linkHideTimer) } catch { /* ignore */ }
               linkTipTimer = 0
               linkWarnTimer = 0
+              linkHideTimer = 0
               linkTipAnchor = null
               try { linkTip?.remove() } catch { /* ignore */ }
               linkTip = null
@@ -4594,6 +4913,12 @@ window.__ModuleLoader__.load({
                * 这种错看起来像「预览内容张冠李戴」，最难往缓存上想。
                */
               try { textLinesCache.clear() } catch { /* ignore */ }
+              /**
+               * 页位图缓存同理，而且更重：一张 1400px 宽的 canvas 约几 MB，
+               * 不清既会串文档又会白占内存。
+               */
+              try { pageBitmapCache.clear() } catch { /* ignore */ }
+              try { pageBitmapPending.clear() } catch { /* ignore */ }
               // 闪烁块是临时元素，清理时一并收掉（它可能还在淡出中）
               try { clearJumpFlash() } catch { /* ignore */ }
             }

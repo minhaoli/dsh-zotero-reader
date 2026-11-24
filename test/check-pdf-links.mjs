@@ -175,13 +175,15 @@ check('内部跳转显示成「第 N 页」而不是裸 #page=',
  * 现在异步解析 dest 拿页号后补写第二行；断言它确实把页号算出来了，
  * 而不是只显示名字。
  */
-check('具名目标悬停显示具体内容（不再是元信息）',
-  /\{ kind: 'line', text: preview \}/.test(src),
-  '用户要的是「点过去会到哪句话」，只显示页码/目标名等于没预览')
-check('取不到文字时退回元信息显示',
-  /\{ kind: 'title', text: '文档内跳转' \}/.test(src) &&
-    /kind: 'line', text: `第 \$\{pageNo\} 页`/.test(src),
-  '扫描页没有文本层，此时不能空卡片')
+check('具名目标预览以位图为主体（canvas 渲染，不再是纯文字）',
+  /const renderDestBitmap = async/.test(src) &&
+    /page\.render\(\{ canvasContext: ctx/.test(src) &&
+    /canvas = await renderDestBitmap\(dest, pageNo\)/.test(src),
+  'figure/公式在文本层里只剩碎片，必须把目标区域画出来')
+check('取不到位图时退回文字预览（不是空窗）',
+  /canvas \? null : await extractDestPreview/.test(src) &&
+    /else if \(preview\)/.test(src),
+  '渲染失败时至少要给点东西')
 check('异步补内容前确认仍是当前链接',
   /linkTipAnchor !== anchor/.test(src),
   '鼠标已移开还回写会让卡片在错误位置闪出来')
@@ -377,7 +379,8 @@ check('链接相关的提示/闪烁都不用 innerHTML',
   (() => {
     // 只扫链接相关这几段，别把标注层原有的 layer.innerHTML 误判进来
     const parts = ['const renderTipLines', 'const flashJumpTarget', 'const extractDestPreview',
-      'const pageTextLines', 'const showLinkTip']
+      'const pageTextLines', 'const showLinkTip', 'const renderPageBitmap',
+      'const renderDestBitmap', 'const putTipBitmap', 'const destRegionPts']
     for (const p of parts) {
       const at = src.indexOf(p)
       if (at < 0) continue
@@ -387,6 +390,80 @@ check('链接相关的提示/闪烁都不用 innerHTML',
     return true
   })(),
   'PDF 里的文字是外部输入，innerHTML 就是注入面')
+
+/* ---------- 4g. 位图预览：只渲染目标页、按页缓存 ---------- */
+
+/**
+ * 用户明确要求「只加载对应图片、公式的页面，其它的不加载」。
+ * 这条断言盯的就是这个约束：渲染入口接收 pageNo，且没有邻页预取。
+ */
+check('位图渲染接收 pageNo（只渲染目标那一页）',
+  /const renderPageBitmap = async \(pdfDocument, pageNo\) =>/.test(src) &&
+    /pdfDocument\.getPage\(pageNo\)/.test(src),
+  '整篇预渲染会拖垮打开速度，用户明确只要目标页')
+
+check('没有邻页预取 / 整篇渲染',
+  !/getPage\(\s*pageNo\s*\+\s*1\s*\)/.test(src) &&
+    !/getPage\(\s*pageNo\s*-\s*1\s*\)/.test(src),
+  '预取邻页违背「其它的不加载」')
+
+check('页位图按 (pageNo) 缓存，重复悬停不重渲染',
+  /const pageBitmapCache = new Map\(\)/.test(src) &&
+    /const cached = pageBitmapCache\.get\(pageNo\)/.test(src) &&
+    /pageBitmapCache\.set\(pageNo, result\)/.test(src),
+  '同一页的多个链接应复用同一张位图')
+
+check('同页并发渲染去重（pdf.js 禁止同 canvas 双 render）',
+  /const pageBitmapPending = new Map\(\)/.test(src) &&
+    /const pending = pageBitmapPending\.get\(pageNo\)/.test(src),
+  '鼠标扫过同页多个链接时，第二次会赶在第一次完成前进来，直接撞 render 会抛错')
+
+check('换文档时清空页位图缓存',
+  /pageBitmapCache\.clear\(\)/.test(src),
+  'canvas 缓存很重（一张几 MB），且会串文档')
+
+check('渲染比例考虑 devicePixelRatio 但夹到 2 以内',
+  /devicePixelRatio/.test(src) && /Math\.min\(2, Math\.max\(1, window\.devicePixelRatio\)\)/.test(src),
+  '不夹上限在高分屏上像素量爆炸')
+
+check('位图纵向裁切做了左下原点翻转',
+  /\(heightPt - region\.y - region\.h\) \* scale/.test(src),
+  'PDF 原点在左下，canvas 从顶部量，不翻转会裁到页面的镜像位置')
+
+/* ---------- 4h. 浮窗：可滚动 + 0.5s 延迟消失 ---------- */
+
+check('浮窗位图区可滚动',
+  /\.zr-link-tip \.zr-tip-shot\{display:block[^}]*overflow:auto/.test(src),
+  '用户要求「可以自由滑动」')
+
+check('浮窗接收鼠标事件（pointer-events:auto）',
+  /\.zr-link-tip\{[^}]*pointer-events:auto/.test(src) &&
+    !/\.zr-link-tip\{[^}]*pointer-events:none/.test(src),
+  '浮窗要能滚动、要能触发 mouseenter，就必须接收事件')
+
+check('0.5s 延迟消失（既不在链接也不在浮窗上才隐藏）',
+  /const cancelHideTip = \(\) =>/.test(src) &&
+    /const scheduleHideTip = \(\) =>/.test(src) &&
+    /setTimeout\(\(\) => \{[\s\S]{0,120}?hideLinkTip\(\)[\s\S]{0,20}?\}, 500\)/.test(src),
+  '立即隐藏的话鼠标够不到浮窗，没法滚动')
+
+check('链接与浮窗共用同一套取消/重排',
+  /linkTip\.addEventListener\('mouseenter', \(\) => \{ cancelHideTip\(\) \}\)/.test(src) &&
+    /linkTip\.addEventListener\('mouseleave', \(\) => \{ scheduleHideTip\(\) \}\)/.test(src) &&
+    /scheduleHideTip\(\)/.test(src.slice(src.indexOf('const onPdfLinkOut'), src.indexOf('const onPdfLinkOut') + 900)),
+  '两处各自为政就会出现「移进浮窗就消失」')
+
+check('mouseover 会取消挂起的消失',
+  /cancelHideTip\(\)[\s\S]{0,80}?if \(anchor === linkTipAnchor\) return/.test(src),
+  '回到链接上应当留住浮窗')
+
+check('延迟消失定时器有清理',
+  /if \(linkHideTimer\) clearTimeout\(linkHideTimer\)/.test(src) &&
+    /linkHideTimer = 0/.test(src),
+  '不清的话切文档后还会去操作已移除的节点')
+
+check('位图槽位有加载占位（避免先塌后跳）',
+  /data-loading/.test(src) && /zr-tip-shot\[data-loading="1"\]/.test(src))
 
 
 /* ---------- 5. 监听必须清理（否则累积） ---------- */
