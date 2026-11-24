@@ -4117,7 +4117,81 @@ window.__ModuleLoader__.load({
              *
              * ③ **命中行之后继续往下拼一点**，凑成一段可读预览。
              */
-            const linkPreviewChars = 120
+            /**
+             * 预览字数的**极端兜底**（不是主判据）。
+             *
+             * 主判据是「参考文献条目边界」：正常条目只有 180~260 字符，
+             * 会自然停在 boundary。这个上限只防「条目识别失败、一路吃到底」。
+             *
+             * 原为 120 —— 连一条作者列表都放不下，用户看到的就是
+             * 「只有作者名就跳到页码」。现在放宽到 600 作兜底。
+             */
+            const linkPreviewChars = 600
+            /**
+             * **参考文献条目的起始判据**（三条，满足其一）。
+             *
+             * 为什么不用悬挂缩进：实测这篇论文的首行与续行 x0 都是 49，
+             * 排版没有悬挂缩进，那个判据会完全失效。
+             * 行距也不可用：条目内与条目间都是约 8pt，没有明显间隙。
+             *
+             * 唯一稳定的是「作者姓 + 逗号 + 首字母」这个文献条目模式。
+             */
+            /** 主判据：Anderson, J. R. / Collins, A. M., and Loftus, E. F. */
+            const REF_ENTRY_RE = /^[A-Z][A-Za-zÀ-ÿ'’\-]+,\s*(?:[A-Z]\.|and\s+[A-Z]|&|[A-Z][a-z]+,\s*[A-Z])/
+            /** 保险1：`et al. (2004). 标题` 开头的续条目 */
+            const REF_ETAL_RE = /^et\s+al\.\s*\(\d{4}/
+            /** 保险2：单作者无首字母，如 `Chomsky (1957). ...` */
+            const REF_SINGLE_RE = /^[A-Z][A-Za-zÀ-ÿ'’\-]+\s*\(\d{4}[a-z]?\)/
+            /**
+             * 保险3：**含出版年份 + 大写开头 + 足够长**。
+             *
+             * 这条是为「首行被邻栏遮挡」的条目准备的：实测 page14 的
+             * 下一个条目拼出来只剩 `influences of semantic and grammatical
+             * cues in the two cerebral hemispheres.`（首行丢了），
+             * 它既不以作者名开头、也不是明确续行 —— 不加这条就会被
+             * 当成本条目的续行而混进来（andrews1997 实测就是这样）。
+             *
+             * 反过来，`Verbal Behav . 22, 261–295.` / `doi: 10.x` /
+             * `Psychol. Sci . 2, ...` 这类续行都不含 (19xx)/(20xx)，不会误判。
+             */
+            const REF_YEAR_RE = /\((?:19|20)\d{2}[a-z]?\)/
+            /** 年份 token 检测（在累加循环里用，不要求整行以它开头） */
+            const REF_YEAR_TOKEN = /\b(?:19|20)\d{2}[a-z]?\b/
+            /** 条目尾部特征：DOI / URL / 页码范围 */
+            const REF_TAIL_TOKEN = /doi:|https?:\/\/|\d+\s*[–\-]\s*\d+/
+            const isRefEntryStart = (text) => {
+              const t = String(text || '').trim()
+              if (!t) return false
+              if (REF_ENTRY_RE.test(t) || REF_ETAL_RE.test(t) || REF_SINGLE_RE.test(t)) return true
+              // 保险3：含年份 + 大写开头 + 足够长（避免误伤短句/标题）
+              return REF_YEAR_RE.test(t) && /^[A-Z]/.test(t) && t.length > 40
+            }
+            /**
+             * 节标题：**整行只有这个词**才算。
+             * 用整行匹配是为了避免误伤正文里提到 "references" 的句子。
+             */
+            const REF_HEADING_RE = /^(References|Bibliography|Literature Cited|参考文献)\s*$/
+            const isRefHeading = (text) => REF_HEADING_RE.test(String(text || '').trim())
+            /**
+             * **续行特征**（不是条目起始的强信号）。
+             *
+             * 实测 page14 的 `[26]`：`influences of semantic and grammatical
+             * cues in the two cerebral hemispheres.` —— 它以大写开头、
+             * 看起来像新条目，其实是**上一个条目的续行**
+             * （首行被右栏遮挡，拼出来只剩后半句）。
+             *
+             * 这些模式是明确的续行：
+             *   · `doi: ...` / `arXiv ...` / 纯卷页数字
+             *   · 期刊缩写 + 卷页（`Lang . 97, 12–24.`、`Psychol. Sci . 2, ...`）
+             *   · 以介系词/连词小写开头
+             */
+            const REF_CONT_RE = /^(?:doi:|https?:|arXiv|\(?\d{4}\)?\.|[A-Z][A-Za-z.]*\s*\.\s*\d+,|(?:and|of|in|for|with|on|the|a|an)\s)/i
+            const isRefContinuation = (text) => {
+              const t = String(text || '').trim()
+              if (!t) return false
+              return REF_CONT_RE.test(t)
+            }
+
             /**
              * 文本层缓存：pageNo → { lines, width, height }。
              *
@@ -4153,6 +4227,15 @@ window.__ModuleLoader__.load({
                 /**
                  * 聚行：同一基线（±4pt 容差）的 item 拼成一行。
                  * 容差取 4pt 是因为上下标差 2–3pt，再大就会把相邻行并掉。
+                 *
+                 * **同一基线上还要按 x 大间隙再拆一次。**
+                 * 双栏论文里左右栏常在同一条基线上（实测 page14：
+                 * `x0=49..546` 被拼成一行，左栏是参考文献条目、
+                 * 右栏是完全不相干的另一条）。不拆的话：
+                 *   · 参考文献条目会被右栏文字割裂成两半
+                 *   · 条目边界判定会误把右栏内容当成同一行
+                 * 间隙阈值取 100pt：字间距远小于它，
+                 * 而双栏之间的栏间距（本库约 14~60pt）也能被它识别。
                  */
                 const byBaseline = new Map()
                 for (const it of items) {
@@ -4162,14 +4245,28 @@ window.__ModuleLoader__.load({
                 }
                 for (const group of byBaseline.values()) {
                   group.sort((a, b) => a.x - b.x)
-                  const text = group.map((v) => v.s).join(' ').replace(/\s+/g, ' ').trim()
-                  if (!text) continue
-                  lines.push({
-                    y: group[0].y,
-                    x0: Math.min(...group.map((v) => v.x)),
-                    x1: Math.max(...group.map((v) => v.x + (v.w || 0))),
-                    text,
-                  })
+                  /**
+                   * 按 x 间隙切分成若干段，每段单独成行。
+                   */
+                  const segments = []
+                  let seg = [group[0]]
+                  for (let gi = 1; gi < group.length; gi += 1) {
+                    const prev = seg[seg.length - 1]
+                    const gap = group[gi].x - (prev.x + (prev.w || 0))
+                    if (gap > 100) { segments.push(seg); seg = [] }
+                    seg.push(group[gi])
+                  }
+                  segments.push(seg)
+                  for (const parts of segments) {
+                    const text = parts.map((v) => v.s).join(' ').replace(/\s+/g, ' ').trim()
+                    if (!text) continue
+                    lines.push({
+                      y: parts[0].y,
+                      x0: Math.min(...parts.map((v) => v.x)),
+                      x1: Math.max(...parts.map((v) => v.x + (v.w || 0))),
+                      text,
+                    })
+                  }
                 }
                 // 排版顺序：PDF 原点在左下，所以 y 递减才是从上到下
                 lines.sort((a, b) => b.y - a.y)
@@ -4228,14 +4325,194 @@ window.__ModuleLoader__.load({
                   const score = dy + dx * 0.5
                   if (score < bestScore) { bestScore = score; best = i }
                 }
-                // 命中行 + 往后若干行，凑到字数上限
-                let out = scoped[best].text || ''
-                for (let i = best + 1; i < scoped.length && out.length < linkPreviewChars; i += 1) {
-                  const next = scoped[i].text || ''
-                  if (!next) continue
-                  if (out.length + 1 + next.length > linkPreviewChars + 20) break
-                  out += ` ${next}`
+                /**
+                 * **按「参考文献条目边界」取值，不按字数。**
+                 *
+                 * 原实现从 `best` 往后累加到 120 字 —— 实测 `best` 落在
+                 * 章节标题 `References` 上（destY=305，标题 y=315.4 只差
+                 * 10pt），于是输出变成「References Anderson, J. R., ...」，
+                 * 到 120 字断在作者名中间。用户看到的就是
+                 * 「只有作者名就跳到页码」。
+                 *
+                 * 现在的顺序：
+                 *   1. best 若是**节标题**（整行只有 References 等）→ 跳到下一个条目起始
+                 *   2. best 若**本身就是条目起始** → 直接用，不跳
+                 *      （这两条必须分清，写成「总是取 next」会漏掉条目首行）
+                 *   3. 从起始行向后累加，**遇到下一个条目起始就停**（boundary）
+                 *   4. 找不到条目边界 → 退化：前后各 8 行（fallback）
+                 *   5. 600 字兜底（chars）
+                 */
+                let startIdx = best
+                let stopReason = 'boundary'
+                let usedFallback = false
+                /**
+                 * ---- ① best 是节标题 → 找下一个条目起始 ----
+                 */
+                if (isRefHeading(scoped[best].text)) {
+                  let found = -1
+                  for (let i = best + 1; i < scoped.length; i += 1) {
+                    if (isRefEntryStart(scoped[i].text)) { found = i; break }
+                  }
+                  if (found >= 0) {
+                    startIdx = found
+                  } else {
+                    stopReason = 'fallback'
+                    usedFallback = true
+                  }
+                } else if (!isRefEntryStart(scoped[best].text)) {
+                  /**
+                   * ---- ② best 既不是标题也不是条目起始（正文中间）----
+                   * 向前回溯找最近的条目起始；找不到就走退化。
+                   */
+                  let back = -1
+                  for (let i = best - 1; i >= 0 && i >= best - 12; i -= 1) {
+                    if (isRefEntryStart(scoped[i].text)) { back = i; break }
+                    // 遇到节标题说明已经回溯过界
+                    if (isRefHeading(scoped[i].text)) break
+                  }
+                  if (back >= 0) {
+                    startIdx = back
+                  } else {
+                    stopReason = 'fallback'
+                    usedFallback = true
+                  }
                 }
+                /**
+                 * ---- ③ 累加 ----
+                 */
+                let out = ''
+                let pickedLines = 0
+                /** 「已见过年份 / 见过页码或 DOI」—— 正向的条目完整性证据 */
+                let seenYear = false
+                let seenTail = false
+                if (usedFallback) {
+                  /**
+                   * 退化：前后各 8 行（向前回溯到节标题/条目起始为止，
+                   * 避免把上一个条目也吃进来）。
+                   */
+                  const from = Math.max(0, best - 8)
+                  const to = Math.min(scoped.length - 1, best + 8)
+                  const parts = []
+                  for (let i = from; i <= to; i += 1) {
+                    const t = scoped[i].text || ''
+                    if (!t) continue
+                    parts.push(t)
+                  }
+                  out = parts.join(' ')
+                  pickedLines = parts.length
+                } else {
+                  for (let i = startIdx; i < scoped.length; i += 1) {
+                    const t = scoped[i].text || ''
+                    if (!t) continue
+                    /**
+                     * **判停顺序（按 lead 定稿）：跨栏 / 完整 / 下一条目 / 兜底。**
+                     *
+                     * 核心改用**正向证据**：一条文献条目必然同时含
+                     * 「年份 (19xx)/(20xx)」和「页码范围或 DOI」。
+                     * 见到这两样就说明条目已完整，不必去猜边界 ——
+                     * 猜边界正是前面反复出错的地方（续行可能以大写开头、
+                     * 双栏行序交错、首行可能被遮挡）。
+                     */
+                    if (i > startIdx) {
+                      /**
+                       * ① 跨栏停：本行与起始行不在同一栏。
+                       * 双栏论文的栏边界是硬的，跨栏必然是新内容。
+                       */
+                      const sameCol = scoped[i].x0 < scoped[startIdx].x1 + 20
+                        && scoped[i].x1 > scoped[startIdx].x0
+                      if (!sameCol) { stopReason = 'column'; break }
+                      /**
+                       * ② 下一条目起始：只作为**辅助**。
+                       * 主判据是下面的「完整」。
+                       */
+                      if (isRefEntryStart(t) && !isRefContinuation(t) && seenYear && seenTail) {
+                        stopReason = 'boundary'
+                        break
+                      }
+                    }
+                    // 遇到新的节标题也停
+                    if (i > startIdx && isRefHeading(t)) { stopReason = 'boundary'; break }
+                    if (out.length + 1 + t.length > linkPreviewChars) { stopReason = 'chars'; break }
+                    /**
+                     * 累积本行，同时更新「见过年份 / 见过页码或 DOI」。
+                     * 年份允许 19xx/20xx 且可带字母后缀（2004a）。
+                     */
+                    out += out ? ` ${t}` : t
+                    pickedLines += 1
+                    if (!seenYear) seenYear = REF_YEAR_TOKEN.test(t)
+                    if (!seenTail) seenTail = REF_TAIL_TOKEN.test(t)
+                    /**
+                     * ③ 完整了：年份 + 页码/DOI 都见过，且至少取了两行
+                     * （单行就同时含两者说明条目极短，也正常，所以
+                     * 判据只要求「本行之后已完整」）。
+                     */
+                    /**
+                     * ③ 完整了：年份 + 页码/DOI 都见过。
+                     *
+                     * **但至少要在第二行之后才判**。实测 `anderson1983`：
+                     * 首行只有作者、次行才是 `doi: ...`（有 DOI 无年份），
+                     * 年份要到再下一行才出现；若首行同时含两者就立刻停，
+                     * 会把条目截在作者名（这正是用户最初报的现象）。
+                     * 要求 `pickedLines >= 2` 给条目留出
+                     * 「作者行 + 尾部行」的自然结构。
+                     */
+                    if (seenYear && seenTail && pickedLines >= 2) {
+                      stopReason = 'complete'
+                      break
+                    }
+                  }
+                }
+                out = out.trim()
+                /**
+                 * **诊断：条目预览为什么信息不全。**
+                 *
+                 * 用户报「参考文献给出其实不是完整信息」——截图里只有
+                 * 作者名就跳到页码。要分清是「best 落在条目中间」
+                 * （需要向前回溯）还是「字数上限截断」（需要放宽/改判据）。
+                 *
+                 * 记录 best 所处位置、前后各几行的文本与 y 间距，
+                 * 以及实际取了几行、为什么停。
+                 */
+                try {
+                  const ctxBefore = []
+                  for (let i = best - 1; i >= Math.max(0, best - 4); i -= 1) {
+                    ctxBefore.push({
+                      dy: Math.round(scoped[i].y - scoped[best].y),
+                      x0: Math.round(scoped[i].x0),
+                      t: (scoped[i].text || '').slice(0, 45),
+                    })
+                  }
+                  const ctxAfter = []
+                  for (let i = best + 1; i <= Math.min(scoped.length - 1, best + 4); i += 1) {
+                    ctxAfter.push({
+                      dy: Math.round(scoped[i].y - scoped[best].y),
+                      x0: Math.round(scoped[i].x0),
+                      t: (scoped[i].text || '').slice(0, 45),
+                    })
+                  }
+                  reportDiag({
+                    event: 'preview:extract',
+                    pageNo,
+                    destX,
+                    destY,
+                    bestIndex: best,
+                    bestText: (scoped[best].text || '').slice(0, 60),
+                    bestX0: Math.round(scoped[best].x0),
+                    scopedLen: scoped.length,
+                    totalLen: out.length,
+                    pickedLines,
+                    stopReason,
+                    /** 实际取值的起始行（跳过节标题后的位置） */
+                    entryStart: startIdx,
+                    entryStartText: (scoped[startIdx]?.text || '').slice(0, 60),
+                    /** startIdx 是否就是 best（说明没跳过任何东西） */
+                    entryIsBest: startIdx === best,
+                    usedFallback,
+                    lineCount: pickedLines,
+                    ctxBefore,
+                    ctxAfter,
+                  })
+                } catch { /* 诊断失败不影响预览 */ }
                 out = out.trim()
                 if (!out) return null
                 if (out.length > linkPreviewChars) {

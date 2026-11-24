@@ -1208,6 +1208,52 @@ check('位图 reflow 的 desiredH 用 popupH（绝不读 offsetHeight）',
 check('几何自检字段（popupW 与 canvasCssW 必须相等）',
   /geoConsistent:/.test(src) && /Math\.abs\(cw - tipRect\.width\) <= 2/.test(src),
   '两个值不相等就是几何又分叉了')
+/* ---------- 4p. 参考文献预览：按条目边界取，不按字数截 ---------- */
+
+/**
+ * 用户报「参考文献给出其实不是完整信息」——截图里只有作者名就跳到页码。
+ * 根因两层：`linkPreviewChars=120` 太短；且只从 best 往后累加、
+ * `best` 落在 `References` 标题行上。
+ */
+check('预览字数上限放宽到 600（兜底，不是主判据）',
+  /const linkPreviewChars = 600/.test(src),
+  '120 连作者列表都放不下')
+
+check('跳过节标题：整行只有 References 才算',
+  /const REF_HEADING_RE =\s*\/\^\(References\|Bibliography\|Literature Cited\|参考文献\)/.test(src) &&
+    /isRefHeading = \(text\) => REF_HEADING_RE\.test\(String\(text \|\| ''\)\.trim\(\)\)/.test(src),
+  '不按整行匹配会误伤正文里提到 references 的句子')
+
+check('条目起始三条正则 + 年份保险',
+  /const REF_ENTRY_RE =/.test(src) &&
+    /const REF_ETAL_RE =/.test(src) &&
+    /const REF_SINGLE_RE =/.test(src) &&
+    /return REF_YEAR_RE\.test\(t\) && \/\^\[A-Z\]\/\.test\(t\) && t\.length > 40/.test(src),
+  '第四条保险识别「首行被邻栏遮挡、只剩后半句」的条目')
+
+/**
+ * 改用正向证据判完整：年份 + 页码/DOI 都见过。
+ * 这比猜下一条的边界可靠 —— 不需要处理续行以大写开头、
+ * 双栏行序交错、首行被遮挡这些反例。
+ */
+check('用「年份 + 页码/DOI」正向判条目完整',
+  /const REF_YEAR_TOKEN =/.test(src) &&
+    /const REF_TAIL_TOKEN =/.test(src) &&
+    /if \(seenYear && seenTail && pickedLines >= 2\)/.test(src) &&
+    /stopReason = 'complete'/.test(src),
+  '猜边界会不断遇到反例，正向证据不会')
+
+check('跨栏即停（stopReason=column）',
+  /if \(!sameCol\) \{ stopReason = 'column'; break \}/.test(src),
+  '双栏论文的栏边界是硬的')
+
+/**
+ * 聚行时同一基线要按 x 大间隙再拆一次 —— 否则双栏的两行会被拼成
+ * 一行（实测 `x0=49..546`），参考文献条目因此被右栏文字割裂。
+ */
+check('聚行按 x 大间隙拆栏（否则条目被邻栏文字割裂）',
+  /if \(gap > 100\) \{ segments\.push\(seg\); seg = \[\] \}/.test(src),
+  '实测 page14 曾把左右栏拼成 x0=49..546 的一行')
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
 
 /**
