@@ -5231,93 +5231,78 @@ const placeBox = (el, l, t, wd, ht) => {
              */
 
             /**
-             * **纵向定位：上方优先，放不下翻到下方，并保证不越过视口。**
+             * **决定浮窗放上方还是下方，并按该侧的可用空间给出高度与 top。**
              *
-             * 抽成函数是因为它要跑两次：
-             *   · 首次定位用**预估高度**（方案 B：首帧就摆对，不闪）；
-             *   · 位图真正插入后再用**实际高度**复核一次（方案 A：兜住
-             *     预估与实际不符的情况）。
+             * 这个函数把「放哪边」和「多高」合成**同一次决策**，这是修
+             * 「浮窗盖住超链接」的关键。
              *
-             * 横向不在这里算 —— 用户要求横向固定对齐页面，
-             * 二次定位只动 top，避免左右跳。
+             * 之前两者是分开算的，规则相互矛盾：
+             *   · `computeTipTop` 优先放**上方**（上方够就放上面）
+             *   · `computeTipMaxH` 却按 `Math.max(上方空间, 下方空间)` 取高度
+             * 于是「下方空间更大」时，高度按下方算出来（例如 420px），
+             * 位置却按上方摆 —— 浮窗从上往下铺 420px，底边必然压过链接。
+             * 用户截图里正是这个现象：浮窗很大，下缘盖住了 `Figure 5`。
              *
-             * @param {HTMLElement} anchor 链接元素
-             * @param {number} h 用于判断空间的浮窗高度
-             * @returns {number} 计算出的 top（px）
+             * 现在一次算清：
+             *   1. 上方放得下（`above >= 所需高度` 或上方空间 >= 下方）就放上方
+             *   2. 否则放下方
+             *   3. 高度上限 = 该侧全部可用空间（上方留 gap 到视口顶，
+             *      下方留 gap 到视口底），再夹上下限
+             * 这样 top 与高度必然自洽 —— 浮窗底边不会越过链接的上沿。
+             *
+             * 用户给的模型就是这样：取链接矩形 (x1,y1,x2,y2)，
+             * 放上方则浮窗**底边 = y1 - gap**，放下方则**顶边 = y2 + gap**。
+             *
+             * @param {HTMLElement|null} anchor 链接元素
+             * @param {number} desiredH 期望高度（位图用上限，文字用实际高度）
+             * @returns {{top: number, height: number}}
              */
-            const computeTipTop = (anchor, h) => {
+            const computeTipPlacement = (anchor, desiredH) => {
               const gap = 20
               const viewportH = window.innerHeight
-              let top
-              if (anchor) {
-                const r = anchor.getBoundingClientRect()
-                /**
-                 * 先试上方；上方空间不够（连 8px 内边距都放不下）就翻到下方。
-                 * 判据必须用**传进来的 h**（预估或实际），不能用占位高度。
-                 */
-                top = r.top - h - gap
-                if (top < 8) {
-                  top = r.bottom + gap
-                  /**
-                   * 翻到下方后要再校验一次：下方也放不下时，
-                   * 把浮窗往上顶到视口内，同时保证**不盖住链接所在行**
-                   * —— 优先贴底，因为链接在视口偏下时上方通常是空的。
-                   */
-                  if (top + h > viewportH - 8) {
-                    const clamped = Math.max(8, viewportH - h - 8)
-                    // 若贴底会盖住链接，就改为贴顶（链接在页面偏上时）
-                    if (clamped + h > r.top && clamped < r.bottom) {
-                      top = Math.max(8, Math.min(r.top - h - gap, viewportH - h - 8))
-                      if (top < 8) top = 8
-                    } else {
-                      top = clamped
-                    }
-                  }
-                } else if (top + h > viewportH - 8) {
-                  /**
-                   * 上方放得下但整体超出视口底部（浮窗比视口还高）：
-                   * 贴顶显示，至少保证顶部内容可见。
-                   */
-                  top = Math.max(8, viewportH - h - 8)
-                  if (top < 8) top = 8
-                }
-              } else {
-                top = 56
+              const MIN_H = 120
+              const hardCap = Math.min(viewportH * 0.46, 420)
+              if (!anchor) {
+                const height = Math.min(desiredH || hardCap, hardCap)
+                return { top: 56, height }
               }
-              // 最终夹进视口
-              top = Math.max(8, Math.min(top, Math.max(8, viewportH - h - 8)))
-              return top
-            }
-            /**
-             * **按可用空间算浮窗高度上限。**
-             *
-             * 这是「浮窗盖住超链接」的第二层根因，比第一层更根本。
-             *
-             * 第一层修的是「用占位高度而非最终高度定位」——那之后位置算对了，
-             * 但**高度上限是固定值** `min(46vh,420px)`。链接若在视口偏下处，
-             * 上方只剩约 300px，而浮窗要 420px，无论怎么摆都必然有一段
-             * 压到链接所在行 —— 用户截图里正是这种情况：链接在图注上方，
-             * 浮窗下方那一截盖住了它。
-             *
-             * 所以上限要跟着**可用空间**走：
-             *     可用高度 = max(上方空间, 下方空间) - 间隙 - 边距
-             * 收回来的高度交给 `.zr-tip-shot` 的滚动条，内容依然都能看到
-             * （用户要的「可以自由滑动」正是为此），只是不用一次铺满。
-             *
-             * 下限 120px：再小就看不清内容了，那种情况宁可盖一点点。
-             */
-            const computeTipMaxH = (anchor) => {
-              const gap = 20
-              const viewportH = window.innerHeight
-              const cap = Math.min(viewportH * 0.46, 420)
-              if (!anchor) return cap
+              let r
               try {
-                const r = anchor.getBoundingClientRect()
-                const above = r.top - gap - 8
-                const below = viewportH - r.bottom - gap - 8
-                const room = Math.max(above, below)
-                return Math.max(120, Math.min(room, cap))
-              } catch { return cap }
+                r = anchor.getBoundingClientRect()
+              } catch {
+                const height = Math.min(desiredH || hardCap, hardCap)
+                return { top: 56, height }
+              }
+              /**
+               * 两侧各自能容纳的高度。
+               * 上方：从视口顶到链接上沿，留出 gap；
+               * 下方：从链接下沿到视口底，留出 gap。
+               */
+              const roomAbove = Math.max(0, r.top - gap - 8)
+              const roomBelow = Math.max(0, viewportH - r.bottom - gap - 8)
+              const want = Math.min(desiredH || hardCap, hardCap)
+
+              /**
+               * 选边：优先上方。上方装得下想要的高度就放上方；
+               * 装不下但上方空间仍比下方大，也放上方（收窄高度即可）；
+               * 否则放下方。
+               */
+              const preferAbove = roomAbove >= want || roomAbove >= roomBelow
+              if (preferAbove) {
+                const height = Math.max(MIN_H, Math.min(want, roomAbove))
+                // 底边正好贴在链接上沿上方 gap 处
+                let top = r.top - gap - height
+                top = Math.max(8, top)
+                return { top, height }
+              }
+              const height = Math.max(MIN_H, Math.min(want, roomBelow))
+              // 顶边正好在链接下沿下方 gap 处
+              let top = r.bottom + gap
+              // 越界时上顶，但不越过链接上沿
+              const maxTop = viewportH - height - 8
+              if (top > maxTop) top = Math.max(r.bottom + gap, maxTop)
+              top = Math.min(top, maxTop)
+              return { top: Math.max(8, top), height }
             }
             const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false, opts = null) => {
               const tip = ensureTip()
@@ -5360,9 +5345,14 @@ const placeBox = (el, l, t, wd, ht) => {
                  */
                 tip.style.visibility = ''
                 if (anchor) {
+                  /**
+                   * 位图到位后用**实际量到的高度**重新决定放哪边、高度多少。
+                   * 传入的 desiredH 是实际内容高度，函数内部会再按该侧可用空间收窄。
+                   * 若内容已被 maxHeight 限制，offsetHeight 即等于限制值，不会反复变化。
+                   */
                   const actualH = tip.offsetHeight || 40
-                  const top2 = computeTipTop(anchor, actualH)
-                  tip.style.top = `${Math.round(top2)}px`
+                  const placed = computeTipPlacement(anchor, actualH)
+                  tip.style.top = `${Math.round(placed.top)}px`
                 }
                 cancelHideTip()
                 if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
@@ -5396,23 +5386,22 @@ const placeBox = (el, l, t, wd, ht) => {
                * 直接用实际高度即可。
                */
               /**
-               * **先把高度上限压到可用空间内，再按它算预估值。**
+               * **高度与位置必须由同一次决策给出**（见 computeTipPlacement
+               * 的说明：分开算会因为「取较大一侧」与「优先上方」互相矛盾
+               * 而导致浮窗压住链接）。
                *
-               * 顺序不能反：若先按固定上限 `min(46vh,420px)` 预估、再收高度，
-               * `tipH` 就会比实际大，`top` 按大值算出来会离链接太远；
-               * 反之若只收高度不改预估，浮窗又会长出去盖住链接。
-               *
-               * 位图浮窗的高度上限来自 `computeTipMaxH`（跟着可用空间走），
-               * 文字浮窗内容已排好，用实际高度即可。
+               * 位图浮窗：期望高度取固定天花板，实际由该侧可用空间收窄；
+               * 文字浮窗：内容已排好，用实际高度，同样会被收窄。
                */
-              const bitmapMaxH = opts?.bitmap ? computeTipMaxH(anchor) : 0
+              const desiredH = opts?.bitmap
+                ? Math.min(window.innerHeight * 0.46, 420)
+                : (tip.offsetHeight || 40)
+              const placement = computeTipPlacement(anchor, desiredH)
               if (opts?.bitmap) {
                 const shotNow = tip.querySelector('.zr-tip-shot')
-                if (shotNow) shotNow.style.maxHeight = `${Math.round(bitmapMaxH)}px`
+                if (shotNow) shotNow.style.maxHeight = `${Math.round(placement.height)}px`
               }
-              const tipH = opts?.bitmap
-                ? bitmapMaxH
-                : (tip.offsetHeight || 40)
+              const tipH = placement.height
               /**
                * 页面矩形：优先用锚点所在页，拿不到再退到可见页。
                * 页面元素是定位的参照物，浮窗宽度也按它的宽度算 ——
@@ -5470,11 +5459,14 @@ const placeBox = (el, l, t, wd, ht) => {
                 tip.style.width = opts?.bitmap ? `${Math.round(fallbackW)}px` : ''
               }
               /**
-               * **纵向交给 computeTipTop**：它负责「上方优先、放不下翻下方、
-               * 都放不下时夹进视口且不盖住链接」，并且全程用同一个 h
-               * （首次是预估高度，位图到位后是实际高度）。
+               * **纵向直接用 placement.top。**
+               *
+               * 不能再用 computeTipTop 重算：那个版本的判据是「上方够不够
+               * 放 h」，而 h 已被 placement 按该侧可用空间收窄过，
+               * 重算会绕开「底边贴链接上沿」这个约束。
+               * placement 已经把放哪边、多高、top 一次算定。
                */
-              top = computeTipTop(anchor, tipH)
+              top = placement.top
               tip.style.top = `${Math.round(top)}px`
               tip.setAttribute('data-on', '1')
               /**
@@ -9768,3 +9760,4 @@ const placeBox = (el, l, t, wd, ht) => {
     }
   },
 })
+

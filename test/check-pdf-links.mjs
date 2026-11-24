@@ -235,15 +235,21 @@ check('提示挂在 body 上（脱离被裁剪的容器）',
  * 纵向翻转现在集中在 computeTipTop 里：上方优先，放不下翻到下方。
  * 抽成函数是因为要跑两次（首帧按预估高度、位图到位后按实际高度）。
  */
-check('提示有上下翻转（上方放不下时放到下方）',
-  /const computeTipTop = \(anchor, h\) =>/.test(src) &&
-    /top = r\.top - h - gap/.test(src) &&
-    /if \(top < 8\) \{[\s\S]{0,120}?top = r\.bottom \+ gap/.test(src),
-  '翻转逻辑要在，且两个方向用同一个 gap')
+check('放上方还是下方由同一次决策给出（top 与高度自洽）',
+  /const computeTipPlacement = \(anchor, desiredH\) =>/.test(src) &&
+    /roomAbove/.test(src) && /roomBelow/.test(src) &&
+    /preferAbove/.test(src),
+  '分开算会因「取较大一侧」与「优先上方」矛盾而压住链接')
 
-check('翻转后按同一个 h 再校验一次（下方也放不下时）',
-  /top \+ h > viewportH - 8/.test(src),
-  '只判上方空间的话，翻到下方仍可能盖住链接或超出视口')
+check('放上方时底边贴链接上沿、放下方时顶边贴下沿（都留 gap）',
+  /let top = r\.top - gap - height/.test(src) &&
+    /let top = r\.bottom \+ gap/.test(src),
+  '用户要求：上方时底边在 y1-gap，下方时顶边在 y2+gap')
+
+check('高度按所选那一侧的可用空间收窄，并保留上下限',
+  /Math\.min\(want, roomAbove\)/.test(src) && /Math\.min\(want, roomBelow\)/.test(src) &&
+    /const MIN_H = 120/.test(src) && /Math\.min\(viewportH \* 0\.46, 420\)/.test(src),
+  '固定上限在链接偏下时放不下，必然压住链接所在行')
 
 check('浮窗与链接留有间隙（不紧贴）',
   /const gap = 20/.test(src),
@@ -294,16 +300,16 @@ check('同一条链接内部冒泡不重复计算',
 check('getBoundingClientRect 只在定位时各读一次（不反复读）',
   (() => {
     /**
-     * 定位被拆成两块：showLinkTip（横向 + 页面矩形）与
-     * computeTipTop（纵向 + 链接矩形）。合计读取次数要有限，
+     * 定位拆成两块：showLinkTip（横向 + 页面矩形）与
+     * computeTipPlacement（纵向 + 链接矩形）。合计读取次数要有限，
      * 关键是**不随 mousemove 反复读**。
      */
-    const at = src.indexOf('const computeTipTop = (anchor, h)')
+    const at = src.indexOf('const computeTipPlacement = (anchor, desiredH)')
     const at2 = src.indexOf('const showLinkTip = (lines, anchor')
     if (at < 0 || at2 < 0) return false
     const end2 = src.indexOf("addEventListener('click', onPdfLinkClick", at2)
     const segs = [
-      src.slice(at, at + 2200),
+      src.slice(at, at + 3000),
       src.slice(at2, end2 > 0 ? end2 : at2 + 9000),
     ].join('\n')
     const hits = (segs.match(/getBoundingClientRect\(\)/g) || []).length
@@ -785,7 +791,7 @@ check('有 wasOn 分支处理「已显示时补内容」',
  * 盖住链接。现在 wasOn 里按实际高度重算 top（横向仍固定），
  * 这是方案 C 的 A 部分。
  */
-check('wasOn 分支按实际高度重算 top（修盖住链接）',
+check('wasOn 分支按实际高度重新决定位置（修盖住链接）',
   (() => {
     const at = src.indexOf('const showLinkTip = (lines, anchor')
     if (at < 0) return false
@@ -794,7 +800,7 @@ check('wasOn 分支按实际高度重算 top（修盖住链接）',
     if (wasOn < 0) return false
     const branch = seg.slice(wasOn, wasOn + 1600)
     return /const actualH = tip\.offsetHeight/.test(branch) &&
-      /computeTipTop\(anchor, actualH\)/.test(branch) &&
+      /computeTipPlacement\(anchor, actualH\)/.test(branch) &&
       /tip\.style\.top = /.test(branch)
   })(),
   '只 return 不重算，位图变高后底部会盖住链接')
@@ -910,20 +916,20 @@ check('文字预览仍保留页码（那条没有图，页码是唯一位置线�
  * 根因：tipH 用的是位图插入前的占位高度（min-height:96px），
  * 等真位图（几百 px）进来，浮窗向下长出去，底边盖住链接。
  */
-check('位图浮窗高度上限按可用空间算（不写死，否则链接在视口偏下时必被盖住）',
-  /const computeTipMaxH = \(anchor\) =>/.test(src) &&
-    /const bitmapMaxH = opts\?\.bitmap \? computeTipMaxH\(anchor\) : 0/.test(src) &&
-    /shotNow\.style\.maxHeight/.test(src),
-  '固定上限 min(46vh,420px) 在链接偏下时放不下，必然压住链接所在行')
+check('位图浮窗高度上限按可用空间算（不写死，否则链接偏下时必被盖住）',
+  /const computeTipPlacement = \(anchor, desiredH\) =>/.test(src) &&
+    /shotNow\.style\.maxHeight/.test(src) &&
+    /placement\.height/.test(src),
+  '固定上限在链接偏下时放不下，必然压住链接所在行')
 
 check('高度上限保留 46vh/420 的天花板与 120px 下限',
-  /Math\.min\(viewportH \* 0\.46, 420\)/.test(src) && /Math\.max\(120,/.test(src),
+  /Math\.min\(viewportH \* 0\.46, 420\)/.test(src) && /const MIN_H = 120/.test(src),
   '要和 .zr-tip-shot 的 max-height 语义一致，且不能小到看不清内容')
 
-check('纵向定位抽成 computeTipTop（首帧与复核共用）',
-  /const computeTipTop = \(anchor, h\) =>/.test(src) &&
-    /top = computeTipTop\(anchor, tipH\)/.test(src),
-  '两处各写一遍容易不一致，抽出来才保证首帧和复核用同一套判据')
+check('放哪边、多高、top 由单个函数一次给出（首帧与复核共用）',
+  /const computeTipPlacement = \(anchor, desiredH\) =>/.test(src) &&
+    /top = placement\.top/.test(src),
+  '两处各写一遍容易不一致；分开算还会因规则矛盾压住链接')
 
 
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
@@ -1010,3 +1016,4 @@ check('不处理 zotero:// （交给全局拦截器）',
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)
+
