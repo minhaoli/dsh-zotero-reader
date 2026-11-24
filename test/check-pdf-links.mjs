@@ -186,9 +186,9 @@ check('#page=N 不弹浮窗（只有图/公式才弹）',
  * 而不是只显示名字。
  */
 check('具名目标预览以位图为主体（canvas 渲染，不再是纯文字）',
-  /const renderDestBitmap = async/.test(src) &&
+  /const renderDestBitmap = async \(dest, pageNo, opts/.test(src) &&
     /page\.render\(\{ canvasContext: ctx/.test(src) &&
-    /canvas = await renderDestBitmap\(dest, pageNo\)/.test(src),
+    /renderDestBitmap\(dest, pageNo, \{/.test(src),
   'figure/公式在文本层里只剩碎片，必须把目标区域画出来')
 check('取不到位图时退回文字预览（不是空窗）',
   /canvas \? null : await extractDestPreview/.test(src) &&
@@ -614,7 +614,7 @@ check('链接相关的提示/闪烁都不用 innerHTML',
  * 这条断言盯的就是这个约束：渲染入口接收 pageNo，且没有邻页预取。
  */
 check('位图渲染接收 pageNo（只渲染目标那一页）',
-  /const renderPageBitmap = async \(pdfDocument, pageNo\) =>/.test(src) &&
+  /const renderPageBitmap = async \(pdfDocument, pageNo, targetCssWidth\) =>/.test(src) &&
     /pdfDocument\.getPage\(pageNo\)/.test(src),
   '整篇预渲染会拖垮打开速度，用户明确只要目标页')
 
@@ -625,13 +625,13 @@ check('没有邻页预取 / 整篇渲染',
 
 check('页位图按 (pageNo) 缓存，重复悬停不重渲染',
   /const pageBitmapCache = new Map\(\)/.test(src) &&
-    /const cached = pageBitmapCache\.get\(pageNo\)/.test(src) &&
-    /pageBitmapCache\.set\(pageNo, result\)/.test(src),
+    /const cached = pageBitmapCache\.get\(cacheKey\)/.test(src) &&
+    /pageBitmapCache\.set\(cacheKey, result\)/.test(src),
   '同一页的多个链接应复用同一张位图')
 
 check('同页并发渲染去重（pdf.js 禁止同 canvas 双 render）',
   /const pageBitmapPending = new Map\(\)/.test(src) &&
-    /const pending = pageBitmapPending\.get\(pageNo\)/.test(src),
+    /const pending = pageBitmapPending\.get\(cacheKey\)/.test(src),
   '鼠标扫过同页多个链接时，第二次会赶在第一次完成前进来，直接撞 render 会抛错')
 
 check('换文档时清空页位图缓存',
@@ -690,7 +690,7 @@ check('文字预览不调用 renderDestBitmap',
 check('类型不合的目标不触发位图渲染（位图分支在其后）',
   (() => {
     const guard = src.indexOf('if (!isPreviewableDest(decName, dest)) {')
-    const render = src.indexOf('await renderDestBitmap(dest, pageNo)', guard)
+    const render = src.indexOf('await renderDestBitmap(dest, pageNo, {', guard)
     return guard > 0 && render > guard
   })(),
   '为一页白渲染 bitmap 要几十到几百毫秒，必须在渲染前就分流')
@@ -875,11 +875,9 @@ check('位图槽位有加载占位（避免先塌后跳）',
  * 双栏论文里 0.5×页宽比一整栏还宽：右栏引用会被视口 clamp 压成同一个 x。
  * 现在按测出的栏宽算，拿不到才退回 0.28×页宽。
  */
-check('文字预览宽度按栏宽（不是 0.5×页宽）',
-  /const measureColumnWidth = \(pageEl\) =>/.test(src) &&
-    /const colW = measureColumnWidth\(pageEl\)/.test(src) &&
-    /targetW = colW \|\| baseW \* 0\.28/.test(src),
-  '0.5×页宽比一整栏还宽，文字会被拉成一行长条')
+check('文字预览宽度为 3/7 页宽',
+  /targetW = baseW \* \(3 \/ 7\)/.test(src),
+  '用户改主意：不用栏宽，改成 3/7 页面宽')
 
 check('文字预览以链接中心为中心（不是左边界对齐）',
   /centerX = \(ar\.left \+ ar\.right\) \/ 2/.test(src) &&
@@ -1023,6 +1021,75 @@ check('位图高度按整屏可用高度给（不被链接上沿截断）',
   /const height = Math\.max\(MIN_H, Math\.min\(want, viewportH - 16\)\)/.test(src),
   '被 r.top 截断会让 figure 在高链接位置上只能拿到半屏')
 
+/* ---------- 4m. 四条新需求（3/7 宽、单滚动面、canvas 跟随浮窗、诊断） ---------- */
+
+check('文字浮窗宽度 = 3/7 页宽',
+  /targetW = baseW \* \(3 \/ 7\)/.test(src) &&
+    !/measureColumnWidth/.test(src.replace(/\/\*[\s\S]*?\*\//g, '')),
+  '用户改主意：不是栏宽，是 3/7 页面宽')
+
+check('文字浮窗仍以链接中心为中心（x 塌缩的修法不能退回去）',
+  /centerX = \(ar\.left \+ ar\.right\) \/ 2/.test(src),
+  '退回左边界对齐会让右栏引用又被 clamp 压成同一个 x')
+
+/**
+ * 两个滚动条的根因：外层 .zr-link-tip 与内层 .zr-tip-shot 都设了
+ * overflow:auto。滚轮被 onTipWheel 转给内层，外层那条只能鼠标拖 ——
+ * 正是用户报的「怎么有两个进度条，而且滑动只能互动一部分」。
+ */
+check('外层浮窗不再是滚动容器（只有一个滚动面）',
+  /tip\.style\.overflow = 'hidden'/.test(src) &&
+    !/tip\.style\.overflow = 'auto'/.test(src),
+  '两层都 auto 就会出现两条并排滚动条')
+
+check('位图槽仍是唯一滚动面',
+  /\.zr-link-tip \.zr-tip-shot\{display:block;overflow:auto/.test(src))
+
+/**
+ * 纯文字浮窗没有 .zr-tip-shot，旧代码无条件 preventDefault 会把滚轮吞掉，
+ * 用户既滚不动浮窗也滚不动背后的 PDF。
+ */
+check('滚轮只在真能滚时才拦截（不误吞）',
+  (() => {
+    const at = src.indexOf('const onTipWheel = (event) =>')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 1400)
+    return /if \(scrolled\) \{/.test(seg) &&
+      /event\.preventDefault\(\)/.test(seg) &&
+      !/^\s*event\.preventDefault\(\)\s*$/m.test(seg.split('if (scrolled)')[0])
+  })(),
+  '无条件 preventDefault 会让纯文字浮窗上滚不动 PDF')
+
+check('canvas 显示尺寸受可用宽与可用高双向约束',
+  /let cssW = Math\.min\(availW, availH \* aspect\)/.test(src) &&
+    /out\.style\.width = `\$\{Math\.round\(cssW\)\}px`/.test(src),
+  '只按宽度算会让图撑出浮窗、再被父层裁掉')
+
+check('FitR 用区域自身宽高比（不是整页比例）',
+  /const aspect = region\.w \/ Math\.max\(1e-6, region\.h\)/.test(src),
+  'FitR 可能只有半页，用整页比例会算错')
+
+check('不再写死 targetCssWidth = 520',
+  !/const targetCssWidth = 520/.test(src) &&
+    /renderPageBitmap\(pdfDocument, pageNo, opts\?\.targetCssWidth\)/.test(src),
+  '写死 520 会让浮窗再宽图片也不变大')
+
+check('位图缓存 key 带目标宽度且设了容量上限',
+  /const cacheKey = `\$\{pageNo\}@\$\{wantedCssW\}`/.test(src) &&
+    /pageBitmapCacheMax/.test(src) &&
+    /while \(pageBitmapCache\.size > pageBitmapCacheMax\)/.test(src),
+  'key 只有 pageNo 会命中旧宽度位图；不设上限会无限涨')
+
+check('reportTipPlace 的 desiredH 用真实参数（不是 placed.height）',
+  /desiredH: typeof desiredHValue === 'number'/.test(src) &&
+    !/desiredH: placed && placed\.height/.test(src),
+  'placed 只有 {top,height}，原先那行恒等于 chosenH')
+
+check('canvas 实际尺寸有诊断（tip:bitmap）',
+  /event: 'tip:bitmap'/.test(src) &&
+    /canvasCssW:/.test(src) && /shotClientH:/.test(src) &&
+    /shotScrollH:/.test(src) && /regionW:/.test(src),
+  '分不清「图没放大」还是「被容器截断」')
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
 
 /**

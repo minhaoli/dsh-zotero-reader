@@ -1438,7 +1438,17 @@ window.__ModuleLoader__.load({
       .zr-link-tip .zr-tip-shot{display:block;overflow:auto;
         max-height:min(80vh,780px);background:#fff;border-radius:3px;
         overscroll-behavior:contain}
-      .zr-link-tip .zr-tip-shot canvas{display:block;max-width:100%;height:auto}
+      /*
+       * canvas 的显示尺寸由 JS 显式写在 style 上（双向约束算出来的
+       * cssW × cssH），这里不能再写 max-width:100% 配 height:auto ——
+       * height:auto 会按宽度比例反推高度、把 JS 设的高度覆盖掉，
+       * 于是「可用高不够时让宽度妥协」这条规则永远不生效，
+       * 图会被撑到超出浮窗高度然后再被父层裁掉。
+       *
+       * 保留 max-width:none 让 canvas 按自己的尺寸显示；
+       * 溢出由 .zr-tip-shot 的 overflow:auto 滚动解决。
+       */
+      .zr-link-tip .zr-tip-shot canvas{display:block;max-width:none;height:auto}
       /* 位图加载中的占位，避免浮窗先塌成一条线再突然撑开 */
       .zr-link-tip .zr-tip-shot[data-loading="1"]{min-height:96px;
         background:var(--dsh-bg-elevated,#2b2b2b)}
@@ -4268,6 +4278,14 @@ window.__ModuleLoader__.load({
              */
             const pageBitmapCache = new Map()
             /**
+             * 缓存容量上限（条）。
+             *
+             * key 现在带目标宽度，同一页在不同浮窗宽度下会存多份，
+             * 不设上限就会无限涨（每份是一整页 canvas，几 MB 量级）。
+             * 超限按插入顺序淘汰最旧的（Map 保持插入序）。
+             */
+            const pageBitmapCacheMax = 24
+            /**
              * 正在渲染的页：pageNo → Promise。
              *
              * pdf.js 明确禁止同一个 canvas 同时跑两次 render —— 会抛
@@ -4283,11 +4301,25 @@ window.__ModuleLoader__.load({
              * 渲染某页到离屏 canvas，返回 { canvas, scale, widthPt, heightPt }。
              * scale 取 devicePixelRatio 但夹到 2 以内 —— 再高只是白烧内存。
              */
-            const renderPageBitmap = async (pdfDocument, pageNo) => {
-              const cached = pageBitmapCache.get(pageNo)
+            const renderPageBitmap = async (pdfDocument, pageNo, targetCssWidth) => {
+              /**
+               * **缓存 key 必须带上目标显示宽度。**
+               *
+               * 原来 key 只有 pageNo：浮窗宽度变了之后仍然命中旧位图，
+               * 于是「改了浮窗宽度但图片没变大」。canvas 的像素尺寸是按
+               * 目标宽度算的，宽度不同就是不同的位图，必须分开缓存。
+               *
+               * 取整后再进 key，避免 630.0001 / 630.0002 这种抖动打出多份。
+               */
+              const wantedCssW = Math.max(
+                120,
+                Math.round(Number(targetCssWidth) > 0 ? Number(targetCssWidth) : 520),
+              )
+              const cacheKey = `${pageNo}@${wantedCssW}`
+              const cached = pageBitmapCache.get(cacheKey)
               if (cached) return cached
-              // 同一页的并发请求共用一次渲染，别让两个 render() 撞在同一个 canvas 上
-              const pending = pageBitmapPending.get(pageNo)
+              // 同一页同一宽度的并发请求共用一次渲染，别让两个 render() 撞在同一个 canvas 上
+              const pending = pageBitmapPending.get(cacheKey)
               if (pending) return pending
               const job = (async () => {
                 const page = await pdfDocument.getPage(pageNo)
@@ -4296,11 +4328,13 @@ window.__ModuleLoader__.load({
                   ? Math.min(2, Math.max(1, window.devicePixelRatio))
                   : 1
                 /**
-                 * 目标：显示宽度约等于浮窗宽度，再乘 dpr 保证清晰。
+                 * 目标：**显示宽度就等于调用方给的浮窗宽度**（乘 dpr 保证清晰），
+                 * 不再写死 520 —— 写死会让位图永远只有固定宽度，
+                 * 浮窗再宽图片也不变大（用户报的「高度还是不够」的根因）。
+                 *
                  * 夹住上限，避免 A0 大图或超大页面把 canvas 撑爆。
                  */
-                const targetCssWidth = 520
-                let scale = (targetCssWidth * dpr) / base.width
+                let scale = (wantedCssW * dpr) / base.width
                 scale = Math.max(0.3, Math.min(scale, bitmapMaxWidthPx / base.width, 4))
                 const viewport = page.getViewport({ scale })
                 const canvas = document.createElement('canvas')
@@ -4313,15 +4347,25 @@ window.__ModuleLoader__.load({
                 ctx.fillRect(0, 0, canvas.width, canvas.height)
                 const task = page.render({ canvasContext: ctx, viewport, canvas })
                 await task.promise
-                const result = { canvas, scale, widthPt: base.width, heightPt: base.height }
-                pageBitmapCache.set(pageNo, result)
+                /**
+                 * `cssWidth` 是**这次渲染对应的显示宽度**（CSS px），
+                 * 由调用方用它换算裁切区、以及写 canvas 的 style 尺寸。
+                 */
+                const result = { canvas, scale, widthPt: base.width, heightPt: base.height, cssWidth: wantedCssW }
+                pageBitmapCache.set(cacheKey, result)
+                // 超限淘汰最旧的一条（Map 保持插入序）
+                while (pageBitmapCache.size > pageBitmapCacheMax) {
+                  const oldest = pageBitmapCache.keys().next()
+                  if (oldest.done) break
+                  pageBitmapCache.delete(oldest.value)
+                }
                 return result
               })()
-              pageBitmapPending.set(pageNo, job)
+              pageBitmapPending.set(cacheKey, job)
               try {
                 return await job
               } finally {
-                pageBitmapPending.delete(pageNo)
+                pageBitmapPending.delete(cacheKey)
               }
             }
 
@@ -4464,13 +4508,23 @@ window.__ModuleLoader__.load({
              * 生成一个已裁好的 canvas 元素（直接能塞进浮窗）。
              * @returns {Promise<HTMLCanvasElement|null>}
              */
-            const renderDestBitmap = async (dest, pageNo) => {
+            /**
+             * 生成一个已裁好的 canvas 元素（直接能塞进浮窗）。
+             *
+             * @param {Array} dest 命名目标数组
+             * @param {number} pageNo 目标页
+             * @param {{targetCssWidth?:number, availH?:number}} [opts]
+             *   targetCssWidth 浮窗位图区可用宽度；availH 可用高度。
+             *   给了就按它渲染与显示，没给退回 520（向后兼容）。
+             * @returns {Promise<HTMLCanvasElement|null>}
+             */
+            const renderDestBitmap = async (dest, pageNo, opts = null) => {
               try {
                 const pdfDocument = pdfRef.current?.doc
                 if (!pdfDocument) return null
-                const bitmap = await renderPageBitmap(pdfDocument, pageNo)
+                const bitmap = await renderPageBitmap(pdfDocument, pageNo, opts?.targetCssWidth)
                 if (!bitmap) return null
-                const { canvas, scale, widthPt, heightPt } = bitmap
+                const { canvas, scale, widthPt, heightPt, cssWidth } = bitmap
                 const region = destRegionPts(dest, widthPt, heightPt)
                 // PDF 点 → 位图像素（横向不需要翻转，纵向见下）
                 const sx = Math.max(0, Math.floor(region.x * scale))
@@ -4495,10 +4549,43 @@ window.__ModuleLoader__.load({
                 ctx.fillRect(0, 0, out.width, out.height)
                 ctx.drawImage(canvas, sx, syFromTop, sw, copyH, 0, 0, sw, copyH)
                 /**
-                 * 显示尺寸按 CSS 像素给（不是位图像素），否则 dpr=2 时会显示成两倍大。
+                 * **显示尺寸：显式按「目标宽 + 双向约束」写，不用 out.width/scale。**
+                 *
+                 * 旧写法 `out.width / scale` 数学上恒等于 `region.w`（PDF 点），
+                 * 与 dpr、与浮窗宽度都无关 —— 实测 A4 整页无论 dpr=1 还是 2，
+                 * CSS 尺寸永远是 595×843。于是浮窗宽 630 时横向空 35px，
+                 * 而高度 843 又超过 780 的预算。
+                 *
+                 * 现在按用户给出的规则做双向约束：
+                 *   aspect = region.w / region.h（**用区域自身的宽高比**，
+                 *   不是整页比例 —— FitR 矩形可能只有半页）
+                 *   显示宽 = min(可用宽, 可用高 × aspect)
+                 * 这样宽高都不会超出各自的预算，且保持区域原有比例。
+                 * 位图槽仍 overflow:auto，超出部分可滚动查看。
                  */
-                out.style.width = `${Math.round(out.width / scale)}px`
-                out.style.height = `${Math.round(out.height / scale)}px`
+                const aspect = region.w / Math.max(1e-6, region.h)
+                const availW = typeof opts?.targetCssWidth === 'number' && opts.targetCssWidth > 0
+                  ? opts.targetCssWidth
+                  : cssWidth
+                const availH = typeof opts?.availH === 'number' && opts.availH > 0
+                  ? opts.availH
+                  : Infinity
+                let cssW = Math.min(availW, availH * aspect)
+                cssW = Math.max(40, cssW)
+                const cssH = cssW / aspect
+                out.style.width = `${Math.round(cssW)}px`
+                out.style.height = `${Math.round(cssH)}px`
+                /**
+                 * 把本次实际尺寸挂到元素上，供诊断读取
+                 * （判断「被截断」还是「图本身没放大」全靠它）。
+                 */
+                try {
+                  out.dataset.cssW = String(Math.round(cssW))
+                  out.dataset.cssH = String(Math.round(cssH))
+                  out.dataset.regionW = String(Math.round(region.w))
+                  out.dataset.regionH = String(Math.round(region.h))
+                  out.dataset.targetCssW = String(Math.round(availW))
+                } catch { /* ignore */ }
                 return out
               } catch { return null }
             }
@@ -5045,32 +5132,36 @@ const placeBox = (el, l, t, wd, ht) => {
 
             let linkTip = null
             /**
-             * 浮窗内的滚轮处理：先滚浮窗自己，滚到头也不外溢。
+             * 浮窗内的滚轮处理：滚 `.zr-tip-shot`（唯一可滚容器）。
              *
-             * 只有 `.zr-tip-shot` 真正可滚（overflow:auto），
-             * 所以把 wheel 转给它；到边界时 preventDefault 兜住，
-             * 避免滚动链继续往 PDF 那个滚动容器传。
+             * **只在真的能滚时才阻止默认行为。**
+             *
+             * 原来是无条件 `preventDefault()`：纯文字浮窗根本没有
+             * `.zr-tip-shot`（或内容没溢出），滚轮照样被吞掉，用户在浮窗上
+             * 滚滚不动、背后的 PDF 也滚不动 —— 那就是「滚轮失效」。
+             * 所以先把可滚性算出来，不能滚就直接放行，让事件照常传给 PDF。
              */
             const onTipWheel = (event) => {
-              event.stopPropagation()
+              let scrolled = false
               try {
                 const shot = linkTip?.querySelector?.('.zr-tip-shot')
                 if (shot) {
                   const maxTop = shot.scrollHeight - shot.clientHeight
                   if (maxTop > 0) {
+                    scrolled = true
                     shot.scrollTop += event.deltaY
-                    // 滚到边界后不让事件继续传播（否则会滚 PDF）
                     if (shot.scrollTop <= 0 || shot.scrollTop >= maxTop) {
                       shot.scrollTop = Math.max(0, Math.min(maxTop, shot.scrollTop))
                     }
                   }
                 }
               } catch { /* ignore */ }
-              /**
-               * 无论如何都不让这一下滚轮影响 PDF：浮窗是覆盖层，
-               * 它内部的滚动不该带动背后文档。
-               */
-              event.preventDefault()
+              // 这一下确实滚动了浮窗内容：拦住冒泡与默认滚动链，避免带动 PDF
+              if (scrolled) {
+                event.stopPropagation()
+                event.preventDefault()
+              }
+              // 不能滚：完全不干预，让滚轮正常作用于背后的 PDF
             }
 
 
@@ -5378,64 +5469,6 @@ const placeBox = (el, l, t, wd, ht) => {
               return { top: Math.max(8, top), height }
             }
             /**
-             * **量出当前页的栏宽（PDF 双栏布局的单栏宽度）。**
-             *
-             * 用户原话是「参考文献的显示不要这么长，就 1/2 栏」——
-             * 栏 = column，不是 page。双栏论文里 1/2 栏 ≈ 页宽的 1/4 左右，
-             * 用 0.5×页宽会得到比一整栏还宽的卡片，右侧引用还会被视口
-             * clamp 压成同一个 x（用户报的「所有引用 x 都一样」的另一半原因）。
-             *
-             * 量法：取当前页文本层的元素，按它们的 left/right 分布找出
-             * 「左右两组」——双栏时两组的 x 区间分离，栏宽即每组的宽度。
-             * 拿不到（文本层还没画、或单栏）就返回 null，调用方退回比例估算。
-             */
-            const measureColumnWidth = (pageEl) => {
-              try {
-                if (!pageEl) return null
-                const spans = pageEl.querySelectorAll('.textLayer span')
-                if (spans.length < 8) return null
-                const pageRect = pageEl.getBoundingClientRect()
-                if (!(pageRect.width > 0)) return null
-                /**
-                 * 收集每个 span 的横向区间（相对页面），
-                 * 只取有实质宽度的，避免标点/空白干扰。
-                 */
-                const items = []
-                for (const sp of spans) {
-                  const r = sp.getBoundingClientRect()
-                  if (r.width < 4 || r.height < 2) continue
-                  items.push({ l: r.left - pageRect.left, r: r.right - pageRect.left })
-                }
-                if (items.length < 8) return null
-                const mid = pageRect.width / 2
-                /**
-                 * 按「中线左右」分两组，再看两组是否真的分离
-                 * （右侧组的起点明显大于左侧组的终点 → 是双栏）。
-                 */
-                const lefts = items.filter((v) => (v.l + v.r) / 2 < mid)
-                const rights = items.filter((v) => (v.l + v.r) / 2 >= mid)
-                if (lefts.length < 4 || rights.length < 4) return null
-                const leftMaxR = Math.max(...lefts.map((v) => v.r))
-                const rightMinL = Math.min(...rights.map((v) => v.l))
-                // 两组之间要有可见的栏间距，否则视为单栏（浮动元素会把区间撑满）
-                if (rightMinL - leftMaxR < pageRect.width * 0.02) return null
-                /**
-                 * 栏宽取两组的「典型宽度」：用 75 分位而不是最大值，
-                 * 避免跨栏的 figure / 标题把估计撑大。
-                 */
-                const percentile = (arr, p) => {
-                  const sorted = [...arr].sort((a, b) => a - b)
-                  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]
-                }
-                const lw = percentile(lefts.map((v) => v.r - v.l), 0.75)
-                const rw = percentile(rights.map((v) => v.r - v.l), 0.75)
-                const colW = Math.max(lw, rw)
-                if (!(colW > 40)) return null
-                return colW
-              } catch { return null }
-            }
-
-            /**
              * **横向定位：算出浮窗的 left 与 width 并写进 DOM。**
              *
              * 抽成函数是因为它要跑两次：首次弹出、以及**换了链接时的回流**
@@ -5477,17 +5510,20 @@ const placeBox = (el, l, t, wd, ht) => {
                 left = pageCenter - targetW / 2
               } else {
                 /**
-                 * 文字：宽度按**栏宽**算，居中于链接。
+                 * 文字：宽度 = **3/7 页面宽**，居中于链接。
                  *
-                 * 先量真实栏宽；量不到就用页宽的 0.28 作退路
-                 * （双栏论文的一栏大致在这个量级，比 0.5 明显更窄）。
+                 * 用户先说要「1/2 栏」，我按 column 理解做了栏宽测量；
+                 * 后来他澄清「这里我说错了，就是 1/2 页面大，不过我改主意了，
+                 * 改成 3/7 页面吧」。所以删掉 measureColumnWidth，
+                 * 直接按页宽比例算 —— 3/7 ≈ 0.4286，比半页略窄。
+                 *
+                 * 取不到页面矩形时退回视口宽的三分之一（量级相当），
+                 * 保证两条路径不会差出很多。
                  */
-                const pageEl = anchor?.closest?.('.page') ?? host?.querySelector?.('.page') ?? null
-                const colW = measureColumnWidth(pageEl)
                 const baseW = pageRect && pageRect.width > 0 ? pageRect.width : window.innerWidth
-                targetW = colW || baseW * 0.28
-                // 别窄到放不下一行字，也别宽到跨栏
-                targetW = Math.max(180, Math.min(targetW, window.innerWidth - 16))
+                targetW = baseW * (3 / 7)
+                // 保底不窄到放不下一行字，同时夹进视口
+                targetW = Math.max(160, Math.min(targetW, window.innerWidth - 16))
                 /**
                  * 以**链接中心**为中心，而不是左边界对齐。
                  * 这样相邻引用（x 各不相同）会弹在各自的位置，
@@ -5524,7 +5560,7 @@ const placeBox = (el, l, t, wd, ht) => {
              * 实际 DOM 上 left 只在第一次写过。所以这里必须同时记
              * 链接矩形与浮窗矩形，并标明走的是哪条路径（首次 / 同位图回流 / 换链接回流）。
              */
-            const reportTipPlace = (anchor, placed, opts, path, horiz) => {
+            const reportTipPlace = (anchor, placed, opts, path, horiz, desiredHValue) => {
               if (!anchor) return
               try {
                 const ar = anchor.getBoundingClientRect()
@@ -5537,7 +5573,15 @@ const placeBox = (el, l, t, wd, ht) => {
                   linkLeft: Math.round(ar.left),
                   linkW: Math.round(ar.width),
                   linkH: Math.round(ar.height),
-                  desiredH: placed && placed.height ? Math.round(placed.height) : null,
+                  /**
+                   * `desiredH` 是**调用方传进来的真实期望高度**。
+                   *
+                   * 原来这里写成 `placed && placed.height`，而
+                   * computeTipPlacement 只返回 {top,height}、没有 desiredH，
+                   * 于是这一行恒等于 chosenH，完全没有信息量 ——
+                   * 看不出「想要多少」和「实际给了多少」的差。
+                   */
+                  desiredH: typeof desiredHValue === 'number' ? Math.round(desiredHValue) : null,
                   chosenH: placed ? Math.round(placed.height) : null,
                   chosenTop: placed ? Math.round(placed.top) : null,
                   /** 浮窗最终写入的值 —— 这是上一轮缺的关键字段 */
@@ -5624,7 +5668,7 @@ const placeBox = (el, l, t, wd, ht) => {
                      */
                     horiz = placeHorizontal(tip, anchor, opts)
                   }
-                  reportTipPlace(anchor, placed, opts, anchorChanged ? 'reflow-moved' : 'reflow', horiz)
+                  reportTipPlace(anchor, placed, opts, anchorChanged ? 'reflow-moved' : 'reflow', horiz, actualH)
                 }
                 cancelHideTip()
                 if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
@@ -5695,7 +5739,7 @@ const placeBox = (el, l, t, wd, ht) => {
               let top
               const horiz = placeHorizontal(tip, anchor, opts)
               /** 首次定位的诊断，与 wasOn 回流共用同一个出口 */
-              reportTipPlace(anchor, placement, opts, 'fresh', horiz)
+              reportTipPlace(anchor, placement, opts, 'fresh', horiz, desiredH)
               /**
                * **纵向直接用 placement.top。**
                *
@@ -5707,20 +5751,24 @@ const placeBox = (el, l, t, wd, ht) => {
               top = placement.top
               tip.style.top = `${Math.round(top)}px`
               /**
-               * **整体高度也要夹住，不能只夹位图区。**
+               * **整体高度夹住，但外层不做滚动容器。**
                *
-               * `placement.height` 原先只写成 `.zr-tip-shot` 的 maxHeight
-               * （位图槽），浮窗本身的 padding 与文字行不受约束 ——
-               * 所以浮窗实际高度会超过 `placement.height`，向下溢出去
-               * 盖住链接。用户报的 `cite.anderson1983` 那条正是这种：
-               * 文字内容 + padding 把浮窗撑高，底边压到了链接上。
+               * `placement.height` 要同时约束浮窗本身：不然 padding 与文字行
+               * 会让实际高度超过它、向下溢出去盖住链接（`cite.anderson1983`
+               * 那条就是这样）。
                *
-               * 这里给浮窗本身也设 maxHeight，并让内容区可滚动：
-               * `overflow:auto` 在 `.zr-link-tip` 上的效果是内容超出时
-               * 在卡片内部滚动，不会向下长出去。
+               * 但 `overflow` 必须是 **hidden，不能是 auto**：
+               * 位图槽 `.zr-tip-shot` 自己已经是 `overflow:auto`，
+               * 两层都 auto 就会出现**两条并排的滚动条**，而且滚轮
+               * 被 `onTipWheel` 转给内层，外层那条只能靠鼠标拖 ——
+               * 正是用户报的「怎么有两个进度条，而且滑动只能互动一部分」。
+               *
+               * 位图浮窗的唯一滚动面是内层 `.zr-tip-shot`；外层只负责
+               * 把整体高度卡住（hidden 顺带裁掉圆角溢出）。
+               * 文字浮窗内容高度就是它自己的高度，本来不需要滚动。
                */
               tip.style.maxHeight = `${Math.round(placement.height)}px`
-              tip.style.overflow = 'auto'
+              tip.style.overflow = 'hidden'
               tip.setAttribute('data-on', '1')
               /**
                * 显示出来就说明鼠标在链接上（或刚离开但在 0.3s 窗口内），
@@ -6004,11 +6052,40 @@ const placeBox = (el, l, t, wd, ht) => {
                        */
                       showLinkTip([], anchor, 0, false, { bitmap: true })
                       /**
-                       * **只渲染目标这一页**（用户明确要求），不预取邻页。
-                       * 页位图按 pageNo 缓存，同页的不同目标复用同一张图。
-                       * pageNo 已在上面统一解析（文字/位图两条路共用）。
+                       * **算是位图区实际能用的宽高，交给渲染器。**
+                       *
+                       * 这是「图片太小」的修法核心：位图必须按浮窗的**实际宽度**
+                       * 渲染，而且显示尺寸要同时受「可用宽」和「可用高」约束
+                       * （高度受限时让宽度妥协，保持宽高比）。
+                       *
+                       * 可用宽与 `placeHorizontal` 的位图分支保持**同一公式**，
+                       * 否则渲染按一个宽度、定位按另一个宽度，两边对不上。
+                       * 可用高用 computeTipPlacement 会给的高度（mayCover 分支
+                       * 对位图按整屏给，即 min(cap, viewportH - 16)）。
                        */
-                      const canvas = await renderDestBitmap(dest, pageNo)
+                      let pageRectNow = null
+                      try {
+                        const lp = anchor?.closest?.('.page')
+                        pageRectNow = lp?.getBoundingClientRect?.() ?? null
+                        if (!pageRectNow || !(pageRectNow.width > 0)) {
+                          pageRectNow = host?.querySelector?.('.page')?.getBoundingClientRect?.() ?? null
+                        }
+                      } catch { /* 用视口兜底 */ }
+                      const bitmapCssW = Math.max(
+                        160,
+                        Math.min(
+                          (pageRectNow && pageRectNow.width > 0 ? pageRectNow.width : Math.min(560, window.innerWidth - 16)) * 0.9,
+                          window.innerWidth - 16,
+                        ),
+                      )
+                      const bitmapCssH = Math.max(120, Math.min(
+                        Math.min(window.innerHeight * 0.8, 780),
+                        window.innerHeight - 16,
+                      ))
+                      const canvas = await renderDestBitmap(dest, pageNo, {
+                        targetCssWidth: bitmapCssW,
+                        availH: bitmapCssH,
+                      })
                       const preview = canvas ? null : await extractDestPreview(dest, pageNo)
                       // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
                       if (linkTipAnchor !== anchor || !linkTip || !anchor.isConnected) return
@@ -6024,6 +6101,33 @@ const placeBox = (el, l, t, wd, ht) => {
                          */
                         showLinkTip([], anchor, 0, false, { bitmap: true })
                         putTipBitmap(tip, canvas, await destVOffset(dest, pageNo))
+                        /**
+                         * **canvas 实际尺寸诊断。**
+                         *
+                         * 用户反复报「图太小 / 高度不够」。要分清是
+                         * 「图本身没放大」还是「放大了但被容器截断」，
+                         * 必须同时看：canvas 的 CSS 尺寸、位图槽的可视高
+                         * 与内容总高、本次渲染用的目标宽、以及裁切区域的
+                         * PDF 点尺寸。这几个数凑在一起才能定性。
+                         */
+                        try {
+                          const shotEl = tip.querySelector('.zr-tip-shot')
+                          reportDiag({
+                            event: 'tip:bitmap',
+                            href: (anchor.getAttribute('href') || '').slice(0, 60),
+                            canvasCssW: Number(canvas.dataset?.cssW ?? 0) || Math.round(canvas.getBoundingClientRect().width),
+                            canvasCssH: Number(canvas.dataset?.cssH ?? 0) || Math.round(canvas.getBoundingClientRect().height),
+                            shotClientH: shotEl ? Math.round(shotEl.clientHeight) : null,
+                            shotScrollH: shotEl ? Math.round(shotEl.scrollHeight) : null,
+                            targetCssWidth: Math.round(bitmapCssW),
+                            availH: Math.round(bitmapCssH),
+                            regionW: Number(canvas.dataset?.regionW ?? 0) || null,
+                            regionH: Number(canvas.dataset?.regionH ?? 0) || null,
+                            viewportW: Math.round(window.innerWidth),
+                            viewportH: Math.round(window.innerHeight),
+                            dpr: Math.round((window.devicePixelRatio || 1) * 100) / 100,
+                          })
+                        } catch { /* 诊断失败不影响显示 */ }
                       } else if (preview) {
                         // 位图失败（少见）时退回文字预览，总比空窗好
                         showLinkTip([
