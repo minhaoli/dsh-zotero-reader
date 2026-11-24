@@ -248,7 +248,7 @@ check('放上方时底边贴链接上沿、放下方时顶边贴下沿（都留 
 
 check('高度按所选那一侧的可用空间收窄，并保留上下限',
   /Math\.min\(want, roomAbove\)/.test(src) && /Math\.min\(want, roomBelow\)/.test(src) &&
-    /const MIN_H_BITMAP = 120/.test(src) && /Math\.min\(viewportH \* 0\.8, 780\)/.test(src),
+    /const MIN_H_BITMAP = 120/.test(src) && /const hardCap = bitmapHeightCap\(\)/.test(src),
   '固定上限在链接偏下时放不下，必然压住链接所在行')
 
 check('浮窗与链接留有间隙（不紧贴）',
@@ -974,9 +974,12 @@ check('位图浮窗高度由 placement 唯一约束（内层不重复限制）',
     !/shotNow\.style\.maxHeight/.test(src),
   '内外层各设一次会在同一高度上截两次')
 
-check('高度天花板为 80vh/780、下限 120px',
-  /Math\.min\(viewportH \* 0\.8, 780\)/.test(src) && /const MIN_H_BITMAP = 120/.test(src),
-  'CSS 默认值与 JS 天花板必须一致；下限不能小到看不清内容')
+check('高度天花板提取为 bitmapHeightCap（与 geo 共用同一常量）',
+  /const bitmapHeightCap = \(\) => Math\.min\(window\.innerHeight \* 0\.8, 780\)/.test(src) &&
+    /const hardCap = bitmapHeightCap\(\)/.test(src) &&
+    /Math\.min\(popupH, availH, bitmapHeightCap\(\)\)/.test(src) &&
+    /const MIN_H_BITMAP = 120/.test(src),
+  '两处各写一遍会分叉：canvas 879 而浮窗 780，底部 99px 被裁')
 
 check('放哪边、多高、top 由单个函数一次给出（首帧与复核共用）',
   /const computeTipPlacement = \(anchor, desiredH, isBitmap = false\) =>/.test(src) &&
@@ -1254,6 +1257,50 @@ check('跨栏即停（stopReason=column）',
 check('聚行按 x 大间隙拆栏（否则条目被邻栏文字割裂）',
   /if \(gap > 100\) \{ segments\.push\(seg\); seg = \[\] \}/.test(src),
   '实测 page14 曾把左右栏拼成 x0=49..546 的一行')
+/* ---------- 4p. 表格判据 + 几何同源（四个 bug 的回归） ---------- */
+
+/**
+ * Bug：表格用了「图」的空白带判据，只盖住表头（regionH=64）。
+ * 表格结构与图相反 —— 图是连续空白，表格是密集多列文本行。
+ */
+check('表格用「多列行」判据，与 figure 分开',
+  /const isTable = \/\^\(TABLE\|Table\|ALGORITHM\|Algorithm\)/.test(src) &&
+    /const cols = row\.items\.length/.test(src) &&
+    /if \(cols >= 3\)/.test(src) &&
+    /if \(multiColSeen >= 2\) break/.test(src),
+  '图找空白、表找连续多列行，判据不能混用')
+
+check('表格区域记为 table 类型',
+  /kindName: 'table'/.test(src),
+  'regionKind 能看出走了哪条规则')
+
+/**
+ * Bug：scale/scaleCap/regionKind 恒为 0/null。
+ * 诊断从 canvas.dataset 读，而 dataset 写的是本函数里已不存在的
+ * `inferred` 与旧变量 `scaleFit`。
+ */
+check('几何诊断一律从 geo 取（不从局部残留变量）',
+  /out\.dataset\.regionKind = geo\.regionKind/.test(src) &&
+    /out\.dataset\.scale = String\(Math\.round\(geo\.scale \* 100\)/.test(src) &&
+    /out\.dataset\.scaleCap = String\(Math\.round\(geo\.scaleCap \* 100\)/.test(src) &&
+    !/out\.dataset\.regionKind = inferred \?/.test(src),
+  'inferred 在 renderDestBitmap 里已不存在，写出来恒为 null')
+
+/**
+ * Bug：#fig8 的 geoConsistent=false —— 高度被夹了两次。
+ * computeBitmapGeometry 用 availH（879），placement 用 min(80vh,780)，
+ * canvas 按 879 渲染、浮窗只有 780，底部 99px 被裁。
+ */
+check('高度天花板只有一处定义（bitmapHeightCap）',
+  (() => {
+    const defs = (src.match(/Math\.min\(window\.innerHeight \* 0\.8, 780\)/g) || []).length
+    return defs === 1 && /const bitmapHeightCap = \(\) =>/.test(src)
+  })(),
+  '两个地方各写一遍就必然分叉')
+
+check('geo 的 popupH 用同一个天花板夹取',
+  /popupH: Math\.max\(120, Math\.min\(popupH, availH, bitmapHeightCap\(\)\)\)/.test(src),
+  'canvas 与浮窗高度必须同源，否则底部被裁')
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
 
 /**

@@ -4895,6 +4895,81 @@ window.__ModuleLoader__.load({
                 }
                 if (label) {
                   /**
+                   * ============ **表格 / 算法块：单独的判据** ============
+                   *
+                   * 表格与图的结构完全相反：图是「连续空白带」，表格是
+                   * 「密集的多列文本行」。用图的空白带判据扫表格，
+                   * 实测 #tab3 只得到 regionH=64（只盖住表头附近），
+                   * 用户看到「表格只显示表头」。
+                   *
+                   * 真实数据结构（page13，caption y=765.5）：
+                   *   y=765.5 n=1  "TABLE 3 Worst (top) and best (bottom)..."  ← caption
+                   *   y=741.3 n=5  "P|T|Obs. RT|B3 RT|→"                       ← 表头
+                   *   y=724.5 n=5  "Pimple|Zit|800.23|799.9|→"                ← 数据行
+                   *   ...（稳定 n=5、行距 14.5pt，共 13 行）
+                   *   y=550.9 n=1  "P and T refer to prime and target..."     ← 表注，表格结束
+                   *
+                   * 判据：从 caption 向**下**扫，
+                   *   · 该行 item 数 >= 3（多列）→ 属于表格，继续
+                   *   · item 数骤降到 1~2 → 表格结束（表注/正文）
+                   *   · 连续 2 行多列才认（避免 caption 本身误判）
+                   */
+                  const isTable = /^(TABLE|Table|ALGORITHM|Algorithm)\s*\d/i.test(label.s)
+                  if (isTable) {
+                    /**
+                     * 按基线把本栏 item 聚成行（容差 2pt）。
+                     */
+                    const rowMap = new Map()
+                    for (const it of colItems) {
+                      const key = Math.round(it.y / 2)
+                      if (!rowMap.has(key)) rowMap.set(key, { y: it.y, items: [] })
+                      rowMap.get(key).items.push(it)
+                    }
+                    const rows = [...rowMap.values()].sort((a, b) => b.y - a.y)
+                    /**
+                     * 从 caption 行向下（y 递减）累积，
+                     * 遇到「多列行」就并进来，遇到单列行就停。
+                     */
+                    let tBot = label.y
+                    let multiColSeen = 0
+                    for (const row of rows) {
+                      if (row.y >= label.y - 1) continue      // 从 caption 下方开始
+                      const cols = row.items.length
+                      if (cols >= 3) {
+                        multiColSeen += 1
+                        tBot = row.y - 6
+                        continue
+                      }
+                      /**
+                       * 单列行：表格数据已经结束（表注/正文）。
+                       * 但要允许 caption 紧下方的单列行（有些表头只有一列）。
+                       */
+                      if (multiColSeen >= 2) break
+                      // 还没见过多列行，继续往下找（容忍 2 行）
+                      if (label.y - row.y > 60) break
+                    }
+                    /**
+                     * 上界：caption 自身顶部。表格在 caption 下方，
+                     * 所以 yTop 就是 caption 顶行。
+                     */
+                    const tTop = label.y + 4
+                    const th = tTop - tBot
+                    if (multiColSeen >= 2 && th > 30) {
+                      let blockAbove = null
+                      let blockBelow = null
+                      for (const it of colItems) {
+                        if (it.y > tTop && (blockAbove === null || it.y < blockAbove)) blockAbove = it.y
+                        if (it.y < tBot && (blockBelow === null || it.y > blockBelow)) blockBelow = it.y
+                      }
+                      return {
+                        x: colX0, y: tBot, w: colX1 - colX0, h: th,
+                        kindName: 'table', crossColumn: false,
+                        crossColumnReason: 'table-single-column',
+                        blockAbove, blockBelow, pageH: heightPt,
+                      }
+                    }
+                  }
+                  /**
                    * 下界：caption 自身那几行（间距小、连续）。
                    * 先算它，因为上界判定要用到「caption 末行」。
                    */
@@ -5227,6 +5302,18 @@ window.__ModuleLoader__.load({
              *
              * @returns {Promise<{region, scale, popupW, popupH}|null>}
              */
+            /**
+             * **位图浮窗的高度天花板 —— 唯一来源。**
+             *
+             * `computeTipPlacement` 与 `computeBitmapGeometry` 都必须用它。
+             * 两处各写一遍就会分叉：实测 #fig8 的 geo.popupH 按 879 渲染
+             * canvas，而放置阶段又夹到 780 → 底部 99px 被裁掉、
+             * geoConsistent=false。
+             *
+             * 取 min(80vh, 780)：占视口八成、上限 780。
+             */
+            const bitmapHeightCap = () => Math.min(window.innerHeight * 0.8, 780)
+
             const computeBitmapGeometry = async (dest, pageNo, availW, availH) => {
               try {
                 const pdfDocument = pdfRef.current?.doc
@@ -5282,8 +5369,14 @@ window.__ModuleLoader__.load({
                   region,
                   scale,
                   scaleCap,
+                  /**
+                   * **高度夹取必须用 `bitmapHeightCap()`，与放置阶段同源。**
+                   * 原来用 `availH`（= min(innerHeight*0.88, 880)），
+                   * 而 placement 用 min(80vh,780) —— 两者不同，
+                   * canvas 按 879 渲染、浮窗只有 780，底部 99px 被裁。
+                   */
                   popupW: Math.max(160, Math.min(popupW, availW)),
-                  popupH: Math.max(120, Math.min(popupH, availH)),
+                  popupH: Math.max(120, Math.min(popupH, availH, bitmapHeightCap())),
                   regionKind: inferred ? inferred.kindName : (dest?.[1]?.name === 'FitR' ? 'fitr' : 'page'),
                   crossColumn: inferred ? Boolean(inferred.crossColumn) : false,
                   crossColumnReason: inferred ? (inferred.crossColumnReason || '') : '',
@@ -5370,11 +5463,19 @@ window.__ModuleLoader__.load({
                   out.dataset.regionW = String(Math.round(region.w))
                   out.dataset.regionH = String(Math.round(region.h))
                   out.dataset.targetCssW = String(Math.round(availW))
-                  out.dataset.regionKind = inferred ? inferred.kindName : (dest?.[1]?.name === 'FitR' ? 'fitr' : 'page')
-                  out.dataset.scale = String(Math.round(scaleFit * 100) / 100)
-                  out.dataset.scaleCap = String(Math.round(scaleCap * 100) / 100)
-                  out.dataset.crossColumn = inferred ? (inferred.crossColumn ? '1' : '0') : '0'
-                  out.dataset.crossColumnReason = inferred ? (inferred.crossColumnReason || '') : ''
+                  /**
+                   * **几何一律从 `geo` 取，不从局部变量。**
+                   *
+                   * `regionKind` 原先写 `inferred ? ...`，但区域推导已上移到
+                   * `computeBitmapGeometry`，`inferred` 在本函数里根本不存在
+                   * → 恒为 null。`scale`/`scaleCap` 同理，旧变量名残留。
+                   * 日志里 `scale=0 cap=0 kind=null` 就是这么来的。
+                   */
+                  out.dataset.regionKind = geo.regionKind || ''
+                  out.dataset.scale = String(Math.round(geo.scale * 100) / 100)
+                  out.dataset.scaleCap = String(Math.round(geo.scaleCap * 100) / 100)
+                  out.dataset.crossColumn = geo.crossColumn ? '1' : '0'
+                  out.dataset.crossColumnReason = geo.crossColumnReason || ''
                 } catch { /* ignore */ }
                 return out
               } catch { return null }
@@ -6187,8 +6288,13 @@ const placeBox = (el, l, t, wd, ht) => {
                * 上限仍要给，否则在超宽屏上浮窗会高到半页都是它；
                * 真正能放多高由 `computeTipPlacement` 按链接上下可用空间
                * 再收一次，所以这个值只决定「空间充足时的最大尺寸」。
+               *
+               * **必须与 `computeBitmapGeometry` 的夹取上限同一个常量。**
+               * 两处各写一遍就会分叉：实测 #fig8 的 geo.popupH 被夹到 879
+               * 渲染 canvas，而这里又夹到 780 → canvas 底部 99px 被裁掉，
+               * geoConsistent=false。
                */
-              const hardCap = Math.min(viewportH * 0.8, 780)
+              const hardCap = bitmapHeightCap()
               if (!anchor) {
                 const height = Math.min(desiredH || hardCap, hardCap)
                 return { top: 56, height }
@@ -6571,7 +6677,7 @@ const placeBox = (el, l, t, wd, ht) => {
                * 若拿不到（首帧还没内容）退回一个保守值。
                */
               const desiredH = opts?.bitmap
-                ? Math.min(window.innerHeight * 0.8, 780)
+                ? bitmapHeightCap()
                 : (tip.offsetHeight || 120)
               const placement = computeTipPlacement(anchor, desiredH, Boolean(opts?.bitmap))
               /**
