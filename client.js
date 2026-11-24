@@ -6236,6 +6236,33 @@ const placeBox = (el, l, t, wd, ht) => {
               if (shotH > 0) shot.style.height = `${shotH}px`
               if (canvas) shot.appendChild(canvas)
               /**
+               * **canvas 宽度扣掉纵向滚动条的占位。**
+               *
+               * 实测 `shotClientW=706` 而 `shotScrollW=711`：槽高固定成
+               * popupH 后内容必然纵向溢出，浏览器给槽加一条纵向滚动条，
+               * 内容框因此比 `popupW` 窄 5px。canvas 仍按 popupW 排，
+               * 就在窄 5px 的框里横向溢出 —— 虽然 `overflow-x:hidden`
+               * 已经把横向滚动条去掉了，但页面右缘那 5px 会被裁掉。
+               *
+               * 这里在**内容已入槽、滚动条已产生**之后量一次实际内容宽度，
+               * 按它重设 canvas 的显示宽度。高度同比缩放，保持页面比例。
+               *
+               * 顺序很关键：必须 append 之后再量，否则滚动条还没出现，
+               * `clientWidth` 还是满宽，量不到这 5px。
+               */
+              if (canvas && shot.clientWidth > 0) {
+                try {
+                  const contentW = shot.clientWidth
+                  const cssW = parseFloat(canvas.style.width) || 0
+                  if (contentW > 0 && cssW > 0 && Math.abs(contentW - cssW) > 0.5) {
+                    const ratio = contentW / cssW
+                    const cssH = parseFloat(canvas.style.height) || 0
+                    canvas.style.width = `${Math.round(contentW)}px`
+                    if (cssH > 0) canvas.style.height = `${Math.round(cssH * ratio)}px`
+                  }
+                } catch { /* 量不到就保持原尺寸 */ }
+              }
+              /**
                * 把目标滚到可见区偏上（留 18% 的上下文在上方），
                * 并夹在可滚范围内。
                */
