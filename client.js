@@ -5312,6 +5312,33 @@ const placeBox = (el, l, t, wd, ht) => {
               const want = Math.min(desiredH || hardCap, hardCap)
 
               /**
+               * **位图类型允许盖住链接本身，换更大的显示面积。**
+               *
+               * 实测 `#fig1`：链接在视口下半部（linkTop=539、视口 999），
+               * 上方只剩 511px，于是浮窗被收窄到 511——用户反馈「高度还是
+               * 不够」。但位图的目标是 figure/公式，链接只是图注里的
+               * 几个字（实测 linkW 仅 37px、linkH 12px），盖住它几乎无感，
+               * 而多出来的画面面积价值更大。
+               *
+               * 文字预览相反：它本身就小（45~64px），而且用户要读的正是
+               * 链接附近的内容，盖住链接会直接影响阅读，所以仍严格避开。
+               *
+               * 允许覆盖时按「整屏可用高度」算，只留 8px 边距。
+               */
+              const mayCover = isBitmap
+              if (mayCover) {
+                /**
+                 * 位图：高度取「整个视口能给的全部」，不再被链接上沿截断。
+                 * 位置仍尽量放在上方，实在放不下就贴顶 —— 宁可盖住链接
+                 * 那一行几个字，也要让 figure 看清。
+                 */
+                const height = Math.max(MIN_H, Math.min(want, viewportH - 16))
+                const idealTop = r.top - gap - height
+                const top = Math.max(8, Math.min(idealTop, viewportH - height - 8))
+                return { top, height }
+              }
+
+              /**
                * 选边：优先上方。上方装得下想要的高度就放上方；
                * 装不下但上方空间仍比下方大，也放上方（收窄高度即可）；
                * 否则放下方。
@@ -5492,14 +5519,17 @@ const placeBox = (el, l, t, wd, ht) => {
               let left
               let top
               /**
-               * **宽度按内容类型分开定。**
+               * **宽度按内容类型分开定，横向锚点也分开。**
                *
-               * 用户的原话：
-               *   · 参考文献「就 1/2 栏，一行放不下自动换行」→ 文字预览半栏；
-               *   · 「窗口开 90%」→ 图片浮窗 90%（先要 80%，后改 90%）。
+               * 宽度：参考文献「就 1/2 栏」→ 文字半栏；「窗口开 90%」→ 位图 90%。
                *
-               * 两者都**居中于页面**（而不是贴左边界）：贴着页面左边界时，
-               * 半栏宽的卡片会停在栏缝里，看着像没对齐。
+               * 横向锚点（用户后续反馈修正过）：
+               *   · 位图：**居中对齐页面**。figure/公式通常跨栏或居中，
+               *     跟随链接 x 会让同一张图在不同链接位置弹出不同横向位置。
+               *   · 文字：**对齐链接自身**。用户明确指出「参考文献的悬浮窗
+               *     的 x 似乎没更新，所有引用的 x 都是一样的」—— 因为之前
+               *     两者都用了 pageCenter。文献引用散布在正文里，x 各不相同，
+               *     贴着自己那条引用显示才符合直觉。
                */
               const widthRatio = opts?.bitmap ? 0.9 : 0.5
               if (pageRect && pageRect.width > 0) {
@@ -5510,9 +5540,25 @@ const placeBox = (el, l, t, wd, ht) => {
                 let targetW = pageRect.width * widthRatio
                 targetW = Math.min(targetW, window.innerWidth - 16)
                 targetW = Math.max(160, targetW)
-                // 居中于页面
-                const pageCenter = (pageRect.left + pageRect.right) / 2
-                let targetLeft = pageCenter - targetW / 2
+                let targetLeft
+                if (opts?.bitmap) {
+                  // 位图：居中于页面
+                  const pageCenter = (pageRect.left + pageRect.right) / 2
+                  targetLeft = pageCenter - targetW / 2
+                } else {
+                  /**
+                   * 文字：让卡片左边界对齐链接左边界；
+                   * 右侧超出视口时整体左移，保证整块可见。
+                   */
+                  let anchorLeft = pageRect.left
+                  try {
+                    if (anchor) anchorLeft = anchor.getBoundingClientRect().left
+                  } catch { /* 拿不到就用页面左边界 */ }
+                  targetLeft = anchorLeft
+                  if (targetLeft + targetW > window.innerWidth - 8) {
+                    targetLeft = window.innerWidth - targetW - 8
+                  }
+                }
                 // 夹进视口
                 targetLeft = Math.max(8, Math.min(targetLeft, window.innerWidth - targetW - 8))
                 left = targetLeft
