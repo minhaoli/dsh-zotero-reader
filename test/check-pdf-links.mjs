@@ -166,8 +166,18 @@ check('有悬停处理器', overIdx > 0)
 check('悬停显示完整 href',
   /\{ kind: 'link', text: href \}/.test(src),
   '被省略的中段只有完整 URL 才看得见')
-check('内部跳转显示成「第 N 页」而不是裸 #page=',
-  /文档内跳转 · 第 \$\{pageMatch\[1\]\} 页/.test(src))
+/**
+ * `#page=N` 不再弹浮窗。
+ *
+ * 用户的原话是「只有图、公式需要悬浮窗」。翻页目标没有内容可预览，
+ * 原来那句「文档内跳转 · 第 N 页」是纯噪音，已整体移除。
+ * 断言改成：这个分支必须**提前 return**，且不再有旧的文案。
+ */
+check('#page=N 不弹浮窗（只有图/公式才弹）',
+  /if \(\/\^#page=\(\\d\+\)\/i\.test\(href\)\) return/.test(src) &&
+    !/文档内跳转 · 第 \$\{pageMatch\[1\]\} 页/.test(src),
+  '翻页目标没有可预览内容，弹出来纯属噪音')
+
 /**
  * 具名目标的卡片要能补出**页码**。
  *
@@ -219,7 +229,21 @@ check('提示挂在 body 上（脱离被裁剪的容器）',
 check('提示有上下翻转（贴近视口顶部时放下方）',
   /if \(top < 8\) top = r\.bottom \+ 8/.test(src))
 
-check('提示左右夹在视口内', /Math\.min\(r\.left, window\.innerWidth - tipW - 8\)/.test(src))
+/**
+ * 横向定位改为**对齐正文页面**，不再跟随链接的 x。
+ *
+ * 用户的原话是「位置和正文页面在同个位置，而不是根据超链接的位置会
+ * 左右移动」。所以断言要盯住两点：参照物是页面元素、且左右边界
+ * 都夹进视口。原来那条「Math.min(r.left, ...)」正是要废掉的行为。
+ */
+check('横向对齐正文页面（用页面元素而不是链接矩形）',
+  /anchor\?\.closest\?\.\('\.page'\)/.test(src) &&
+    /pageRect\.left/.test(src) && /pageRect\.right/.test(src),
+  '跟着链接 x 走会让同一页的不同链接弹在左右不同的位置')
+check('不再按链接 left 定位（旧行为已移除）',
+  !/Math\.min\(r\.left, window\.innerWidth - tipW - 8\)/.test(src),
+  '这就是「窗口会左右移动」的来源')
+
 
 /**
  * 悬停必须是**延时 + 去重**的。
@@ -241,18 +265,24 @@ check('同一条链接内部冒泡不重复计算',
   /anchor === linkTipAnchor/.test(src),
   'mouseover 从 <a> 的子元素冒泡上来，不去重就会反复重排延时')
 
-check('getBoundingClientRect 只在一处读（不在 mousemove 里反复读）',
+/**
+ * 矩形读取次数：现在需要读两次（页面一次、链接一次），
+ * 但**每个元素仍然只读一次**，不在 mousemove 里反复读。
+ * 断言改成「不超过两个不同来源的读取」。
+ */
+check('getBoundingClientRect 只在定位时各读一次（不反复读）',
   (() => {
-    // 只看 showLinkTip 函数体：它在 showLinkTip 里读一次，别处不该再读
     const at = src.indexOf('const showLinkTip')
     if (at < 0) return false
-    const body = src.slice(at, at + 2600)
+    const body = src.slice(at, at + 4200)
     const end = body.indexOf('\n            const onPdfLinkClick')
     const fn = end > 0 ? body.slice(0, end) : body
-    return /anchor\.getBoundingClientRect\(\)/.test(fn) &&
-      (fn.match(/getBoundingClientRect\(\)/g) || []).length === 1
+    const hits = (fn.match(/getBoundingClientRect\(\)/g) || []).length
+    // 页面一次 + 链接一次；超过说明又在别处重复读
+    return hits >= 1 && hits <= 2
   })(),
-  '矩形应当读一次并缓存，不能每次移动都读')
+  '每次强制布局都要还前面的 DOM 写入债，读得越多越卡')
+
 
 /* ---------- 4b. 纵向落点：dest 坐标必须被消费 ---------- */
 
@@ -296,8 +326,15 @@ check('预览是多行卡片（不再单行省略）',
     !/\.zr-link-tip\{[^}]*white-space:nowrap/.test(src),
   '单行 ellipsis 会把长文献信息截断')
 
-check('卡片限宽放到 min(560px,86vw)',
-  /\.zr-link-tip\{position:fixed;z-index:2147483000;max-width:min\(560px,86vw\)/.test(src))
+/**
+ * 宽度现在由「左右边界夹住页面」决定，不再是 min(560px,86vw) 的硬上限。
+ * 用户要求浮窗跟正文页面同位置、同宽度。
+ */
+check('宽度跟随页面（去掉与版面无关的 560px 硬上限）',
+  !/\.zr-link-tip\{[^}]*max-width:min\(560px,86vw\)/.test(src) &&
+    /tip\.style\.right = /.test(src),
+  '硬上限会让浮窗比版面窄，看起来不是「贴着正文」')
+
 
 check('行内容用 createElement + textContent（不拼 innerHTML）',
   /const renderTipLines = \(tip, lines\) =>/.test(src) &&
@@ -430,16 +467,99 @@ check('位图纵向裁切做了左下原点翻转',
   /\(heightPt - region\.y - region\.h\) \* scale/.test(src),
   'PDF 原点在左下，canvas 从顶部量，不翻转会裁到页面的镜像位置')
 
-/* ---------- 4h. 浮窗：可滚动 + 0.5s 延迟消失 ---------- */
+/* ---------- 4g2. 只有图/公式才弹浮窗 ---------- */
 
-check('浮窗位图区可滚动',
-  /\.zr-link-tip \.zr-tip-shot\{display:block[^}]*overflow:auto/.test(src),
-  '用户要求「可以自由滑动」')
+/**
+ * 用户的原话是「只有图、公式需要悬浮窗」。
+ *
+ * 判定用三类信号：名字前缀（fig/figure/table/tab/eq/equation/alg/algorithm）、
+ * dest 类型（FitR 矩形通常就是图/表块）、以及默认保守不弹。
+ */
+check('有类型判定函数（名字前缀 + dest 类型）',
+  /const isPreviewableDest = \(rawName, dest\) =>/.test(src) &&
+    /FIGURE_NAME_RE/.test(src),
+  '纯靠名字猜很脆，要和 dest 类型结合')
+
+check('名字前缀覆盖 fig/figure/table/eq/equation/alg 等',
+  /fig\|figure\|tab\|table\|eq\|equation\|alg\|algorithm/.test(src),
+  'LaTeX 的 \\label 约定：这些才是非文字内容')
+
+check('FitR 矩形作为「图/表块」的强信号',
+  /kind === 'FitR'/.test(src) && /isPreviewableDest/.test(src),
+  '矩形框定的目标绝大多数是图/表/公式块，比名字更硬')
+
+check('名字不像图/公式时保守不弹',
+  /return false\s*\n\s*\}/.test(src) &&
+    /if \(!isPreviewableDest\(decName, dest\)\) return/.test(src),
+  '宁可少弹，也不要乱弹一屏正文')
+
+check('类型不合的目标不触发位图渲染（先分流再渲染）',
+  (() => {
+    const guard = src.indexOf('if (!isPreviewableDest(decName, dest)) return')
+    const render = src.indexOf('await renderDestBitmap(dest, pageNo)', guard)
+    return guard > 0 && render > guard
+  })(),
+  '为一页白渲染 bitmap 要几十到几百毫秒，必须在渲染前就分流')
+
+
+
+/**
+ * 用户澄清后的正确语义：
+ * 「光标不落在悬浮窗以及超链接上连续超过 0.5s 关闭悬浮窗。
+ *   如果落在悬浮窗上需要有滑动悬浮窗页面的功能」。
+ */
+check('浮窗位图区可滚动（需要有滑动功能）',
+  /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow:auto/.test(src),
+  '用户明确要求「需要有滑动悬浮窗页面的功能」')
 
 check('浮窗接收鼠标事件（pointer-events:auto）',
   /\.zr-link-tip\{[^}]*pointer-events:auto/.test(src) &&
     !/\.zr-link-tip\{[^}]*pointer-events:none/.test(src),
-  '浮窗要能滚动、要能触发 mouseenter，就必须接收事件')
+  'auto 才能参与 0.5s 判定（mouseenter/mouseleave），也才能收到自己那一份滚轮')
+
+check('浮窗保留 mouseenter/mouseleave 参与消失判定',
+  /linkTip\.addEventListener\('mouseenter', \(\) => \{ cancelHideTip\(\) \}\)/.test(src) &&
+    /linkTip\.addEventListener\('mouseleave', \(\) => \{ scheduleHideTip\(\) \}\)/.test(src),
+  '「在链接上或在浮窗上都算在里面」，两边都要参与')
+
+/**
+ * 「不能移动悬浮窗的页面」的真实含义：滚轮只滚浮窗，不能穿透到 PDF。
+ * 必须用原生监听 + passive:false（React 的 onWheel 是 passive，preventDefault 无效）。
+ */
+check('浮窗滚轮不穿透到 PDF（原生 wheel + passive:false）',
+  /linkTip\.addEventListener\('wheel', onTipWheel, \{ passive: false \}\)/.test(src),
+  'React 17+ 把 wheel 注册成 passive，preventDefault 无效，必须用原生监听')
+check('wheel 处理里有 stopPropagation 与 preventDefault',
+  (() => {
+    const at = src.indexOf('const onTipWheel = (event) =>')
+    if (at < 0) return false
+    const body = src.slice(at, at + 1400)
+    const sp = body.indexOf('event.stopPropagation()')
+    const pd = body.indexOf('event.preventDefault()')
+    return sp > 0 && pd > sp
+  })(),
+  '两层都要：挡住冒泡 + 断掉浏览器默认滚动链')
+check('滚轮只滚浮窗自己的 .zr-tip-shot',
+  /shot\.scrollTop \+= event\.deltaY/.test(src),
+  '把 deltaY 用在浮窗内容上，而不是让背后的 PDF 滚')
+check('清理时移除 wheel 监听',
+  /removeEventListener\('wheel', onTipWheel/.test(src),
+  'passive:false 的监听完事要摘掉')
+
+/**
+ * 用户的原话是「悬浮窗外圈不要加黑色的方框」。
+ * 容器不该有 border 与明显投影 —— 位图要直接浮在页面上。
+ */
+check('浮窗没有边框（去掉黑色方框）',
+  !/\.zr-link-tip\{[^}]*border:1px solid/.test(src),
+  '用户明确嫌弃外圈黑框')
+check('浮窗没有重投影（最多极淡）',
+  !/\.zr-link-tip\{[^}]*box-shadow:0 6px 20px/.test(src),
+  '原来那圈黑影是「容器感」的主要来源')
+check('位图区也没有边框',
+  /\.zr-link-tip \.zr-tip-shot\{[^}]*background:#fff/.test(src) &&
+    !/\.zr-link-tip \.zr-tip-shot\{[^}]*border:1px solid/.test(src),
+  '里层再来一圈边框照样是黑框')
 
 check('0.5s 延迟消失（既不在链接也不在浮窗上才隐藏）',
   /const cancelHideTip = \(\) =>/.test(src) &&
@@ -447,11 +567,39 @@ check('0.5s 延迟消失（既不在链接也不在浮窗上才隐藏）',
     /setTimeout\(\(\) => \{[\s\S]{0,120}?hideLinkTip\(\)[\s\S]{0,20}?\}, 500\)/.test(src),
   '立即隐藏的话鼠标够不到浮窗，没法滚动')
 
-check('链接与浮窗共用同一套取消/重排',
-  /linkTip\.addEventListener\('mouseenter', \(\) => \{ cancelHideTip\(\) \}\)/.test(src) &&
-    /linkTip\.addEventListener\('mouseleave', \(\) => \{ scheduleHideTip\(\) \}\)/.test(src) &&
-    /scheduleHideTip\(\)/.test(src.slice(src.indexOf('const onPdfLinkOut'), src.indexOf('const onPdfLinkOut') + 900)),
-  '两处各自为政就会出现「移进浮窗就消失」')
+/**
+ * 0.5s 判定由**链接与浮窗两侧**共同驱动：
+ * 任一侧进入都取消，任一侧离开都重排。
+ */
+check('0.5s 判定由链接与浮窗两侧共同驱动',
+  /scheduleHideTip\(\)/.test(src.slice(src.indexOf('const onPdfLinkOut'), src.indexOf('const onPdfLinkOut') + 900)) &&
+    /cancelHideTip\(\)/.test(src.slice(src.indexOf('const onPdfLinkOver'), src.indexOf('const onPdfLinkOver') + 1600)) &&
+    /addEventListener\('mouseenter', \(\) => \{ cancelHideTip\(\) \}\)/.test(src) &&
+    /addEventListener\('mouseleave', \(\) => \{ scheduleHideTip\(\) \}\)/.test(src),
+  '用户澄清：在链接上或在浮窗上都算「在里面」')
+
+/* ---------- 4h2. 位置固定：弹出后不因鼠标进入而重算 ---------- */
+
+/**
+ * 位图是异步来的，到位后会再调一次 showLinkTip 补内容。
+ * 如果每次都重算位置，鼠标移进浮窗时会看到它「跳」一下。
+ */
+check('弹出后位置固定（异步补内容不重算位置）',
+  /const wasOn = tip\.getAttribute\('data-on'\) === '1'/.test(src) &&
+    /if \(wasOn\) \{/.test(src),
+  '补位图时重算位置会让浮窗在鼠标进入时跳动')
+
+check('wasOn 提前返回发生在定位之前',
+  (() => {
+    const at = src.indexOf('const showLinkTip = (lines, anchor')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 3600)
+    const wasOn = seg.indexOf('const wasOn = tip.getAttribute')
+    const ret = seg.indexOf('if (wasOn) {')
+    const pos = seg.indexOf('const tipH = tip.offsetHeight')
+    return wasOn > 0 && ret > wasOn && pos > ret
+  })(),
+  '顺序错了等于没起作用（先定位再返回就白改了）')
 
 check('mouseover 会取消挂起的消失',
   /cancelHideTip\(\)[\s\S]{0,80}?if \(anchor === linkTipAnchor\) return/.test(src),
