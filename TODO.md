@@ -158,3 +158,32 @@ PDF 页本身是 canvas，底色由 pdf.js 决定，换主题只影响栏内 UI 
 判读：连续几条 `pagesinit` 若出现 `already=true 且 willScroll=true`，说明守卫失效；`zoom:reanchor` 频繁出现说明 pdf.js 保位确实在失效、靠兜底救回来。
 
 需要真实环境确认：实际缩放是否停住、`already=true 且 willScroll=true` 是否出现、`zoom:reanchor` 频率。
+---
+
+## 位图预览浮窗 —— 已完成（`06a5655`，合入 main `108a583`）
+
+悬停预览从文字卡片改为渲染目标页位图，figure/公式/表格现在能看见真实画面。
+
+只渲染目标那一页，不预取邻页。scale = 浮窗显示宽 520 × dpr / 页宽，dpr 夹 2、总宽夹 1400px。离屏 canvas 先铺白底（PDF 透明区在深色浮窗里会变灰块）再 render。
+
+裁切要纵向翻转：`topInCanvas = (heightPt - y - h) * scale`。显示尺寸按 CSS 像素给（`/scale`），否则 dpr=2 时显示成两倍大。
+
+裁切区域按 dest 类型分支：`FitR` 用矩形外扩 8pt，`XYZ` 取 `dest[3]`、`FitH` 取 `dest[2]` 作锚点 y，无坐标则整页。块高取页高 42%、下限 120pt，**以锚点为中心对称取**——实测 `fig8` 往下取对、`eq1` 上下都有内容、`cite.*` 落在跨行条目上，对称是唯一能覆盖三种情况的策略。横向默认整页宽，按 `dest.x` 裁会把居中图裁掉半边。
+
+0.5s 消失：共用定时器 + `cancelHideTip`/`scheduleHideTip`，链接 mouseout/浮窗 mouseleave 排隐藏，链接 mouseover/浮窗 mouseenter 取消。浮窗 `pointer-events` 从 none 改 auto（否则收不到 mouseenter 也滚不动），位图放 `.zr-tip-shot`（overflow auto + max-height）。
+
+缓存两层：`pageBitmapCache` 按 pageNo 存整页位图，同页不同目标复用只换裁切；`pageBitmapPending` 记在途渲染——pdf.js 禁止同 canvas 双 render，鼠标扫过同页多链接时第二次会赶在第一次完成前进来，缓存只挡已完成。
+
+已知局限：浮窗会挡住其下方的 PDF 交互（pointer-events:auto 的代价）；首次悬停某页有几十到几百毫秒渲染延迟，期间显示 data-loading 占位；位图缓存不设 LRU 上限，长文档连续悬停多页会累积 canvas，单页约几 MB。
+
+## 行尾踩坑（2026-11-24）
+
+仓库 `client.js` 的 blob 是 CRLF，但子代理 worktree 里写出来是 LF，导致 git 把整文件当重写：8700 行里真实差异只有约 300 行，冲突块一度达 87 个。
+
+诊断方法：`git diff --stat` 与 `git diff --stat --ignore-cr-at-eol` 对比，两者差异巨大就是行尾问题。
+
+解决：所有 worktree 统一转 CRLF（先转 LF 再整体转 CRLF，避免 CRCRLF）。history-agent 用三方合并（base/ours/theirs 先统一 LF，`git merge-file`，完成后转回 CRLF），把 29 个冲突降到 1 处真冲突。
+
+合并策略：main 与 rebase 后的分支各带一份等价的历史功能、git 无法自动识别，最终用 `git reset --hard 108a583` 让 main 指向包含全部成果的 commit（`git diff 5645ec8 108a583` 证实差异是纯粹的 preview 增量）。
+
+**以后派子代理改 client.js，必须在指令里强调保持 CRLF。**
