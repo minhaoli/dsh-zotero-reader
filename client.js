@@ -5348,10 +5348,14 @@ const placeBox = (el, l, t, wd, ht) => {
                   /**
                    * 位图到位后用**实际量到的高度**重新决定放哪边、高度多少。
                    * 传入的 desiredH 是实际内容高度，函数内部会再按该侧可用空间收窄。
-                   * 若内容已被 maxHeight 限制，offsetHeight 即等于限制值，不会反复变化。
+                   *
+                   * 注意读取前要**先清掉上一轮的 maxHeight**：否则 offsetHeight
+                   * 被旧上限夹住，量不到真实内容高度，高度只会越收越窄（棘轮效应）。
                    */
-                  const actualH = tip.offsetHeight || 40
+                  tip.style.maxHeight = 'none'
+                  const actualH = tip.offsetHeight || 120
                   const placed = computeTipPlacement(anchor, actualH)
+                  tip.style.maxHeight = `${Math.round(placed.height)}px`
                   tip.style.top = `${Math.round(placed.top)}px`
                 }
                 cancelHideTip()
@@ -5393,15 +5397,54 @@ const placeBox = (el, l, t, wd, ht) => {
                * 位图浮窗：期望高度取固定天花板，实际由该侧可用空间收窄；
                * 文字浮窗：内容已排好，用实际高度，同样会被收窄。
                */
+              /**
+               * 期望高度。
+               *
+               * 位图浮窗：取固定天花板，实际由该侧可用空间收窄。
+               *
+               * 文字浮窗：`tip.offsetHeight` 在这里读**是可靠的**——
+               * renderTipLines 刚把内容写进 DOM，读取 offsetHeight 会强制
+               * 一次同步布局，拿到的就是排好版的高度（浮窗此时只是
+               * visibility:hidden，仍参与布局，不是 display:none）。
+               * 若拿不到（首帧还没内容）退回一个保守值。
+               */
               const desiredH = opts?.bitmap
                 ? Math.min(window.innerHeight * 0.46, 420)
-                : (tip.offsetHeight || 40)
+                : (tip.offsetHeight || 120)
               const placement = computeTipPlacement(anchor, desiredH)
               if (opts?.bitmap) {
                 const shotNow = tip.querySelector('.zr-tip-shot')
                 if (shotNow) shotNow.style.maxHeight = `${Math.round(placement.height)}px`
               }
               const tipH = placement.height
+              /**
+               * **定位诊断。**
+               *
+               * 「浮窗仍然盖住链接」这类问题光看现象分不清是几何算错、
+               * 还是算对了但被别的东西改掉（异步位图撑高、CSS padding
+               * 让实际高度超出 placement.height、二次定位覆盖）。
+               * 把链接矩形、选边结果、可用空间、期望/实得高度一次记全，
+               * 下次直接看日志即可定性。
+               */
+              if (anchor) {
+                try {
+                  const ar = anchor.getBoundingClientRect()
+                  reportDiag({
+                    event: 'tip:place',
+                    href: (anchor.getAttribute('href') || '').slice(0, 60),
+                    linkTop: Math.round(ar.top),
+                    linkBottom: Math.round(ar.bottom),
+                    linkLeft: Math.round(ar.left),
+                    linkW: Math.round(ar.width),
+                    linkH: Math.round(ar.height),
+                    desiredH: Math.round(desiredH),
+                    chosenH: Math.round(placement.height),
+                    chosenTop: Math.round(placement.top),
+                    viewportH: Math.round(window.innerHeight),
+                    bitmap: Boolean(opts?.bitmap),
+                  })
+                } catch { /* 诊断失败不影响定位 */ }
+              }
               /**
                * 页面矩形：优先用锚点所在页，拿不到再退到可见页。
                * 页面元素是定位的参照物，浮窗宽度也按它的宽度算 ——
@@ -5468,6 +5511,21 @@ const placeBox = (el, l, t, wd, ht) => {
                */
               top = placement.top
               tip.style.top = `${Math.round(top)}px`
+              /**
+               * **整体高度也要夹住，不能只夹位图区。**
+               *
+               * `placement.height` 原先只写成 `.zr-tip-shot` 的 maxHeight
+               * （位图槽），浮窗本身的 padding 与文字行不受约束 ——
+               * 所以浮窗实际高度会超过 `placement.height`，向下溢出去
+               * 盖住链接。用户报的 `cite.anderson1983` 那条正是这种：
+               * 文字内容 + padding 把浮窗撑高，底边压到了链接上。
+               *
+               * 这里给浮窗本身也设 maxHeight，并让内容区可滚动：
+               * `overflow:auto` 在 `.zr-link-tip` 上的效果是内容超出时
+               * 在卡片内部滚动，不会向下长出去。
+               */
+              tip.style.maxHeight = `${Math.round(placement.height)}px`
+              tip.style.overflow = 'auto'
               tip.setAttribute('data-on', '1')
               /**
                * 显示出来就说明鼠标在链接上（或刚离开但在 0.3s 窗口内），
