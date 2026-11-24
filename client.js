@@ -4483,6 +4483,25 @@ window.__ModuleLoader__.load({
             /** 当前闪烁元素与定时器，必须能被 cleanup 清掉。 */
             let jumpFlashEl = null
             let jumpFlashTimer = 0
+            /**
+             * **闪烁的代数（generation）。**
+             *
+             * 为什么要它：`flashJumpTarget` 在页元素还没渲染时会挂一个
+             * 延迟 retry（`pagerendered` 或 400ms 兜底），而 retry 最后
+             * 会**再次调用** `flashJumpTarget` —— 那个函数开头就是
+             * `clearJumpFlash()`。
+             *
+             * 于是连续快速跳转两次时会出现：
+             *   ① 第一次跳转 → 页元素没出来 → 挂 retry
+             *   ② 第二次跳转 → 页元素已出来 → 画好新高亮
+             *   ③ 第一次的 retry 迟到执行 → 开头 clearJumpFlash()
+             *      → 把第二次的高亮清掉
+             * 用户看到「跳了但没高亮」，与原始 bug 同症状、更偶发。
+             *
+             * 用单调递增的代数解决：顶层调用开启新一代，retry 递归时
+             * 带上同一代；入口处只要发现不是当前代就直接作废。
+             */
+            let jumpFlashSeq = 0
 
             const clearJumpFlash = () => {
               if (jumpFlashTimer) { clearTimeout(jumpFlashTimer); jumpFlashTimer = 0 }
@@ -4490,8 +4509,24 @@ window.__ModuleLoader__.load({
               jumpFlashEl = null
             }
 
-            const flashJumpTarget = (pageNo, offset, previewText) => {
+            /**
+             * @param {number} [seq] 代数。顶层调用不传（自增开启新一代）；
+             *   retry 递归时必须带上同一代，否则会被自己的入口判据作废。
+             */
+            const flashJumpTarget = (pageNo, offset, previewText, seq) => {
               try {
+                /**
+                 * **先判代际，再清旧块。**
+                 *
+                 * 顺序不能反：`clearJumpFlash()` 会无条件移除当前闪烁块，
+                 * 如果放在代际判断之前，一个过期 retry 会在开头就把
+                 * 新一代刚画好的高亮清掉 —— 那正是要修的竞态。
+                 */
+                if (seq === undefined) seq = ++jumpFlashSeq
+                if (seq !== jumpFlashSeq) {
+                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'stale', seq, current: jumpFlashSeq })
+                  return
+                }
                 clearJumpFlash()
                 const host = hostRef.current
                 const pageEl = host?.querySelector?.(`.page[data-page-number="${pageNo}"]`)
@@ -4504,11 +4539,11 @@ window.__ModuleLoader__.load({
                  * 结果就是「跳转成功、但高亮从不出现」——正是用户报的
                  * 「超链接跳转后也没有一个高亮窗口」。
                  *
-                 * 所以页元素还没出来时，改挂到 pagesinit/pagechanging 上
-                 * 等一次，别直接放弃。诊断里区分两种情况，便于日后判断。
+                 * 所以页元素还没出来时，改挂到 pagerendered 上等一次，
+                 * 别直接放弃。诊断里区分各种情况，便于日后判断。
                  */
                 if (!pageEl) {
-                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'no-page-el' })
+                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'no-page-el', seq })
                   const bus = eventBusRef.current
                   if (!bus) return
                   let once = false
@@ -4516,8 +4551,8 @@ window.__ModuleLoader__.load({
                     if (once) return
                     once = true
                     try { bus.off('pagerendered', retry) } catch { /* ignore */ }
-                    // 等一帧，让 pdf.js 把页元素真正插进 DOM
-                    setTimeout(() => flashJumpTarget(pageNo, offset, previewText), 60)
+                    // 等一帧，让 pdf.js 把页元素真正插进 DOM；**带上同一代**
+                    setTimeout(() => flashJumpTarget(pageNo, offset, previewText, seq), 60)
                   }
                   try {
                     bus.on('pagerendered', retry)
@@ -4527,7 +4562,7 @@ window.__ModuleLoader__.load({
                 }
                 const pageRect = pageEl.getBoundingClientRect()
                 if (!(pageRect.width > 0 && pageRect.height > 0)) {
-                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'zero-size' })
+                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'zero-size', seq })
                   return
                 }
 
@@ -4618,6 +4653,7 @@ window.__ModuleLoader__.load({
                   event: 'jump:flash',
                   pageNo,
                   offset,
+                  seq,
                   aligned: alignedNow === true,
                   left: Math.round(left),
                   top: Math.round(top),

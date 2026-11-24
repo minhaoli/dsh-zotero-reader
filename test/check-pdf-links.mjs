@@ -386,9 +386,58 @@ check('提取失败返回 null 而不是抛错',
 /* ---------- 4e. 跳转后落点闪烁 ---------- */
 
 check('跳转成功后给落点加闪烁指示',
-  /const flashJumpTarget = \(pageNo, offset, previewText\) =>/.test(src) &&
+  /const flashJumpTarget = \(pageNo, offset, previewText, seq\) =>/.test(src) &&
     /flashJumpTarget\(pageNo, offset \?\? 0, flashText\)/.test(src),
   '侧栏里页与页长得差不多，光滚过去用户找不到该看哪句')
+
+/**
+ * **代际标记（防竞态）。**
+ *
+ * 场景：连续快速跳转两次。第一次因页元素未渲染挂了延迟 retry；
+ * 第二次已画好高亮；第一次的 retry 迟到执行，而 flashJumpTarget
+ * 开头就是 clearJumpFlash() —— 把第二次的高亮清掉。
+ * 用户看到「跳了但没高亮」，与原始 bug 同症状、更偶发。
+ */
+check('闪烁有代际标记（jumpFlashSeq）',
+  /let jumpFlashSeq = 0/.test(src) &&
+    /const flashJumpTarget = \(pageNo, offset, previewText, seq\) =>/.test(src),
+  '没有代际，迟到的 retry 会清掉新一代的高亮')
+
+check('入口处有 stale 判据，且早于 clearJumpFlash',
+  (() => {
+    const at = src.indexOf('const flashJumpTarget = (pageNo, offset, previewText, seq)')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 2600)
+    /**
+     * 必须先剥注释：函数头的解释性注释里就写着 `clearJumpFlash()`，
+     * 不剥的话会把它当成真实调用，判定永远错位（本项目反复踩过）。
+     */
+    const code = seg
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => {
+        const k = line.indexOf('//')
+        return k >= 0 ? line.slice(0, k) : line
+      })
+      .join('\n')
+    const guard = code.indexOf('if (seq !== jumpFlashSeq)')
+    const clear = code.indexOf('clearJumpFlash()')
+    return guard > 0 && clear > guard
+  })(),
+  'clearJumpFlash 若在判据之前，过期 retry 一进来就把新高亮清了')
+
+check('retry 递归时传入同一代',
+  /setTimeout\(\(\) => flashJumpTarget\(pageNo, offset, previewText, seq\), 60\)/.test(src),
+  '不带同一代会被自己的入口判据作废，高亮永远画不出来')
+
+check('顶层调用不带 seq（自增开启新一代）',
+  /flashJumpTarget\(pageNo, offset \?\? 0, flashText\)/.test(src) &&
+    /if \(seq === undefined\) seq = \+\+jumpFlashSeq/.test(src),
+  '顶层必须开启新一代，否则所有跳转共用一个代际')
+
+check('跳过时记录 stale 原因（便于日志定性）',
+  /reason: 'stale', seq, current: jumpFlashSeq/.test(src),
+  '被新跳转取代和「页元素没出来」是两回事，日志要能分开')
 
 check('闪烁约 1 秒后淡出',
   /const jumpFlashMs = 1000/.test(src) && /data-fade/.test(src) &&
