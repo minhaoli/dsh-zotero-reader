@@ -231,9 +231,19 @@ check('提示挂在 body 上（脱离被裁剪的容器）',
  * 用户的原话：「如果在上方，那么底部要在超链接再往上一些位置。
  * 如果是下方，在是顶部在往下一些位置」—— 不要紧贴。
  */
+/**
+ * 纵向翻转现在集中在 computeTipTop 里：上方优先，放不下翻到下方。
+ * 抽成函数是因为要跑两次（首帧按预估高度、位图到位后按实际高度）。
+ */
 check('提示有上下翻转（上方放不下时放到下方）',
-  /top = r\.top - tipH - gap/.test(src) && /if \(top < 8\) top = r\.bottom \+ gap/.test(src),
+  /const computeTipTop = \(anchor, h\) =>/.test(src) &&
+    /top = r\.top - h - gap/.test(src) &&
+    /if \(top < 8\) \{[\s\S]{0,120}?top = r\.bottom \+ gap/.test(src),
   '翻转逻辑要在，且两个方向用同一个 gap')
+
+check('翻转后按同一个 h 再校验一次（下方也放不下时）',
+  /top \+ h > viewportH - 8/.test(src),
+  '只判上方空间的话，翻到下方仍可能盖住链接或超出视口')
 
 check('浮窗与链接留有间隙（不紧贴）',
   /const gap = 20/.test(src),
@@ -283,16 +293,21 @@ check('同一条链接内部冒泡不重复计算',
  */
 check('getBoundingClientRect 只在定位时各读一次（不反复读）',
   (() => {
-    const at = src.indexOf('const showLinkTip')
-    if (at < 0) return false
-    const body = src.slice(at, at + 12000)
-    const end = body.indexOf("addEventListener('click', onPdfLinkClick")
-    const fn = end > 0 ? body.slice(0, end) : body
-    const hits = (fn.match(/getBoundingClientRect\(\)/g) || []).length
     /**
-     * 现在要读三处：页面一次、链接一次、以及页面矩形缺失时的回退页一次。
-     * 关键是**不随 mousemove 反复读**，所以给一个宽松但有限的上限。
+     * 定位被拆成两块：showLinkTip（横向 + 页面矩形）与
+     * computeTipTop（纵向 + 链接矩形）。合计读取次数要有限，
+     * 关键是**不随 mousemove 反复读**。
      */
+    const at = src.indexOf('const computeTipTop = (anchor, h)')
+    const at2 = src.indexOf('const showLinkTip = (lines, anchor')
+    if (at < 0 || at2 < 0) return false
+    const end2 = src.indexOf("addEventListener('click', onPdfLinkClick", at2)
+    const segs = [
+      src.slice(at, at + 2200),
+      src.slice(at2, end2 > 0 ? end2 : at2 + 9000),
+    ].join('\n')
+    const hits = (segs.match(/getBoundingClientRect\(\)/g) || []).length
+    // 页面最多 2 次（当前页 + 回退页）、链接 1 次
     return hits >= 1 && hits <= 4
   })(),
   '每次强制布局都要还前面的 DOM 写入债，读得越多越卡')
@@ -751,28 +766,51 @@ check('0.5s 判定由链接与浮窗两侧共同驱动',
     /addEventListener\('mouseleave', \(\) => \{ scheduleHideTip\(\) \}\)/.test(src),
   '用户澄清：在链接上或在浮窗上都算「在里面」')
 
-/* ---------- 4h2. 位置固定：弹出后不因鼠标进入而重算 ---------- */
+/* ---------- 4h2. 位置：横向固定、纵向随内容高度复核 ---------- */
 
 /**
  * 位图是异步来的，到位后会再调一次 showLinkTip 补内容。
- * 如果每次都重算位置，鼠标移进浮窗时会看到它「跳」一下。
+ * 关键是**横向固定、纵向按新高度复核** ——
+ * 只动 top 不会左右跳，但不动 top 会因为位图变高而盖住链接。
  */
-check('弹出后位置固定（异步补内容不重算位置）',
+check('有 wasOn 分支处理「已显示时补内容」',
   /const wasOn = tip\.getAttribute\('data-on'\) === '1'/.test(src) &&
-    /if \(wasOn\) \{/.test(src),
-  '补位图时重算位置会让浮窗在鼠标进入时跳动')
+    /if \(wasOn\) \{/.test(src))
 
-check('wasOn 提前返回发生在定位之前',
+/**
+ * wasOn（已显示时补内容）**只重算 top、不动横向**。
+ *
+ * 历史：最初 wasOn 直接 return 不动位置，为的是防止鼠标移进浮窗时跳动。
+ * 但那把「位图到位后浮窗变高、必须重新摆正」也挡掉了 —— 浮窗向下长出去
+ * 盖住链接。现在 wasOn 里按实际高度重算 top（横向仍固定），
+ * 这是方案 C 的 A 部分。
+ */
+check('wasOn 分支按实际高度重算 top（修盖住链接）',
   (() => {
     const at = src.indexOf('const showLinkTip = (lines, anchor')
     if (at < 0) return false
-    const seg = src.slice(at, at + 3600)
-    const wasOn = seg.indexOf('const wasOn = tip.getAttribute')
-    const ret = seg.indexOf('if (wasOn) {')
-    const pos = seg.indexOf('const tipH = tip.offsetHeight')
-    return wasOn > 0 && ret > wasOn && pos > ret
+    const seg = src.slice(at, at + 6000)
+    const wasOn = seg.indexOf('if (wasOn) {')
+    if (wasOn < 0) return false
+    const branch = seg.slice(wasOn, wasOn + 1600)
+    return /const actualH = tip\.offsetHeight/.test(branch) &&
+      /computeTipTop\(anchor, actualH\)/.test(branch) &&
+      /tip\.style\.top = /.test(branch)
   })(),
-  '顺序错了等于没起作用（先定位再返回就白改了）')
+  '只 return 不重算，位图变高后底部会盖住链接')
+
+check('wasOn 重算时不动横向（避免左右跳）',
+  (() => {
+    const at = src.indexOf('const showLinkTip = (lines, anchor')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 6000)
+    const wasOn = seg.indexOf('if (wasOn) {')
+    if (wasOn < 0) return false
+    const branch = seg.slice(wasOn, wasOn + 1600)
+    // 横向属性不该在这个分支里被重写
+    return !/tip\.style\.left = /.test(branch) && !/tip\.style\.width = /.test(branch)
+  })(),
+  '用户要求横向固定对齐页面，补内容时再改 left 会跳')
 
 check('mouseover 会取消挂起的消失',
   /cancelHideTip\(\)[\s\S]{0,80}?if \(anchor === linkTipAnchor\) return/.test(src),
@@ -794,7 +832,7 @@ check('位图槽位有加载占位（避免先塌后跳）',
  * 文字预览半栏宽，且不能有 max-height 截断。
  */
 check('文字预览宽度为半栏（0.5）',
-  /const widthRatio = opts\?\.bitmap \? 0\.8 : 0\.5/.test(src),
+  /const widthRatio = opts\?\.bitmap \? 0\.9 : 0\.5/.test(src),
   '整页宽会一行塞很多字，用户要 1/2 栏')
 
 check('文字预览不被高度截断（内容全部放下去）',
@@ -805,9 +843,9 @@ check('文字预览不被高度截断（内容全部放下去）',
 /**
  * 用户的原话：「悬浮窗的页面大概是 pdf 的 80% 就可以了」。
  */
-check('图片浮窗宽度为页面的 80%',
-  /opts\?\.bitmap \? 0\.8 : 0\.5/.test(src),
-  '原来用 left/right 双约束等于整页宽')
+check('图片浮窗宽度为页面的 90%',
+  /opts\?\.bitmap \? 0\.9 : 0\.5/.test(src),
+  '用户先要 80%，后改 90%')
 
 check('浮窗横向居中于页面（不是贴左边界）',
   /const pageCenter = \(pageRect\.left \+ pageRect\.right\) \/ 2/.test(src),
@@ -832,6 +870,59 @@ check('可滚容器限高（内容必然超出）',
 check('位图插入后主动滚到目标位置',
   /shot\.scrollHeight \* ratio - shot\.clientHeight \* 0\.18/.test(src),
   '整页位图若不定位，用户看到的是页首而不是目标')
+
+/* ---------- 4k. 位图浮窗不带文字行 + 定位用预估/实际高度 ---------- */
+
+/**
+ * 用户的原话：「下方的这个文字提醒可以不用，在超链接对应是图和公式的时候」。
+ * 位图浮窗只留位图，文字预览那条保留页码。
+ */
+check('位图浮窗不再带底部文字行',
+  (() => {
+    const at = src.indexOf('if (canvas) {')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 1200)
+    /**
+     * 只看 **if (canvas) 到 else if (preview) 之间** —— 那才是位图成功分支。
+     * `else if (preview)` 是位图失败时的退路，那里带 caption 是对的。
+     */
+    const endRel = seg.indexOf('} else if (preview)')
+    const branch = endRel > 0 ? seg.slice(0, endRel) : seg
+    const code = branch
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => {
+        const k = line.indexOf('//')
+        return k >= 0 ? line.slice(0, k) : line
+      })
+      .join('\n')
+    return /showLinkTip\(\[\], anchor/.test(code) && !/text: caption/.test(code)
+  })(),
+  '用户明确不要位图浮窗下方的文字提醒')
+
+check('文字预览仍保留页码（那条没有图，页码是唯一位置线索）',
+  /if \(!isPreviewableDest\(decName, dest\)\) \{[\s\S]{0,600}?kind: 'dim', text: caption/.test(src),
+  '文字预览去掉页码就完全没有位置信息了')
+
+/**
+ * 用户报「窗口还是会覆盖住超链接」。
+ *
+ * 根因：tipH 用的是位图插入前的占位高度（min-height:96px），
+ * 等真位图（几百 px）进来，浮窗向下长出去，底边盖住链接。
+ */
+check('位图浮窗用预估高度定位（不是占位高度）',
+  /const estimateBitmapTipH = \(\) =>/.test(src) &&
+    /const tipH = opts\?\.bitmap\s*\n\s*\? estimateBitmapTipH\(\)/.test(src),
+  '拿 96px 占位高度算 top，位图一进来就会向下盖住链接')
+
+check('预估高度按位图区上限算',
+  /Math\.min\(window\.innerHeight \* 0\.46, 420\)/.test(src),
+  '要和 .zr-tip-shot 的 max-height 保持一致')
+
+check('纵向定位抽成 computeTipTop（首帧与复核共用）',
+  /const computeTipTop = \(anchor, h\) =>/.test(src) &&
+    /top = computeTipTop\(anchor, tipH\)/.test(src),
+  '两处各写一遍容易不一致，抽出来才保证首帧和复核用同一套判据')
 
 
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */

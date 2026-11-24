@@ -5229,6 +5229,84 @@ const placeBox = (el, l, t, wd, ht) => {
              * @param {HTMLElement|null} anchor 锚定元素；null 表示居中
              * @param {{bitmap?: boolean}} [opts] bitmap: 预留位图槽位（加载态）
              */
+/**
+             * 位图浮窗的**预估高度**（像素）。
+             *
+             * 为什么需要：位图是异步渲染的，首次定位时槽位里只有一个
+             * `data-loading` 占位（min-height:96px）。若拿这个 96px 去算
+             * top，等真位图插进来（几百 px 高）浮窗就会向下长出去，
+             * 把链接本身盖住 —— 用户报的「窗口还是会覆盖住超链接」正是它。
+             *
+             * 估算依据：`.zr-tip-shot` 的 max-height 是 min(46vh,420px)，
+             * 位图多数情况下会顶到这个上限（现在是整页裁切，必然超）。
+             * 所以直接按上限估，取两者较小值。
+             */
+            const estimateBitmapTipH = () => {
+              try {
+                const cap = Math.min(window.innerHeight * 0.46, 420)
+                // 位图浮窗不放文字行了，高度就是位图区本身
+                return Math.max(96, cap)
+              } catch { return 300 }
+            }
+
+            /**
+             * **纵向定位：上方优先，放不下翻到下方，并保证不越过视口。**
+             *
+             * 抽成函数是因为它要跑两次：
+             *   · 首次定位用**预估高度**（方案 B：首帧就摆对，不闪）；
+             *   · 位图真正插入后再用**实际高度**复核一次（方案 A：兜住
+             *     预估与实际不符的情况）。
+             *
+             * 横向不在这里算 —— 用户要求横向固定对齐页面，
+             * 二次定位只动 top，避免左右跳。
+             *
+             * @param {HTMLElement} anchor 链接元素
+             * @param {number} h 用于判断空间的浮窗高度
+             * @returns {number} 计算出的 top（px）
+             */
+            const computeTipTop = (anchor, h) => {
+              const gap = 20
+              const viewportH = window.innerHeight
+              let top
+              if (anchor) {
+                const r = anchor.getBoundingClientRect()
+                /**
+                 * 先试上方；上方空间不够（连 8px 内边距都放不下）就翻到下方。
+                 * 判据必须用**传进来的 h**（预估或实际），不能用占位高度。
+                 */
+                top = r.top - h - gap
+                if (top < 8) {
+                  top = r.bottom + gap
+                  /**
+                   * 翻到下方后要再校验一次：下方也放不下时，
+                   * 把浮窗往上顶到视口内，同时保证**不盖住链接所在行**
+                   * —— 优先贴底，因为链接在视口偏下时上方通常是空的。
+                   */
+                  if (top + h > viewportH - 8) {
+                    const clamped = Math.max(8, viewportH - h - 8)
+                    // 若贴底会盖住链接，就改为贴顶（链接在页面偏上时）
+                    if (clamped + h > r.top && clamped < r.bottom) {
+                      top = Math.max(8, Math.min(r.top - h - gap, viewportH - h - 8))
+                      if (top < 8) top = 8
+                    } else {
+                      top = clamped
+                    }
+                  }
+                } else if (top + h > viewportH - 8) {
+                  /**
+                   * 上方放得下但整体超出视口底部（浮窗比视口还高）：
+                   * 贴顶显示，至少保证顶部内容可见。
+                   */
+                  top = Math.max(8, viewportH - h - 8)
+                  if (top < 8) top = 8
+                }
+              } else {
+                top = 56
+              }
+              // 最终夹进视口
+              top = Math.max(8, Math.min(top, Math.max(8, viewportH - h - 8)))
+              return top
+            }
             const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false, opts = null) => {
               const tip = ensureTip()
               /**
@@ -5257,8 +5335,23 @@ const placeBox = (el, l, t, wd, ht) => {
                 shot.setAttribute('data-loading', '1')
               }
               if (wasOn) {
-                // 已在显示：只补内容，不动位置（避免鼠标移入时跳一下）
+                /**
+                 * **已在显示：只按新内容的高度重算纵向，不动横向。**
+                 *
+                 * 原来这里直接 return、完全不重算位置 —— 本意是防止
+                 * 「鼠标移进浮窗时位置跳动」，但把「位图到位后浮窗变高、
+                 * 必须重新摆正」也一起挡掉了。结果浮窗向下长出去盖住链接，
+                 * 正是用户报的那个 bug。
+                 *
+                 * 只重算 top 不会造成左右跳（横向本来就固定对齐页面），
+                 * 所以这里用实际高度复核一次是安全的。
+                 */
                 tip.style.visibility = ''
+                if (anchor) {
+                  const actualH = tip.offsetHeight || 40
+                  const top2 = computeTipTop(anchor, actualH)
+                  tip.style.top = `${Math.round(top2)}px`
+                }
                 cancelHideTip()
                 if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
                 if (autoHideMs > 0) linkWarnTimer = setTimeout(() => hideLinkTip(), autoHideMs)
@@ -5278,7 +5371,21 @@ const placeBox = (el, l, t, wd, ht) => {
                * `getBoundingClientRect` 各读一次 —— 它会强制布局，
                * 而链接是刚画出来的，前面压着一大批没偿还的 DOM 写入。
                */
-              const tipH = tip.offsetHeight || 40
+              /**
+               * **纵向定位用「预估最终高度」，不是占位高度。**
+               *
+               * 这是用户报「窗口会覆盖住超链接」的根因：
+               * 首次定位时位图槽位只有一个 min-height:96px 的占位，
+               * 拿 tip.offsetHeight（≈96）算 top 会把浮窗摆在链接上方
+               * 很远的位置；等真位图（几百 px）插进来，浮窗向下长出去，
+               * 底边就盖住了链接本身。
+               *
+               * 位图浮窗按「位图区上限」预估；文字浮窗内容已经渲染好了，
+               * 直接用实际高度即可。
+               */
+              const tipH = opts?.bitmap
+                ? estimateBitmapTipH()
+                : (tip.offsetHeight || 40)
               /**
                * 页面矩形：优先用锚点所在页，拿不到再退到可见页。
                * 页面元素是定位的参照物，浮窗宽度也按它的宽度算 ——
@@ -5301,12 +5408,12 @@ const placeBox = (el, l, t, wd, ht) => {
                *
                * 用户的原话：
                *   · 参考文献「就 1/2 栏，一行放不下自动换行」→ 文字预览半栏；
-               *   · 「悬浮窗的页面大概是 pdf 的 80% 就可以了」→ 图片浮窗 80%。
+               *   · 「窗口开 90%」→ 图片浮窗 90%（先要 80%，后改 90%）。
                *
                * 两者都**居中于页面**（而不是贴左边界）：贴着页面左边界时，
                * 半栏宽的卡片会停在栏缝里，看着像没对齐。
                */
-              const widthRatio = opts?.bitmap ? 0.8 : 0.5
+              const widthRatio = opts?.bitmap ? 0.9 : 0.5
               if (pageRect && pageRect.width > 0) {
                 /**
                  * 目标宽度 = 页宽 × 比例，并夹进视口。
@@ -5336,25 +5443,11 @@ const placeBox = (el, l, t, wd, ht) => {
                 tip.style.width = opts?.bitmap ? `${Math.round(fallbackW)}px` : ''
               }
               /**
-               * **纵向与链接留出间隙。**
-               *
-               * 用户的原话：「如果在上方，那么底部要在超链接再往上一些位置。
-               * 如果是下方，在是顶部在往下一些位置」——即不要把浮窗紧贴在
-               * 链接上。原来只留 8px，改成 20px。
+               * **纵向交给 computeTipTop**：它负责「上方优先、放不下翻下方、
+               * 都放不下时夹进视口且不盖住链接」，并且全程用同一个 h
+               * （首次是预估高度，位图到位后是实际高度）。
                */
-              const gap = 20
-              if (anchor) {
-                const r = anchor.getBoundingClientRect()
-                top = r.top - tipH - gap
-                // 上方放不下就翻到下方
-                if (top < 8) top = r.bottom + gap
-              } else {
-                top = 56
-              }
-              // 上方下方都放不下时，贴住视口并保证不遮住链接所在行
-              if (top + tipH > window.innerHeight - 8) {
-                top = Math.max(8, window.innerHeight - tipH - 8)
-              }
+              top = computeTipTop(anchor, tipH)
               tip.style.top = `${Math.round(top)}px`
               tip.setAttribute('data-on', '1')
               /**
@@ -5626,9 +5719,18 @@ const placeBox = (el, l, t, wd, ht) => {
                        * 所以要先确认还是同一条链接，避免给旧链接弹窗。
                        */
                       if (linkTipAnchor !== anchor || !anchor.isConnected) return
-                      showLinkTip([
-                        { kind: 'dim', text: '正在渲染目标区域…' },
-                      ], anchor, 0, false, { bitmap: true })
+                      /**
+                       * 位图浮窗骨架：**只留位图，不带任何文字行**。
+                       *
+                       * 用户的原话：「下方的这个文字提醒可以不用，在超链接
+                       * 对应是图和公式的时候」。位图本身已经把目标区域
+                       * 画出来了，底下再压一行「第 N 页 · fig5」既占高度
+                       * 又容易让浮窗长出去盖住链接。
+                       *
+                       * 文字预览（参考文献）那条仍保留页码信息 —— 那里
+                       * 没有图，页码是唯一的位置线索。
+                       */
+                      showLinkTip([], anchor, 0, false, { bitmap: true })
                       /**
                        * **只渲染目标这一页**（用户明确要求），不预取邻页。
                        * 页位图按 pageNo 缓存，同页的不同目标复用同一张图。
@@ -5642,15 +5744,14 @@ const placeBox = (el, l, t, wd, ht) => {
                       const caption = `第 ${pageNo} 页 · ${decName}`
                       if (canvas) {
                         /**
-                         * 有图就以图为主体。先按最终内容（含位图槽位）布局，
-                         * 再把 canvas 塞进槽位 —— 这样定位基于最终高度，
-                         * 不会先按文字高度摆好、图一进来就顶出视口。
+                         * 有图就以图为主体，**不附文字行**。
+                         *
+                         * 配合 `showLinkTip` 里的 wasOn 分支：它会按新的
+                         * 实际高度重算 top，所以位图插进来之后浮窗会重新
+                         * 摆正，不会向下长出去盖住链接。
                          */
-                        showLinkTip([
-                          { kind: 'dim', text: caption },
-                          { kind: 'line', text: '可滚动查看，点链接跳转' },
-                        ], anchor, 0, false, { bitmap: true })
-                        putTipBitmap(tip, canvas)
+                        showLinkTip([], anchor, 0, false, { bitmap: true })
+                        putTipBitmap(tip, canvas, await destVOffset(dest, pageNo))
                       } else if (preview) {
                         // 位图失败（少见）时退回文字预览，总比空窗好
                         showLinkTip([
