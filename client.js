@@ -1395,47 +1395,62 @@ window.__ModuleLoader__.load({
        * 代价是滚动时位置不会跟着动 —— 但鼠标移出链接就会隐藏，
        * 实际不会在滚动中停留。
        */
-      .zr-link-tip{position:fixed;z-index:2147483000;max-width:min(560px,86vw);
-        padding:8px 11px;border-radius:8px;background:var(--dsh-bg-elevated,#2b2b2b);
-        border:1px solid var(--dsh-border,#3f3f3f);box-shadow:0 6px 20px rgba(0,0,0,.38);
+      .zr-link-tip{position:fixed;z-index:2147483000;
+        /*
+         * **没有边框、没有容器感。**
+         *
+         * 用户的原话是「悬浮窗外圈不要加黑色的方框」。原来有
+         * border + box-shadow，看起来像一个浮起来的黑卡片；
+         * 现在位图直接浮在页面上，容器只剩一条极淡的投影把它和
+         * 正文区分开（完全去掉会糊在正文里，边界不清）。
+         */
+        padding:0;border-radius:4px;background:transparent;
+        box-shadow:0 2px 10px rgba(0,0,0,.16);
         font-size:12px;line-height:1.6;color:var(--dsh-text-primary,#e6e6e6);
         /*
-         * **必须接收鼠标事件。**
+         * **接收鼠标事件。**
          *
-         * 原来是 none（纯文字提示，挡住 PDF 点击是纯粹的损失）。
-         * 现在浮窗里是可滚动的位图预览 —— 鼠标要能移进去滚动它，
-         * 而且「链接与浮窗之间来回移动不掉」要求浮窗自己也能触发
-         * mouseenter/mouseleave。所以改成 auto。
+         * 用户澄清了真实意图：「光标不落在悬浮窗以及超链接上连续超过 0.5s
+         * 关闭悬浮窗。如果落在悬浮窗上需要有滑动悬浮窗页面的功能」。
+         * 所以浮窗必须能收 mouseenter/mouseleave（参与 0.5s 判定），
+         * 也必须能接收到滚轮去滚动它自己的内容。
+         *
+         * 注意「不能移动悬浮窗的页面」指的是**滚轮不能穿透到背后的 PDF**，
+         * 不是「浮窗不可滚动」——见下面的 wheel 拦截。
          */
         pointer-events:auto;white-space:normal;overflow-wrap:anywhere;
         opacity:0;visibility:hidden;transition:opacity .12s}
       .zr-link-tip[data-on="1"]{opacity:1;visibility:visible}
       /*
-       * 位图预览区：按 dest 坐标裁出的那一块 PDF 页面。
+       * 位图预览区：按 dest 坐标裁出的那一块页面。
        *
-       * 用 overflow:auto 让用户能自己滑动看目标附近更多内容
-       * （用户的原话「可以自由滑动」）。canvas 用块级布局，
-       * 宽高按裁切比例设好，滚动由这一层负责。
+       * overflow:auto 让用户能在浮窗里滑动看目标附近更多内容
+       * （用户明确要求「需要有滑动悬浮窗页面的功能」）。
+       * 滚轮由 client.js 里的原生 wheel 监听接管，不让它传给 PDF。
        */
-      .zr-link-tip .zr-tip-shot{display:block;margin:0 0 6px;overflow:auto;
-        max-height:min(58vh,460px);background:#fff;border-radius:4px;
-        border:1px solid var(--dsh-border,#3f3f3f)}
+      .zr-link-tip .zr-tip-shot{display:block;overflow:auto;
+        max-height:min(58vh,460px);background:#fff;border-radius:3px;
+        overscroll-behavior:contain}
       .zr-link-tip .zr-tip-shot canvas{display:block;max-width:none}
       /* 位图加载中的占位，避免浮窗先塌成一条线再突然撑开 */
       .zr-link-tip .zr-tip-shot[data-loading="1"]{min-height:96px;
-        background:var(--dsh-bg-elevated,#2b2b2b);border-style:dashed}
-      /* 卡片主行：标题式引导，比正文略重 */
+        background:var(--dsh-bg-elevated,#2b2b2b)}
+      /* 文字补充行：位图之下，带一点底色以便在正文上可读 */
       .zr-link-tip .zr-tip-title{font-weight:600;color:var(--dsh-text-primary,#e6e6e6);
         display:block;margin-bottom:2px}
       /* 卡片副行：文献信息 / 页码，允许折行 */
-      .zr-link-tip .zr-tip-line{display:block;color:var(--dsh-text-secondary,#b8b8b8)}
+      .zr-link-tip .zr-tip-line{display:block;color:var(--dsh-text-secondary,#d0d0d0);
+        background:rgba(0,0,0,.62);padding:2px 6px;border-radius:3px}
       /* DOI / URL 那一行：蓝色下划线，模仿 Zotero 的可点样式（这里不可点，只做视觉区分） */
-      .zr-link-tip .zr-tip-link{display:block;color:var(--dsh-accent,#3d8bfd);
-        text-decoration:underline;overflow-wrap:anywhere}
+      .zr-link-tip .zr-tip-link{display:block;color:var(--dsh-accent,#6cb0ff);
+        text-decoration:underline;overflow-wrap:anywhere;
+        background:rgba(0,0,0,.62);padding:2px 6px;border-radius:3px}
       /* 目标名这类次要信息 */
-      .zr-link-tip .zr-tip-dim{display:block;color:var(--dsh-text-tertiary,#8a8a8a);font-size:11px}
+      .zr-link-tip .zr-tip-dim{display:block;color:var(--dsh-text-tertiary,#c8c8c8);
+        font-size:11px;background:rgba(0,0,0,.62);padding:2px 6px;border-radius:3px}
       /* 告警态：外部链接被宿主拒掉时用，颜色区分「这是个失败的提示」 */
-      .zr-link-tip[data-warn="1"]{border-color:var(--dsh-danger,#c0392b)}
+      .zr-link-tip[data-warn="1"] .zr-tip-line,
+      .zr-link-tip[data-warn="1"] .zr-tip-dim{color:#ffb4ab}
       /* 工具条里阅读控件与批注工具之间的分隔线 */
       .zr-sep{width:1px;height:18px;background:var(--dsh-border,#3a3a3a);margin:0 2px;flex:0 0 auto}
       /* 调色板：八个小色块，当前颜色加描边 */
@@ -4315,6 +4330,49 @@ window.__ModuleLoader__.load({
              * 用户看到的还是「一条碎片」。所以以锚点为中心上下各取一段，
              * 宁可多给上下文。
              */
+            /**
+             * **这个链接该不该弹位图浮窗？**
+             *
+             * 用户的原话是「只有图、公式需要悬浮窗」。原来所有 PDF 内链接
+             * （`#cite.*`、`#page=N`、`#eq1`、`#fig8`）都弹，既吵又白渲染。
+             *
+             * 判定用三类信号，**名字只是其一**（纯靠前缀猜会很脆）：
+             *
+             * ① 名字前缀（最直接的意图信号）。LaTeX 的 \label 约定俗成：
+             *    fig/figure/table/tab/eq/equation/alg/algorithm +
+             *    可选分隔符 + 编号。表格算「图」——用户说的是「图片、公式」，
+             *    而表格同样是文本层里只剩碎片的非文字内容，价值相同。
+             *    刻意**不用** `cite`/`bib`/`ref`/`sec`/`page` 这些——
+             *    引用、章节、页码都是纯文字目标，弹窗没有增量价值。
+             *
+             * ② dest 类型（比名字更硬的版面信号）。`FitR` 给的是一个矩形，
+             *    PDF 里用矩形框定的目标绝大多数就是图/表/公式块；
+             *    而 `FitH`/`XYZ` 这种「给个 y 就完了」的定位对正文和图片
+             *    一视同仁，不构成信号。
+             *
+             * ③ 最后兜底：名字既不像图也不像公式时，**保守不弹**。
+             *    宁可少弹（用户还能点过去看），也不要乱弹一屏正文。
+             *
+             * 返回 true 才弹。调用方在渲染之前就要用它分流，
+             * 避免为一页白渲染 bitmap。
+             */
+            const FIGURE_NAME_RE = /^(?:fig|figure|tab|table|eq|equation|alg|algorithm)(?:[._-]?\d|$)/i
+            const isPreviewableDest = (rawName, dest) => {
+              const name = String(rawName ?? '').trim()
+              if (name && FIGURE_NAME_RE.test(name)) return true
+              const kind = dest?.[1]?.name
+              /**
+               * FitR = 矩形框定。名字没命中时，矩形是唯一能说明
+               * 「这一块是独立版面单元」的信号。
+               */
+              if (kind === 'FitR') {
+                const r = [dest[2], dest[3], dest[4], dest[5]]
+                // 四个分量齐全才算有效矩形
+                if (r.every((v) => typeof v === 'number' && Number.isFinite(v))) return true
+              }
+              return false
+            }
+
             const destRegionPts = (dest, widthPt, heightPt) => {
               const kind = dest?.[1]?.name
               const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -4680,14 +4738,59 @@ window.__ModuleLoader__.load({
               linkTip.className = 'zr-link-tip'
               linkTip.setAttribute('data-on', '0')
               /**
-               * 浮窗要能接收鼠标事件（CSS 里已改成 pointer-events:auto），
-               * 并且自己参与「延迟消失」的判定：
-               * 鼠标从链接移进浮窗时不能消失，否则想滚动看一眼都做不到。
+               * **浮窗参与 0.5s 消失判定。**
+               *
+               * 用户澄清的语义：「光标不落在悬浮窗以及超链接上连续超过
+               * 0.5s 关闭」。所以移进浮窗要取消消失，移出去要重排消失。
                */
               linkTip.addEventListener('mouseenter', () => { cancelHideTip() })
               linkTip.addEventListener('mouseleave', () => { scheduleHideTip() })
+              /**
+               * **滚轮只滚浮窗，不穿透到背后的 PDF。**
+               *
+               * 这就是用户说的「悬浮窗外的页面不能被移动」的真实含义：
+               * 他要在浮窗里滑动看图，但背后的 PDF 不能跟着滚。
+               *
+               * 三个要点：
+               *   · 必须 `passive:false` —— passive 监听里 preventDefault 无效。
+               *   · 必须用**原生** addEventListener：React 17+ 把 wheel
+               *     注册在根节点且是 passive 的，`preventDefault` 不生效
+               *     （本项目在滚轮缩放那段已经踩过这个坑）。
+               *   · stopPropagation 挡住冒泡，preventDefault 再断掉浏览器的
+               *     默认滚动链，两层都要。
+               */
+              linkTip.addEventListener('wheel', onTipWheel, { passive: false })
               document.body.appendChild(linkTip)
               return linkTip
+            }
+
+            /**
+             * 浮窗内的滚轮处理：先滚浮窗自己，滚到头也不外溢。
+             *
+             * 只有 `.zr-tip-shot` 真正可滚（overflow:auto），
+             * 所以把 wheel 转给它；到边界时 preventDefault 兜住，
+             * 避免滚动链继续往 PDF 那个滚动容器传。
+             */
+            const onTipWheel = (event) => {
+              event.stopPropagation()
+              try {
+                const shot = linkTip?.querySelector?.('.zr-tip-shot')
+                if (shot) {
+                  const maxTop = shot.scrollHeight - shot.clientHeight
+                  if (maxTop > 0) {
+                    shot.scrollTop += event.deltaY
+                    // 滚到边界后不让事件继续传播（否则会滚 PDF）
+                    if (shot.scrollTop <= 0 || shot.scrollTop >= maxTop) {
+                      shot.scrollTop = Math.max(0, Math.min(maxTop, shot.scrollTop))
+                    }
+                  }
+                }
+              } catch { /* ignore */ }
+              /**
+               * 无论如何都不让这一下滚轮影响 PDF：浮窗是覆盖层，
+               * 它内部的滚动不该带动背后文档。
+               */
+              event.preventDefault()
             }
 
             /** 悬停延时句柄；0 表示没有待执行的悬停。 */
@@ -4699,10 +4802,12 @@ window.__ModuleLoader__.load({
             /**
              * **延迟消失句柄（0.5s）。**
              *
-             * 直接 mouseout 就隐藏的话，鼠标从链接移到浮窗（想滚动看一眼）
-             * 中途必然经过空隙，浮窗当场消失。用户实测 Zotero 的行为是
-             * 「连续 0.5 秒既不在链接上、也不在浮窗上才消失」，所以我们
-             * 用同一个定时器：链接与浮窗的进入事件取消它，离开事件重排它。
+             * 鼠标离开链接后不立刻隐藏，而是等 0.5s：这段时间里从链接
+             * 划到别处或回头再看一眼，浮窗都不会闪。回到链接上时
+             * cancelHideTip 会把它取消。
+             *
+             * 浮窗本身不可交互（pointer-events:none），所以这里只有
+             * 链接一侧的两个事件参与判定。
              */
             let linkHideTimer = 0
             const cancelHideTip = () => {
@@ -4794,6 +4899,17 @@ window.__ModuleLoader__.load({
              */
             const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false, opts = null) => {
               const tip = ensureTip()
+              /**
+               * **弹出后位置就固定。**
+               *
+               * 位图是异步来的，到位后会再调一次这个函数补内容。
+               * 如果每次都重新算位置，卡片会「跳」一下 —— 尤其鼠标这时
+               * 可能已经移到浮窗上，重算会把它挪走。
+               *
+               * 所以只有**首次弹出**（当前不在显示状态）才定位；
+               * 已经显示时只更新内容、保留原来的 left/top。
+               */
+              const wasOn = tip.getAttribute('data-on') === '1'
               if (typeof lines === 'string') renderTipLines(tip, [{ kind: 'title', text: lines }])
               else renderTipLines(tip, Array.isArray(lines) ? lines : [])
               tip.setAttribute('data-warn', warn ? '1' : '0')
@@ -4808,34 +4924,75 @@ window.__ModuleLoader__.load({
                 const shot = putTipBitmap(tip, null)
                 shot.setAttribute('data-loading', '1')
               }
+              if (wasOn) {
+                // 已在显示：只补内容，不动位置（避免鼠标移入时跳一下）
+                tip.style.visibility = ''
+                cancelHideTip()
+                if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
+                if (autoHideMs > 0) linkWarnTimer = setTimeout(() => hideLinkTip(), autoHideMs)
+                return
+              }
               /**
-               * 定位：优先放在链接上方；上方空间不够（贴近视口顶部）就放下方。
-               * 左右夹在视口内，避免长 URL 把提示顶出屏幕。
+               * **定位：横向对齐正文页面，纵向跟着链接。**
                *
-               * `getBoundingClientRect` 只在这里读一次 —— 它会强制布局，
+               * 用户的原话：「悬浮窗应该在超链接的上方，并且位置和正文页面
+               * 在同个位置，而不是根据超链接的位置会左右移动」。
+               *
+               * 所以横坐标取**页面元素**（`.page[data-page-number]`）的
+               * 左右边界，而不是链接自己的 x —— 同一页里不同 x 的链接
+               * 会弹在完全相同的横向位置，像 Zotero 那样贴着版面走。
+               * 纵向仍按链接算：优先在链接上方，上方不够就放下方。
+               *
+               * `getBoundingClientRect` 各读一次 —— 它会强制布局，
                * 而链接是刚画出来的，前面压着一大批没偿还的 DOM 写入。
-               *
-               * 卡片是多行的，高度可能远超旧单行条，所以「上方够不够放」
-               * 要按实际高度算，否则贴近页顶时上半截会被视口切掉。
                */
-              const tipW = Math.min(tip.offsetWidth || 240, window.innerWidth - 16)
               const tipH = tip.offsetHeight || 40
+              /**
+               * 页面矩形：优先用锚点所在页，拿不到再退到可见页。
+               * 页面元素是定位的参照物，浮窗宽度也按它的宽度算 ——
+               * 不再用 min(560px,86vw) 那种与版面无关的硬上限。
+               */
+              let pageRect = null
+              try {
+                const linkPage = anchor?.closest?.('.page')
+                pageRect = linkPage?.getBoundingClientRect?.() ?? null
+                if (!pageRect || !(pageRect.width > 0)) {
+                  const anyPage = host?.querySelector?.('.page')
+                  pageRect = anyPage?.getBoundingClientRect?.() ?? null
+                }
+              } catch { /* 取不到就退回视口居中 */ }
+
               let left
               let top
+              if (pageRect && pageRect.width > 0) {
+                /**
+                 * 横向与页面同宽同左边界，并夹进视口。
+                 * 页面比视口宽时（放大很多）夹住，别让浮窗跑到屏幕外。
+                 */
+                const pageLeft = Math.max(8, Math.min(pageRect.left, window.innerWidth - 120))
+                const pageRight = Math.min(window.innerWidth - 8, Math.max(pageRect.right, pageLeft + 120))
+                left = pageLeft
+                // 宽度交给 CSS：用 left/right 同时约束，比算 px 更稳
+                tip.style.left = `${Math.round(left)}px`
+                tip.style.right = `${Math.round(window.innerWidth - pageRight)}px`
+                tip.style.width = 'auto'
+              } else {
+                tip.style.right = 'auto'
+                left = Math.max(8, (window.innerWidth - Math.min(560, window.innerWidth - 16)) / 2)
+                tip.style.left = `${Math.round(left)}px`
+                tip.style.width = ''
+              }
               if (anchor) {
                 const r = anchor.getBoundingClientRect()
-                left = Math.max(8, Math.min(r.left, window.innerWidth - tipW - 8))
                 top = r.top - tipH - 8
                 if (top < 8) top = r.bottom + 8
               } else {
-                left = Math.max(8, (window.innerWidth - tipW) / 2)
                 top = 56
               }
               // 下方空间也不够时，贴住视口底部，至少让最上面几行可见
               if (top + tipH > window.innerHeight - 8) {
                 top = Math.max(8, window.innerHeight - tipH - 8)
               }
-              tip.style.left = `${Math.round(left)}px`
               tip.style.top = `${Math.round(top)}px`
               tip.setAttribute('data-on', '1')
               /**
@@ -5015,36 +5172,28 @@ window.__ModuleLoader__.load({
                 if (!anchor.isConnected || !host.contains(anchor)) return
                 const href = anchor.getAttribute('href') || ''
                 if (!href) return
-                const pageMatch = /^#page=(\d+)/i.exec(href)
-                if (pageMatch) {
-                  showLinkTip([
-                    { kind: 'title', text: `文档内跳转 · 第 ${pageMatch[1]} 页` },
-                  ], anchor)
-                  return
-                }
+                /**
+                 * `#page=N` 只是翻页：不弹任何浮窗。
+                 *
+                 * 用户的原话是「只有图、公式需要悬浮窗」，
+                 * 翻页目标没有内容可预览，弹出来纯属噪音。
+                 */
+                if (/^#page=(\d+)/i.test(href)) return
                 if (href.startsWith('#')) {
                   const rawName = href.slice(1)
-                  /**
-                   * **具名目标的预览 = 位图 + 文字。**
-                   *
-                   * 用户的原话是「figure 显示还是不对…图片、公式都要是这样的」。
-                   * 只给文字解决不了这一点：figure 在文本层里只剩
-                   * 「FIGURE 8」「B3 to M3a prediction shifts...」这种碎片。
-                   * 所以主体改成**把目标区域画出来**（canvas），
-                   * 文字退成补充信息（页码 + 目标名）。
-                   *
-                   * 顺序：先出带占位槽的浮窗（悬停要即时反馈），
-                   * 再异步解析 dest → 渲染位图 → 塞进槽位。
-                   */
                   const decName = (() => {
                     try { return decodeURIComponent(rawName) } catch { return rawName }
                   })()
-                  showLinkTip([
-                    { kind: 'dim', text: '正在渲染目标区域…' },
-                  ], anchor, 0, false, { bitmap: true })
                   /**
-                   * 异步补位图与文字。此时用户可能已经移开鼠标（卡片已隐藏、
-                   * linkTipAnchor 已换人），所以回写前要确认「还是这一条」。
+                   * **先判类型，再决定要不要渲染。**
+                   *
+                   * 用户的原话是「只有图、公式需要悬浮窗」。原来所有具名目标
+                   * 都弹位图，`#cite.xxx` 这种纯文字目标也会白渲染一整页。
+                   *
+                   * 判定必须在 renderDestBitmap 之前 —— 渲染一页是几十到
+                   * 几百毫秒的画布工作，为不该弹的目标付这个成本毫无意义。
+                   * 所以这里要先解析 dest（getDestination 只读字典，很轻），
+                   * 再用 isPreviewableDest 分流。
                    */
                   void (async () => {
                     try {
@@ -5053,6 +5202,19 @@ window.__ModuleLoader__.load({
                       let dest = await pdfDocument.getDestination(decName)
                       if (typeof dest === 'string') dest = await pdfDocument.getDestination(dest)
                       if (!Array.isArray(dest) || dest.length === 0) return
+                      /**
+                       * 不是图/公式 → 直接不弹。
+                       * 注意这里**还没有渲染任何位图**，代价只是一次字典查询。
+                       */
+                      if (!isPreviewableDest(decName, dest)) return
+                      /**
+                       * 类型确认之后才出浮窗骨架 —— 期间用户可能已经移开，
+                       * 所以要先确认还是同一条链接，避免给旧链接弹窗。
+                       */
+                      if (linkTipAnchor !== anchor || !anchor.isConnected) return
+                      showLinkTip([
+                        { kind: 'dim', text: '正在渲染目标区域…' },
+                      ], anchor, 0, false, { bitmap: true })
                       const destRef = dest[0]
                       let pageIndex
                       if (Number.isInteger(destRef)) pageIndex = destRef
@@ -5134,6 +5296,16 @@ window.__ModuleLoader__.load({
               linkWarnTimer = 0
               linkHideTimer = 0
               linkTipAnchor = null
+              /**
+               * 移除事件监听再摘节点。
+               *
+               * 节点被 remove() 后监听理论上会随它一起被回收，
+               * 但这里显式摘掉更稳（且 wheel 是 passive:false 的，
+               * 留着它对浏览器/扩展的清理更不友好）。
+               */
+              try {
+                linkTip?.removeEventListener('wheel', onTipWheel, { passive: false })
+              } catch { /* ignore */ }
               try { linkTip?.remove() } catch { /* ignore */ }
               linkTip = null
               /**
