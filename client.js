@@ -1422,31 +1422,25 @@ window.__ModuleLoader__.load({
         opacity:0;visibility:hidden;transition:opacity .12s}
       .zr-link-tip[data-on="1"]{opacity:1;visibility:visible}
       /*
-       * 位图预览区：按 dest 坐标裁出的那一块页面。
+       * 位图预览区：**一整页**，按浮窗宽度等比缩放。
        *
-       * **限高是「能滚动」的前提。** 用户报「现在滑动没有任何效果」，
-       * 根因就是这里的 max-height（58vh/460px）比内容（原裁切仅 42% 页高，
-       * ≈354px）还大 —— 内容不溢出，scrollHeight - clientHeight 恒为 0，
-       * 滚轮自然滚不动。
-       * 现在裁切改成整页（见 destRegionPts），这里同时把高度收到
-       * min(46vh,420px)，内容必然溢出 → 滚轮与滚动条都可用。
+       * 高度由 JS 用行内值设成 popupH（0.3 × 页高，实测 297px），
+       * 内容是一整页（同一页在 630px 宽下约 892px）→ 必然溢出，
+       * 滚轮与滚动条才有可滚的余量（scrollHeight - clientHeight 大于 0）。
+       *
+       * 这里保留 max-height 只作骨架帧兜底：JS 还没写行内高度时，
+       * 别让空槽塌成 0 高；一旦写入行内 height，它优先于这条规则。
        */
-      /* 位图区高度上限。JS 会按链接上下可用空间再设一次行内 maxHeight，
-         这里只是兜底默认值，与 computeTipPlacement 的天花板保持一致
-         （min(80vh,780px)）——两边不同步的话，行内值没设上的场合
-         会退回这个旧的小上限，浮窗又变矮。 */
       .zr-link-tip .zr-tip-shot{display:block;overflow:auto;
         max-height:min(80vh,780px);background:#fff;border-radius:3px;
         overscroll-behavior:contain}
       /*
-       * canvas 的显示尺寸由 JS 显式写在 style 上（双向约束算出来的
-       * cssW × cssH），这里不能再写 max-width:100% 配 height:auto ——
-       * height:auto 会按宽度比例反推高度、把 JS 设的高度覆盖掉，
-       * 于是「可用高不够时让宽度妥协」这条规则永远不生效，
-       * 图会被撑到超出浮窗高度然后再被父层裁掉。
+       * canvas 的显示尺寸由 JS 显式写死成 popupW × (页面高/宽 × popupW)
+       * —— 宽度与浮窗同源，高度只按页面比例推。
        *
-       * 保留 max-width:none 让 canvas 按自己的尺寸显示；
-       * 溢出由 .zr-tip-shot 的 overflow:auto 滚动解决。
+       * 这里不能再写 max-width:100%：那会在 canvas 比容器宽时把它压扁，
+       * 又变成「canvas 和浮窗两套几何」。行内 style 也覆盖 height:auto，
+       * 所以高度不会被宽度比例反推回去；溢出交给上面的 overflow:auto。
        */
       .zr-link-tip .zr-tip-shot canvas{display:block;max-width:none;height:auto}
       /* 位图加载中的占位，避免浮窗先塌成一条线再突然撑开 */
@@ -5276,39 +5270,29 @@ window.__ModuleLoader__.load({
             }
 
             /**
-             * 生成一个已裁好的 canvas 元素（直接能塞进浮窗）。
-             * @returns {Promise<HTMLCanvasElement|null>}
-             */
-            /**
-             * 生成一个已裁好的 canvas 元素（直接能塞进浮窗）。
+             * **历史区域推导 —— 已不再用于浮窗尺寸。**
              *
-             * @param {Array} dest 命名目标数组
-             * @param {number} pageNo 目标页
-             * @param {{targetCssWidth?:number, availH?:number}} [opts]
-             *   targetCssWidth 浮窗位图区可用宽度；availH 可用高度。
-             *   给了就按它渲染与显示，没给退回 520（向后兼容）。
-             * @returns {Promise<HTMLCanvasElement|null>}
-             */
-            /**
-             * **位图浮窗的几何：唯一一处计算 popupW / popupH。**
+             * 下面三个函数属于「从 PDF 推导图/表/公式边界 → 裁出来 →
+             * 放大填满浮窗」那套旧方案：`inferDestRegion` 按文本层空白带
+             * 推区域，`destRegionPts` 按 dest 取矩形，`computeBitmapGeometry`
+             * 把区域做 contain 缩放并给出 popupW/popupH。
              *
-             * 之前几何分散在三处（renderDestBitmap 算 canvas 尺寸、
-             * placeHorizontal 按 0.9×页宽 算浮窗宽、wasOn 再用 offsetHeight
-             * 重算高度），结果是日志里 `canvasCssW=1240` 而 `popupW=630`
-             * —— canvas 被 `max-width:100%` 压扁一半，图自然又扁又小。
+             * 该方案已废弃：实测 509×308pt 的区域被渲成 1240×720px
+             * （约 2.4 倍），图和字都巨大；而且它算出的 popupW/popupH
+             * 与显示层各成一套几何，日志里出现 `canvasCssW=1240` 而
+             * `popupW=630`。浮窗尺寸现在唯一由 `computePopupSize` 给出，
+             * 内容由 `renderPagePreview` 整页输出。
              *
-             * 现在集中在这里算一次：region → contain 缩放 → popupW/popupH，
-             * 下游（placeHorizontal / renderDestBitmap / showLinkTip）全部复用。
-             *
-             * @returns {Promise<{region, scale, popupW, popupH}|null>}
+             * **故意保留**这三个函数：跳转高亮等场景仍可能需要按 dest
+             * 定位区域，它们也有独立的回归测试。不要因为暂时没有调用点
+             * 就删掉，更不要再用它们决定浮窗尺寸。
              */
             /**
              * **位图浮窗的高度天花板 —— 唯一来源。**
              *
-             * `computeTipPlacement` 与 `computeBitmapGeometry` 都必须用它。
-             * 两处各写一遍就会分叉：实测 #fig8 的 geo.popupH 按 879 渲染
-             * canvas，而放置阶段又夹到 780 → 底部 99px 被裁掉、
-             * geoConsistent=false。
+             * `computeTipPlacement` 用它给出「空间充足时的最大高度」。
+             * 位图浮窗的期望高度现在是 `popupH`（0.3 × 页高），这个
+             * 天花板只作兜底：拿不到 popupH 时才会用到。
              *
              * 取 min(80vh, 780)：占视口八成、上限 780。
              */
@@ -5383,101 +5367,62 @@ window.__ModuleLoader__.load({
                 }
               } catch { return null }
             }
-            const renderDestBitmap = async (dest, pageNo, opts = null) => {
+            const renderPagePreview = async (pageNo, popupW) => {
               try {
                 const pdfDocument = pdfRef.current?.doc
                 if (!pdfDocument) return null
                 /**
-                 * **先算渲染分辨率。**
-                 *
-                 * 顺序很重要：要先把「显示多大」算出来，才知道该按什么分辨率
-                 * 渲染。旧顺序是先按固定宽度渲染、再算显示尺寸 ——
-                 * 于是 contain 放大到 3x 时 canvas 像素根本不够，图会发虚。
-                 *
-                 * 这里先要一个基准位图拿到页面点尺寸，再用它推区域与显示尺寸，
-                 * 需要更高分辨率时再渲一次（分辨率变化会走缓存的新 key）。
+                 * 按**浮窗宽度**渲染整页位图：显示宽度即 popupW，
+                 * 像素密度由 renderPageBitmap 内部按 dpr 决定（夹 2 以内）。
                  */
-                let bitmap = await renderPageBitmap(pdfDocument, pageNo, opts?.targetCssWidth)
+                const bitmap = await renderPageBitmap(pdfDocument, pageNo, popupW)
                 if (!bitmap) return null
                 const { widthPt, heightPt } = bitmap
                 /**
-                 * **复用调用方算好的几何（单一几何源）。**
+                 * **不再裁区域。**
                  *
-                 * region / scale / popupW 都由 `computeBitmapGeometry` 一次算定，
-                 * 这里不再自己推一遍 —— 两处各算一遍正是
-                 * 「canvasCssW=1240 而 popupW=630」的根源。
-                 * 仅在调用方没给 geo 时（例如其它调用路径）才回退自算。
+                 * 旧实现拿 `computeBitmapGeometry` 的 region/scale 把目标块
+                 * 从整页里复制出来，再按 contain 放大到填满浮窗 —— 实测
+                 * 509×308pt 的区域被渲成 1240×720px（约 2.4 倍），图和字
+                 * 都巨大，用户明确否掉了这个方向。
+                 *
+                 * 现在的语义是「浮窗里放一整页，按浮窗宽度等比缩小，
+                 * 内部可滚动」：整页位图直接复用 `renderPageBitmap`，
+                 * 它已按 `pageNo@宽度` 缓存，同一页换宽度不会命中旧位图。
                  */
-                const geo = opts?.geo || await computeBitmapGeometry(
-                  dest, pageNo,
-                  typeof opts?.availW === 'number' ? opts.availW : (opts?.targetCssWidth || 1240),
-                  typeof opts?.availH === 'number' ? opts.availH : 880,
-                )
-                if (!geo) return null
-                const region = geo.region
-                const cssW = geo.popupW
-                const cssH = geo.popupH
-                const scaleFit = geo.scale
-                const scaleCap = geo.scaleCap
                 const canvas = bitmap.canvas
-                // PDF 点 → 位图像素（横向不需要翻转，纵向见下）
-                const sx = Math.max(0, Math.floor(region.x * scale))
-                const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(region.w * scale)))
                 /**
-                 * 纵向要翻转：region.y 是 PDF 左下原点、从页底量起，
-                 * 而 canvas 的 y 从顶部往下。整块区域在 canvas 里的顶边是
-                 *   (pageHeightPt - region.y - region.h) * scale
-                 * 用它的 ceil/floor 尺寸算绘制高度，保证不越过画布边界。
-                 */
-                const syFromTop = Math.max(0, Math.floor((heightPt - region.y - region.h) * scale))
-                const copyH = Math.max(1, Math.min(
-                  canvas.height - syFromTop,
-                  Math.ceil(region.h * scale),
-                ))
-                const out = document.createElement('canvas')
-                out.width = sw
-                out.height = copyH
-                const ctx = out.getContext('2d', { alpha: false })
-                if (!ctx) return null
-                ctx.fillStyle = '#ffffff'
-                ctx.fillRect(0, 0, out.width, out.height)
-                ctx.drawImage(canvas, sx, syFromTop, sw, copyH, 0, 0, sw, copyH)
-                /**
-                 * **显示尺寸用前面 contain 算出的 cssW/cssH。**
+                 * **canvas 的 CSS 尺寸 = 浮窗宽度 × 页面自身宽高比。**
                  *
-                 * 注意不能用 `out.width / scale`：那个式子数学上恒等于
-                 * `region.w`（PDF 点），与 dpr、与浮窗宽度都无关 ——
-                 * 实测 A4 整页无论 dpr=1 还是 2，CSS 永远是 595×843，
-                 * 于是「图总是很小」。
+                 * 宽度必须等于 popupW（单一几何源），高度只按页面比例推，
+                 * 不再由任何「区域高度 × 缩放」决定 —— 否则又会出现
+                 * 「canvas 1240 而浮窗 630」那种两套几何。
                  */
-                out.style.width = `${Math.round(cssW)}px`
-                out.style.height = `${Math.round(cssH)}px`
+                const cssW = Math.max(1, Math.round(bitmap.cssWidth))
+                const cssH = Math.max(1, Math.round(cssW * (heightPt / widthPt)))
+                /**
+                 * **显示尺寸用 cssW/cssH（宽度 = popupW）。**
+                 *
+                 * 不能用 `canvas.width / scale`：那个式子数学上恒等于页面
+                 * 宽度（PDF 点），与 dpr、与浮窗宽度都无关 —— 实测 A4 整页
+                 * 无论 dpr=1 还是 2，CSS 永远是 595×843。
+                 */
+                canvas.style.width = `${cssW}px`
+                canvas.style.height = `${cssH}px`
+                // 不让任何 max-width 规则再压一次：宽度已经等于浮窗宽度
+                canvas.style.maxWidth = 'none'
                 /**
                  * 把本次实际尺寸挂到元素上，供诊断读取
-                 * （判断「被截断」还是「图本身没放大」全靠它）。
-                 * 另外记 regionKind（figure/equation/page）便于回看规则命中情况。
+                 * （判断 canvas 与浮窗是否同源、渲染是否被像素预算夹住）。
                  */
                 try {
-                  out.dataset.cssW = String(Math.round(cssW))
-                  out.dataset.cssH = String(Math.round(cssH))
-                  out.dataset.regionW = String(Math.round(region.w))
-                  out.dataset.regionH = String(Math.round(region.h))
-                  out.dataset.targetCssW = String(Math.round(availW))
-                  /**
-                   * **几何一律从 `geo` 取，不从局部变量。**
-                   *
-                   * `regionKind` 原先写 `inferred ? ...`，但区域推导已上移到
-                   * `computeBitmapGeometry`，`inferred` 在本函数里根本不存在
-                   * → 恒为 null。`scale`/`scaleCap` 同理，旧变量名残留。
-                   * 日志里 `scale=0 cap=0 kind=null` 就是这么来的。
-                   */
-                  out.dataset.regionKind = geo.regionKind || ''
-                  out.dataset.scale = String(Math.round(geo.scale * 100) / 100)
-                  out.dataset.scaleCap = String(Math.round(geo.scaleCap * 100) / 100)
-                  out.dataset.crossColumn = geo.crossColumn ? '1' : '0'
-                  out.dataset.crossColumnReason = geo.crossColumnReason || ''
+                  canvas.dataset.cssW = String(cssW)
+                  canvas.dataset.cssH = String(cssH)
+                  canvas.dataset.pageWpt = String(Math.round(widthPt))
+                  canvas.dataset.pageHpt = String(Math.round(heightPt))
                 } catch { /* ignore */ }
-                return out
+                // 整页位图本身就是内容；锚点定位由 putTipBitmap 的 scrollTop 做
+                return canvas
               } catch { return null }
             }
 
@@ -6191,6 +6136,59 @@ const placeBox = (el, l, t, wd, ht) => {
             }
 
             /**
+             * **浮窗尺寸：唯一一处计算 popupW / popupH。**
+             *
+             * 用户要的尺寸是「页面 CSS 宽 × 0.9、页面 CSS 高 × 0.3」——
+             * 实测页面 700×991 时是 630×297。
+             *
+             * 之前同一个数被算了两遍：显示层按 0.9×页宽 摆浮窗，
+             * 渲染层按 `POPUP_MAX_W`（innerWidth×0.9 夹 1240）渲 canvas ——
+             * 日志里 `canvasCssW=1240` 而 `popupW=630`，canvas 被
+             * `max-width:100%` 压扁一半；高度则是 879 渲染、780 显示，
+             * 底部 99px 被裁。根因不是夹取写错，而是**几何有两套**。
+             *
+             * 现在只在这里算一次，`showLinkTip` / `placeHorizontal` /
+             * 渲染器全部吃这一个结果。任何地方都不许再按页面宽高另算。
+             *
+             * 拿不到 `.page` 矩形时退回固定量级（630×297，与实测同阶），
+             * 仍然只算这一次。
+             *
+             * @returns {{popupW:number, popupH:number, pageRectW:number|null, pageRectH:number|null}}
+             */
+            const computePopupSize = (anchor) => {
+              let pageRect = null
+              try {
+                pageRect = anchor?.closest?.('.page')?.getBoundingClientRect?.() ?? null
+                if (!pageRect || !(pageRect.width > 0) || !(pageRect.height > 0)) {
+                  // 链接不在页元素里（或页面还没布局）：退回同页的第一个 .page
+                  const anyPage = host?.querySelector?.('.page')
+                  pageRect = anyPage?.getBoundingClientRect?.() ?? null
+                  if (!pageRect || !(pageRect.width > 0) || !(pageRect.height > 0)) pageRect = null
+                }
+              } catch { /* 取不到就退回固定量级 */ }
+              const viewportW = window.innerWidth
+              const viewportH = window.innerHeight
+              let popupW
+              let popupH
+              if (pageRect) {
+                popupW = Math.round(pageRect.width * 0.9)
+                popupH = Math.round(pageRect.height * 0.3)
+              } else {
+                popupW = Math.round(Math.min(630, viewportW - 16))
+                popupH = Math.round(Math.min(297, viewportH * 0.3))
+              }
+              // 只做视口兜底，不改比例：正常页面下这两句不会生效
+              popupW = Math.max(160, Math.min(popupW, viewportW - 16))
+              popupH = Math.max(120, Math.min(popupH, viewportH - 16))
+              return {
+                popupW,
+                popupH,
+                pageRectW: pageRect ? Math.round(pageRect.width) : null,
+                pageRectH: pageRect ? Math.round(pageRect.height) : null,
+              }
+            }
+
+            /**
              * 把 canvas 放进浮窗的位图槽位。
              *
              * 槽位始终存在（固定顺序：位图在上、文字在下），
@@ -6202,7 +6200,7 @@ const placeBox = (el, l, t, wd, ht) => {
              *
              * @param {number} [anchorRatio] 锚点在页内的比例（0..1，从顶部算）
              */
-            const putTipBitmap = (tip, canvas, anchorRatio) => {
+            const putTipBitmap = (tip, canvas, anchorRatio, popupH) => {
               let shot = tip.querySelector('.zr-tip-shot')
               if (!shot) {
                 shot = document.createElement('div')
@@ -6211,6 +6209,24 @@ const placeBox = (el, l, t, wd, ht) => {
               }
               shot.textContent = ''
               shot.removeAttribute('data-loading')
+              /**
+               * **位图槽的高度 = 浮窗高度（popupH），用行内值固定住。**
+               *
+               * 不设高度时槽会被整页内容撑到 892px，而外层浮窗 maxHeight
+               * 只有 297px 且 overflow:hidden —— 槽的滚动视口是 892px，
+               * 真正露出来的却只有顶上 297px，`scrollTop` 就按错的视口算，
+               * 表现是「滚一下直接跳到底」或者「怎么滚都看不到底部」。
+               *
+               * 固定成 297px 之后，滚动视口与可见窗口是同一个数，
+               * `scrollHeight - clientHeight` 才是真实的剩余可滚距离。
+               * 外层被 computeTipPlacement 收窄时（视口太矮）取两者较小值，
+               * 不让槽比浮窗还高。
+               */
+              const tipCap = parseFloat(tip.style.maxHeight) || 0
+              const shotH = Number(popupH) > 0
+                ? Math.round(tipCap > 0 ? Math.min(Number(popupH), tipCap) : Number(popupH))
+                : 0
+              if (shotH > 0) shot.style.height = `${shotH}px`
               if (canvas) shot.appendChild(canvas)
               /**
                * 把目标滚到可见区偏上（留 18% 的上下文在上方），
@@ -6220,7 +6236,7 @@ const placeBox = (el, l, t, wd, ht) => {
                 const maxTop = Math.max(0, shot.scrollHeight - shot.clientHeight)
                 if (maxTop > 0) {
                   const ratio = Math.min(0.98, Math.max(0, anchorRatio))
-                  const wanted = shot.scrollHeight * ratio - shot.clientHeight * 0.18
+                  const wanted = shot.scrollHeight * ratio - shot.clientHeight * 0.33
                   shot.scrollTop = Math.max(0, Math.min(maxTop, wanted))
                 }
               }
@@ -6399,16 +6415,12 @@ const placeBox = (el, l, t, wd, ht) => {
                 /**
                  * **位图宽度只能来自 `opts.popupW`（单一几何源）。**
                  *
-                 * 原来这里自己按「0.9 × 页宽」算，而渲染层按
-                 * `POPUP_MAX_W = min(innerWidth*0.9, 1240)` 渲染 canvas ——
-                 * 两套几何。实测日志：`canvasCssW=1240` 而 `popupW=630`，
-                 * canvas 是浮窗的两倍宽，被 `max-width:100%` 压扁一半，
-                 * 看起来又扁又小。这就是用户说的「图太小」。
-                 *
-                 * 现在 popupW 在渲染之前由「region × scale」一次算定，
-                 * 一路传进来；`placeHorizontal` 不再自算，也不再兜底重算
-                 * —— 兜底就是分叉的起点。缺失时直接返回 null，
-                 * 让 bug 暴露而不是静默降级。
+                 * 宽度由 `computePopupSize` 按「0.9 × 页面 CSS 宽」算一次，
+                 * 一路透传给渲染与摆放。这里不再自算，也不再兜底重算 ——
+                 * 兜底就是分叉的起点。之前正是两套几何：canvas 按
+                 * `POPUP_MAX_W = min(innerWidth×0.9, 1240)` 渲染，浮窗按
+                 * 0.9×页宽 摆放，实测 `canvasCssW=1240` 而 `popupW=630`，
+                 * canvas 被 `max-width:100%` 压扁一半，看起来又扁又小。
                  */
                 const popupW = Number(opts?.popupW)
                 if (!(popupW > 0)) return null
@@ -6601,7 +6613,7 @@ const placeBox = (el, l, t, wd, ht) => {
                    * **位图分支的 desiredH 必须用 popupH，绝不读 offsetHeight。**
                    *
                    * 实测日志把 780 打成 120 就是这个：
-                   *   path:"fresh"  chosenH:780   ← 首次按 POPUP_MAX_H 算的
+                   *   path:"fresh"  chosenH:297   ← 首次按 popupH（0.3×页高）算的
                    *   path:"reflow" chosenH:120   ← 6ms 后按 offsetHeight 重算
                    * 位图刚插入时 `tip.offsetHeight` 还是占位态的高度（96~120），
                    * 用它当 desiredH，`computeTipPlacement` 就按它收窄，
@@ -6654,7 +6666,7 @@ const placeBox = (el, l, t, wd, ht) => {
                * 很远的位置；等真位图（几百 px）插进来，浮窗向下长出去，
                * 底边就盖住了链接本身。
                *
-               * 位图浮窗按「位图区上限」预估；文字浮窗内容已经渲染好了，
+               * 位图浮窗按 `popupH`（0.3 × 页高）预估；文字浮窗内容已经排好了，
                * 直接用实际高度即可。
                */
               /**
@@ -6662,13 +6674,13 @@ const placeBox = (el, l, t, wd, ht) => {
                * 的说明：分开算会因为「取较大一侧」与「优先上方」互相矛盾
                * 而导致浮窗压住链接）。
                *
-               * 位图浮窗：期望高度取固定天花板，实际由该侧可用空间收窄；
+               * 位图浮窗：期望高度取 popupH，实际由该侧可用空间收窄；
                * 文字浮窗：内容已排好，用实际高度，同样会被收窄。
                */
               /**
                * 期望高度。
                *
-               * 位图浮窗：取固定天花板，实际由该侧可用空间收窄。
+               * 位图浮窗：取 popupH，实际由该侧可用空间收窄。
                *
                * 文字浮窗：`tip.offsetHeight` 在这里读**是可靠的**——
                * renderTipLines 刚把内容写进 DOM，读取 offsetHeight 会强制
@@ -6677,7 +6689,7 @@ const placeBox = (el, l, t, wd, ht) => {
                * 若拿不到（首帧还没内容）退回一个保守值。
                */
               const desiredH = opts?.bitmap
-                ? bitmapHeightCap()
+                ? (Number(opts?.popupH) > 0 ? Number(opts.popupH) : bitmapHeightCap())
                 : (tip.offsetHeight || 120)
               const placement = computeTipPlacement(anchor, desiredH, Boolean(opts?.bitmap))
               /**
@@ -7022,23 +7034,20 @@ const placeBox = (el, l, t, wd, ht) => {
                        * 没有图，页码是唯一的位置线索。
                        */
                       /**
-                       * **单一几何源：先定浮窗尺寸，再据此渲染。**
+                       * **浮窗尺寸只算这一次（见 computePopupSize）。**
                        *
-                       * 顺序必须是这样（原来是先渲染再摆放，于是
-                       * canvasCssW=1240 而 popupW=630，两套几何打架）：
-                       *   1. inferDestRegion → region(pt)
-                       *   2. 算 contain 缩放与 popupW/popupH
-                       *   3. showLinkTip 带上 popupW
-                       *   4. renderDestBitmap 用同一个 popupW 渲染
+                       * 用户要的是「0.9 页面宽 × 0.3 页面高」：页面 700×991
+                       * → 630×297。整页按这个宽度渲染、按这个高度滚动。
                        *
-                       * popupW/popupH 只在这里算一次，下游全部复用；
-                       * placeHorizontal 不再自算宽度，缺失时直接不显示。
+                       * 不再走 computeBitmapGeometry：那条路按「目标区域 ×
+                       * contain 缩放」推尺寸，语义是「把图抠出来放大填满」，
+                       * 正是用户否掉的方向（509×308pt 被渲成 1240×720px，
+                       * 放大约 2.4 倍，图和字都巨大）。区域推导函数仍留在
+                       * 文件里供跳转高亮等场景使用，浮窗不再依赖它们。
                        */
-                      const POPUP_MAX_W = Math.min(window.innerWidth * 0.9, 1240)
-                      const POPUP_MAX_H = Math.min(window.innerHeight * 0.88, 880)
-                      const geo = await computeBitmapGeometry(dest, pageNo, POPUP_MAX_W, POPUP_MAX_H)
-                      if (!geo) {
-                        reportDiag({ event: 'tip:skip', reason: 'no-geometry' })
+                      const size = computePopupSize(anchor)
+                      if (!(size.popupW > 0) || !(size.popupH > 0)) {
+                        reportDiag({ event: 'tip:skip', reason: 'no-popup-size' })
                         return
                       }
                       /**
@@ -7047,15 +7056,10 @@ const placeBox = (el, l, t, wd, ht) => {
                        */
                       showLinkTip([], anchor, 0, false, {
                         bitmap: true,
-                        popupW: geo.popupW,
-                        popupH: geo.popupH,
+                        popupW: size.popupW,
+                        popupH: size.popupH,
                       })
-                      const canvas = await renderDestBitmap(dest, pageNo, {
-                        targetCssWidth: POPUP_MAX_W,
-                        availW: POPUP_MAX_W,
-                        availH: POPUP_MAX_H,
-                        geo,
-                      })
+                      const canvas = await renderPagePreview(pageNo, size.popupW)
                       const preview = canvas ? null : await extractDestPreview(dest, pageNo)
                       // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
                       if (linkTipAnchor !== anchor || !linkTip || !anchor.isConnected) return
@@ -7068,10 +7072,18 @@ const placeBox = (el, l, t, wd, ht) => {
                          */
                         showLinkTip([], anchor, 0, false, {
                           bitmap: true,
-                          popupW: geo.popupW,
-                          popupH: geo.popupH,
+                          popupW: size.popupW,
+                          popupH: size.popupH,
                         })
-                        putTipBitmap(tip, canvas, await destVOffset(dest, pageNo))
+                        /**
+                         * 锚点在页内的比例（0..1，从页顶算）。
+                         *
+                         * `destVOffset` 已经把 PDF 左下原点翻成「距页顶」，
+                         * 并把原点型 dest 的 y 夹在 0..0.98 —— 这里直接复用，
+                         * 不再另写一套 dest[3] / dest[2] 的取值分支。
+                         */
+                        const anchorRatio = await destVOffset(dest, pageNo)
+                        putTipBitmap(tip, canvas, anchorRatio, size.popupH)
                         /**
                          * **canvas 实际尺寸诊断。**
                          *
@@ -7099,32 +7111,30 @@ const placeBox = (el, l, t, wd, ht) => {
                             canvasCssH: Number(canvas.dataset?.cssH ?? 0) || Math.round(canvas.getBoundingClientRect().height),
                             shotClientH: shotEl ? Math.round(shotEl.clientHeight) : null,
                             shotScrollH: shotEl ? Math.round(shotEl.scrollHeight) : null,
-                            targetCssWidth: Math.round(POPUP_MAX_W),
-                            availH: Math.round(POPUP_MAX_H),
-                            /** 浮窗与 canvas 最终尺寸：核对 contain 是否达到预期 */
-                            popupW: Math.round(tipRect.width),
-                            popupH: Math.round(tipRect.height),
+                            /** 尺寸单一源：页面矩形 → popupW/popupH（目标值） */
+                            pageRectW: size.pageRectW,
+                            pageRectH: size.pageRectH,
+                            popupW: size.popupW,
+                            popupH: size.popupH,
+                            /** 浮窗 DOM 实际尺寸：与目标值不一致说明被撑开/压扁 */
+                            tipW: Math.round(tipRect.width),
+                            tipH: Math.round(tipRect.height),
+                            anchorRatio,
+                            scrollTop: shotEl ? Math.round(shotEl.scrollTop) : null,
                             /**
-                             * **几何自检：popupW 与 canvasCssW 必须相等。**
-                             * 不相等就说明几何又分叉了（上一轮 630 vs 1240）。
+                             * **几何自检：canvasCssW 必须等于目标 popupW。**
+                             *
+                             * 判据用**目标值**而不是 DOM 宽度：若浮窗本身
+                             * 被内容撑成 1240，再拿 DOM 宽度去比永远相等，
+                             * 恰好放跑「浮窗比用户要的宽一倍」这种故障。
                              */
                             geoConsistent: (() => {
                               const cw = Number(canvas.dataset?.cssW ?? 0)
-                              const ch = Number(canvas.dataset?.cssH ?? 0)
-                              return cw > 0 && ch > 0
-                                ? (Math.abs(cw - tipRect.width) <= 2 && Math.abs(ch - tipRect.height) <= 2)
-                                : null
+                              return cw > 0 ? Math.abs(cw - size.popupW) <= 2 : null
                             })(),
-                            scale: Number(canvas.dataset?.scale ?? 0),
-                            scaleCap: Number(canvas.dataset?.scaleCap ?? 0),
-                            regionKind: canvas.dataset?.regionKind ?? null,
-                            /** 是否跨栏（figure 的横向是否扩到了邻栏） */
-                            crossColumn: canvas.dataset?.crossColumn === '1',
-                            /** 跨栏判定的原因：邻栏空 / 邻栏只有页眉 / 邻栏有内容 */
-                            crossColumnReason: canvas.dataset?.crossColumnReason ?? null,
+                            pageWpt: Number(canvas.dataset?.pageWpt ?? 0) || null,
+                            pageHpt: Number(canvas.dataset?.pageHpt ?? 0) || null,
                             viewportW: Math.round(window.innerWidth),
-                            regionW: Number(canvas.dataset?.regionW ?? 0) || null,
-                            regionH: Number(canvas.dataset?.regionH ?? 0) || null,
                             viewportH: Math.round(window.innerHeight),
                             dpr: Math.round((window.devicePixelRatio || 1) * 100) / 100,
                             /** 文本层探测结果（destKind / anchorY / near / labels 等） */

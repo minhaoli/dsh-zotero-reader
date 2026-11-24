@@ -185,11 +185,11 @@ check('#page=N 不弹浮窗（只有图/公式才弹）',
  * 现在异步解析 dest 拿页号后补写第二行；断言它确实把页号算出来了，
  * 而不是只显示名字。
  */
-check('具名目标预览以位图为主体（canvas 渲染，不再是纯文字）',
-  /const renderDestBitmap = async \(dest, pageNo, opts/.test(src) &&
+check('具名目标预览以位图为主体（整页 canvas 渲染，不再是纯文字）',
+  /const renderPagePreview = async \(pageNo, popupW\)/.test(src) &&
     /page\.render\(\{ canvasContext: ctx/.test(src) &&
-    /renderDestBitmap\(dest, pageNo, \{/.test(src),
-  'figure/公式在文本层里只剩碎片，必须把目标区域画出来')
+    /renderPagePreview\(pageNo, size\.popupW\)/.test(src),
+  'figure/公式在文本层里只剩碎片，必须把目标页画出来')
 check('取不到位图时退回文字预览（不是空窗）',
   /canvas \? null : await extractDestPreview/.test(src) &&
     /else if \(preview\)/.test(src),
@@ -623,7 +623,7 @@ check('没有邻页预取 / 整篇渲染',
     !/getPage\(\s*pageNo\s*-\s*1\s*\)/.test(src),
   '预取邻页违背「其它的不加载」')
 
-check('页位图按 (pageNo) 缓存，重复悬停不重渲染',
+check('页位图按 (pageNo@宽度) 缓存，重复悬停不重渲染',
   /const pageBitmapCache = new Map\(\)/.test(src) &&
     /const cached = pageBitmapCache\.get\(cacheKey\)/.test(src) &&
     /pageBitmapCache\.set\(cacheKey, result\)/.test(src),
@@ -642,9 +642,10 @@ check('渲染比例考虑 devicePixelRatio 但夹到 2 以内',
   /devicePixelRatio/.test(src) && /Math\.min\(2, Math\.max\(1, window\.devicePixelRatio\)\)/.test(src),
   '不夹上限在高分屏上像素量爆炸')
 
-check('位图纵向裁切做了左下原点翻转',
-  /\(heightPt - region\.y - region\.h\) \* scale/.test(src),
-  'PDF 原点在左下，canvas 从顶部量，不翻转会裁到页面的镜像位置')
+check('整页渲染没有裁区域/翻转到临时 canvas 的路径',
+  !/\(heightPt - region\.y - region\.h\) \* scale/.test(src) &&
+    !/ctx\.drawImage\(canvas, sx, syFromTop/.test(src),
+  '裁切再放大是用户否掉的方向（509×308pt 渲成 1240×720px，约 2.4 倍）')
 
 /* ---------- 4g2. 只有图/公式才弹浮窗 ---------- */
 
@@ -676,21 +677,21 @@ check('名字不像图/公式时退回文字预览（不再完全不弹）',
  * 文字预览这条路径**不能**渲染位图。
  * 用户要的只是几行字，而 renderDestBitmap 是整页 canvas 渲染。
  */
-check('文字预览不调用 renderDestBitmap',
+check('文字预览不调用 renderPagePreview',
   (() => {
     const at = src.indexOf('if (!isPreviewableDest(decName, dest)) {')
     if (at < 0) return false
     const seg = src.slice(at, at + 1400)
     const end = seg.indexOf('return')
     const branch = end > 0 ? seg.slice(0, end) : seg
-    return !/renderDestBitmap/.test(branch) && /extractDestPreview/.test(branch)
+    return !/renderPagePreview/.test(branch) && /extractDestPreview/.test(branch)
   })(),
   '引用类只需要几行文字，不该付整页渲染的成本')
 
 check('类型不合的目标不触发位图渲染（位图分支在其后）',
   (() => {
     const guard = src.indexOf('if (!isPreviewableDest(decName, dest)) {')
-    const render = src.indexOf('await renderDestBitmap(dest, pageNo, {', guard)
+    const render = src.indexOf('await renderPagePreview(pageNo, size.popupW)', guard)
     return guard > 0 && render > guard
   })(),
   '为一页白渲染 bitmap 要几十到几百毫秒，必须在渲染前就分流')
@@ -912,16 +913,18 @@ check('位图浮窗横向居中于页面（文字才跟链接）',
  * scrollHeight - clientHeight 恒为 0，滚轮自然滚不动。
  * 修法：裁切成整页 + 容器限高，内容必然溢出。
  */
-check('位图裁切为整页（保证内容溢出容器，从而可滚）',
-  /const h = heightPt/.test(src),
-  '只裁 42% 时内容比容器矮，滚轮永远滚不动')
+check('浮窗里渲染整页（内容必然溢出容器，从而可滚）',
+  /const renderPagePreview = async \(pageNo, popupW\)/.test(src) &&
+    /const cssH = Math\.max\(1, Math\.round\(cssW \* \(heightPt \/ widthPt\)\)\)/.test(src),
+  '只裁一段时内容可能比容器矮，滚轮永远滚不动')
 
-check('可滚容器限高（内容必然超出）',
-  /max-height:min\(80vh,780px\)/.test(src),
-  '容器不限高就没有可滚的余量')
+check('位图槽高度固定为 popupH（滚动视口 = 可见窗口）',
+  /const shotH = Number\(popupH\) > 0/.test(src) &&
+    /if \(shotH > 0\) shot\.style\.height = `\$\{shotH\}px`/.test(src),
+  '不固定高度时槽被内容撑到 892px，scrollTop 会按错的视口算')
 
 check('位图插入后主动滚到目标位置',
-  /shot\.scrollHeight \* ratio - shot\.clientHeight \* 0\.18/.test(src),
+  /shot\.scrollHeight \* ratio - shot\.clientHeight \* 0\.33/.test(src),
   '整页位图若不定位，用户看到的是页首而不是目标')
 
 /* ---------- 4k. 位图浮窗不带文字行 + 定位用预估/实际高度 ---------- */
@@ -974,12 +977,12 @@ check('位图浮窗高度由 placement 唯一约束（内层不重复限制）',
     !/shotNow\.style\.maxHeight/.test(src),
   '内外层各设一次会在同一高度上截两次')
 
-check('高度天花板提取为 bitmapHeightCap（与 geo 共用同一常量）',
+check('位图期望高度用 popupH，bitmapHeightCap 只作兜底',
   /const bitmapHeightCap = \(\) => Math\.min\(window\.innerHeight \* 0\.8, 780\)/.test(src) &&
     /const hardCap = bitmapHeightCap\(\)/.test(src) &&
-    /Math\.min\(popupH, availH, bitmapHeightCap\(\)\)/.test(src) &&
+    /Number\(opts\?\.popupH\) > 0 \? Number\(opts\.popupH\) : bitmapHeightCap\(\)/.test(src) &&
     /const MIN_H_BITMAP = 120/.test(src),
-  '两处各写一遍会分叉：canvas 879 而浮窗 780，底部 99px 被裁')
+  '还按天花板 780 当期望高度，浮窗就比 0.3×页高 高出一大截')
 
 check('放哪边、多高、top 由单个函数一次给出（首帧与复核共用）',
   /const computeTipPlacement = \(anchor, desiredH, isBitmap = false\) =>/.test(src) &&
@@ -1071,29 +1074,29 @@ check('滚轮只在真能滚时才拦截（不误吞）',
   })(),
   '无条件 preventDefault 会让纯文字浮窗上滚不动 PDF')
 
-check('canvas 显示尺寸来自 geo（单一几何源）',
-  /const cssW = geo\.popupW/.test(src) &&
-    /const cssH = geo\.popupH/.test(src) &&
-    /out\.style\.width = `\$\{Math\.round\(cssW\)\}px`/.test(src),
-  'canvas 尺寸必须与 popupW 同源，否则会被 max-width 压扁')
+check('canvas 显示尺寸 = popupW × 页面宽高比（单一几何源）',
+  /const cssW = Math\.max\(1, Math\.round\(bitmap\.cssWidth\)\)/.test(src) &&
+    /const cssH = Math\.max\(1, Math\.round\(cssW \* \(heightPt \/ widthPt\)\)\)/.test(src) &&
+    /canvas\.style\.width = `\$\{cssW\}px`/.test(src),
+  'canvas 尺寸必须与浮窗同源，否则会被 max-width 压扁')
 
-check('contain 有 4x 上限 + 画布像素预算兜底（在 geo 里）',
-  /const scaleCap = Math\.min\(4, bitmapMaxWidthPx \/ Math\.max\(1, region\.w\)\)/.test(src) &&
-    /const scale = Math\.min\(availW \/ region\.w, availH \/ region\.h, scaleCap\)/.test(src),
-  '只调常量不够：窄区域 4x 会超出 1400px 画布预算')
+check('整页渲染有 4x 上限 + 画布像素预算兜底',
+  /scale = Math\.max\(0\.3, Math\.min\(scale, bitmapMaxWidthPx \/ base\.width, 4\)\)/.test(src),
+  '不夹上限时 A0 大幅面或超高 dpr 会把 canvas 撑爆')
 
 check('渲染分辨率按 popupW 给（不再按固定宽度重渲）',
-  /const canvas = await renderDestBitmap\(dest, pageNo, \{/.test(src) &&
-    /geo,/.test(src),
-  '几何已一次算定，渲染只按它执行')
+  /const canvas = await renderPagePreview\(pageNo, size\.popupW\)/.test(src) &&
+    /renderPageBitmap\(pdfDocument, pageNo, popupW\)/.test(src),
+  '尺寸已一次算定，渲染只按它执行')
 
-check('contain 用区域自身宽高比（FitR 可能只有半页）',
-  /const scale = Math\.min\(availW \/ region\.w, availH \/ region\.h, scaleCap\)/.test(src),
-  '用整页比例会把 FitR 半页矩形算错')
+check('canvas 高度按页面自身宽高比（不是按区域）',
+  /const cssH = Math\.max\(1, Math\.round\(cssW \* \(heightPt \/ widthPt\)\)\)/.test(src),
+  '按固定高度会拉伸页面，文字就不像正文了')
 
 check('不再写死 targetCssWidth = 520',
   !/const targetCssWidth = 520/.test(src) &&
-    /renderPageBitmap\(pdfDocument, pageNo, opts\?\.targetCssWidth\)/.test(src),
+    !/opts\?\.targetCssWidth/.test(src) &&
+    /renderPageBitmap\(pdfDocument, pageNo, popupW\)/.test(src),
   '写死 520 会让浮窗再宽图片也不变大')
 
 check('位图缓存 key 带目标宽度且设了容量上限',
@@ -1107,11 +1110,12 @@ check('reportTipPlace 的 desiredH 用真实参数（不是 placed.height）',
     !/desiredH: placed && placed\.height/.test(src),
   'placed 只有 {top,height}，原先那行恒等于 chosenH')
 
-check('canvas 实际尺寸有诊断（tip:bitmap）',
+check('浮窗尺寸/滚动状态有诊断（tip:bitmap）',
   /event: 'tip:bitmap'/.test(src) &&
-    /canvasCssW:/.test(src) && /shotClientH:/.test(src) &&
-    /shotScrollH:/.test(src) && /regionW:/.test(src),
-  '分不清「图没放大」还是「被容器截断」')
+    /canvasCssW:/.test(src) && /canvasCssH:/.test(src) &&
+    /shotClientH:/.test(src) && /shotScrollH:/.test(src) &&
+    /anchorRatio,/.test(src) && /scrollTop:/.test(src),
+  '分不清「尺寸不对」还是「滚动定位不对」')
 /* ---------- 4n. 区域推导：按栏扫空白 + 邻栏空才跨栏 ---------- */
 
 /**
@@ -1171,15 +1175,15 @@ check('推导函数返回未外扩的紧致区域（外扩统一由渲染层做�
     !/const pad = h \* 0\.4/.test(src),
   '两处各自外扩会出现口径不一致')
 
-check('记录跨栏判定原因（邻栏空 / 只有页眉 / 有内容）',
-  /crossColumnReason: canvas\.dataset\?\.crossColumnReason/.test(src) &&
+check('区域推导保留跨栏判定原因（邻栏空 / 只有页眉 / 有内容）',
+  /crossColumnReason: crossColumn/.test(src) &&
     /'other-col-only-header'/.test(src) &&
     /'other-col-occupied'/.test(src),
   '8% 页边判据万一误判，日志要能说明是哪种情况')
-check('跨栏/倍率上限/区域尺寸进诊断',
-  /crossColumn: canvas\.dataset\?\.crossColumn === '1'/.test(src) &&
-    /scaleCap: Number\(canvas\.dataset\?\.scaleCap/.test(src),
-  '下次要能从日志直接看出是否跨栏、倍率被谁卡住')
+check('诊断带页面点尺寸（区分「缩放错了」还是「页面本身小」）',
+  /pageWpt: Number\(canvas\.dataset\?\.pageWpt/.test(src) &&
+    /pageHpt: Number\(canvas\.dataset\?\.pageHpt/.test(src),
+  '只看 CSS 像素分不清是渲染缩放错还是页面本身尺寸')
 /* ---------- 4o. 单一几何源（popupW 与 canvasCssW 必须相等） ---------- */
 
 /**
@@ -1187,18 +1191,21 @@ check('跨栏/倍率上限/区域尺寸进诊断',
  * canvas 是浮窗的两倍宽，被 max-width:100% 压扁一半，图自然又扁又小。
  * 根因是渲染层与显示层各算一套几何。
  */
-check('几何集中在一个函数算（computeBitmapGeometry）',
-  /const computeBitmapGeometry = async \(dest, pageNo, availW, availH\) =>/.test(src) &&
-    /const geo = await computeBitmapGeometry\(dest, pageNo, POPUP_MAX_W, POPUP_MAX_H\)/.test(src),
+check('浮窗尺寸集中在一个函数算（computePopupSize）',
+  /const computePopupSize = \(anchor\) =>/.test(src) &&
+    /popupW = Math\.round\(pageRect\.width \* 0\.9\)/.test(src) &&
+    /popupH = Math\.round\(pageRect\.height \* 0\.3\)/.test(src) &&
+    !/computeBitmapGeometry\(dest, pageNo/.test(src),
   '渲染层与显示层各算一套几何就是 1240 vs 630 的来源')
 
-check('渲染复用调用方算好的 geo（不再自推一遍）',
-  /const geo = opts\?\.geo \|\| await computeBitmapGeometry\(/.test(src) &&
-    /const cssW = geo\.popupW/.test(src),
+check('渲染只接收算好的 popupW（不再自推一遍）',
+  /const renderPagePreview = async \(pageNo, popupW\) =>/.test(src) &&
+    /renderPageBitmap\(pdfDocument, pageNo, popupW\)/.test(src) &&
+    !/opts\?\.geo/.test(src),
   '两处各算一遍必然分叉')
 
 check('showLinkTip 带 popupW/popupH（供 placeHorizontal 直接用）',
-  /bitmap: true,\s*\n\s*popupW: geo\.popupW,\s*\n\s*popupH: geo\.popupH,/.test(src))
+  /bitmap: true,\s*\n\s*popupW: size\.popupW,\s*\n\s*popupH: size\.popupH,/.test(src))
 
 /**
  * reflow 把 780 打成 120：位图分支用 offsetHeight 当 desiredH，
@@ -1208,9 +1215,9 @@ check('位图 reflow 的 desiredH 用 popupH（绝不读 offsetHeight）',
   /const actualH = opts\?\.bitmap\s*\n\s*\? \(Number\(opts\?\.popupH\) > 0 \? Number\(opts\.popupH\) : \(tip\.offsetHeight \|\| 120\)\)/.test(src),
   'offsetHeight 是占位态高度，会把 780 打回 120')
 
-check('几何自检字段（popupW 与 canvasCssW 必须相等）',
-  /geoConsistent:/.test(src) && /Math\.abs\(cw - tipRect\.width\) <= 2/.test(src),
-  '两个值不相等就是几何又分叉了')
+check('几何自检字段（canvasCssW 必须等于目标 popupW）',
+  /geoConsistent:/.test(src) && /Math\.abs\(cw - size\.popupW\) <= 2/.test(src),
+  '用 DOM 宽度比会放跑「浮窗本身被撑宽」的故障')
 /* ---------- 4p. 参考文献预览：按条目边界取，不按字数截 ---------- */
 
 /**
@@ -1279,12 +1286,12 @@ check('表格区域记为 table 类型',
  * 诊断从 canvas.dataset 读，而 dataset 写的是本函数里已不存在的
  * `inferred` 与旧变量 `scaleFit`。
  */
-check('几何诊断一律从 geo 取（不从局部残留变量）',
-  /out\.dataset\.regionKind = geo\.regionKind/.test(src) &&
-    /out\.dataset\.scale = String\(Math\.round\(geo\.scale \* 100\)/.test(src) &&
-    /out\.dataset\.scaleCap = String\(Math\.round\(geo\.scaleCap \* 100\)/.test(src) &&
-    !/out\.dataset\.regionKind = inferred \?/.test(src),
-  'inferred 在 renderDestBitmap 里已不存在，写出来恒为 null')
+check('canvas dataset 只记 CSS 尺寸与页面点尺寸（无残留变量）',
+  /canvas\.dataset\.cssW = String\(cssW\)/.test(src) &&
+    /canvas\.dataset\.pageWpt/.test(src) &&
+    !/out\.dataset\.regionKind/.test(src) &&
+    !/geo\.regionKind/.test(src),
+  'inferred/geo 在整页渲染里都不存在，写出来恒为 null')
 
 /**
  * Bug：#fig8 的 geoConsistent=false —— 高度被夹了两次。
