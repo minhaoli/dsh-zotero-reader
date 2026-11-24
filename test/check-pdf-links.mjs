@@ -226,8 +226,19 @@ check('提示用 position:fixed（宿主 overflow:hidden 会裁掉 absolute）',
 check('提示挂在 body 上（脱离被裁剪的容器）',
   /document\.body\.appendChild\(linkTip\)/.test(src))
 
-check('提示有上下翻转（贴近视口顶部时放下方）',
-  /if \(top < 8\) top = r\.bottom \+ 8/.test(src))
+/**
+ * 纵向：在上方优先、放不下翻到下方，且与链接留出间隙。
+ * 用户的原话：「如果在上方，那么底部要在超链接再往上一些位置。
+ * 如果是下方，在是顶部在往下一些位置」—— 不要紧贴。
+ */
+check('提示有上下翻转（上方放不下时放到下方）',
+  /top = r\.top - tipH - gap/.test(src) && /if \(top < 8\) top = r\.bottom \+ gap/.test(src),
+  '翻转逻辑要在，且两个方向用同一个 gap')
+
+check('浮窗与链接留有间隙（不紧贴）',
+  /const gap = 20/.test(src),
+  '原来只留 8px，用户要求再往上/往下一些')
+
 
 /**
  * 横向定位改为**对齐正文页面**，不再跟随链接的 x。
@@ -274,12 +285,15 @@ check('getBoundingClientRect 只在定位时各读一次（不反复读）',
   (() => {
     const at = src.indexOf('const showLinkTip')
     if (at < 0) return false
-    const body = src.slice(at, at + 4200)
-    const end = body.indexOf('\n            const onPdfLinkClick')
+    const body = src.slice(at, at + 12000)
+    const end = body.indexOf("addEventListener('click', onPdfLinkClick")
     const fn = end > 0 ? body.slice(0, end) : body
     const hits = (fn.match(/getBoundingClientRect\(\)/g) || []).length
-    // 页面一次 + 链接一次；超过说明又在别处重复读
-    return hits >= 1 && hits <= 2
+    /**
+     * 现在要读三处：页面一次、链接一次、以及页面矩形缺失时的回退页一次。
+     * 关键是**不随 mousemove 反复读**，所以给一个宽松但有限的上限。
+     */
+    return hits >= 1 && hits <= 4
   })(),
   '每次强制布局都要还前面的 DOM 写入债，读得越多越卡')
 
@@ -452,6 +466,80 @@ check('闪烁用独立的 .zr-jump-flash（不复用 .zr-hl）',
 check('闪烁块能对齐到文本层里的目标行',
   /pageEl\.querySelectorAll\('\.textLayer span/.test(src),
   '用文本层 span 的矩形比反推 scale/rotation 可靠')
+
+/**
+ * **高亮位置不对的真实根因：匹配方向写反了。**
+ *
+ * 旧代码 `needle.includes(t)` 判的是「预览文字里包含这个 span」，
+ * 于是碰到 `overlap?`、`and` 这种短 span 就立刻命中并 break，
+ * 真正装着整条文献的 span 根本没机会被检查 ——
+ * 用户看到的就是「高亮只圈住一个词」。
+ *
+ * 正确方向是「span 包含 needle」，且一行常被拆成多个 span
+ * （实测 Hutchison 那条在 page13 被拆成 15 个 item），
+ * 必须拼接后跨 span 匹配。
+ */
+check('匹配方向正确（拼接串里找，不是 needle.includes）',
+  (() => {
+    const at = src.indexOf('const locatePreviewLines = () => {')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 8000)
+    /**
+     * 先剥注释：函数头的说明里就写着旧的 `needle.includes(t)`（解释错误做法），
+     * 不剥的话断言永远失败（本项目反复踩过这个坑）。
+     */
+    const code = seg
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => {
+        const k = line.indexOf('//')
+        return k >= 0 ? line.slice(0, k) : line
+      })
+      .join('\n')
+    return /joinedStrip\.out\.indexOf\(probe\)/.test(code) && !/needle\.includes\(/.test(code)
+  })(),
+  'needle.includes(t) 会让短 span 抢先命中，只圈住一个词')
+
+/**
+ * 空格不一致是真实存在的：实测 page15 文本层里是
+ * `association strengthor feature`（无空格），而预览文字是
+ * `strength or feature`。逐字比较必然失败，必须先剥离归一化。
+ */
+check('匹配前剥离标点/空格（应对文本层与预览的空格差异）',
+  /const stripMap = \(str\) =>/.test(src) &&
+    /if \(\/\[A-Za-z0-9\]\/\.test\(ch\)\)/.test(src),
+  '文本层会丢空格、连字符，逐字比较永远匹配不上')
+
+check('剥离后用 map 映射回原文偏移',
+  /joinedStrip\.map\[idxS\]/.test(src) &&
+    /const s1 = joinedStrip\.map\[/.test(src),
+  '不映射回原文就无法反查覆盖了哪些 span')
+
+check('跨 span 匹配（拼接 + 记录起止偏移）',
+  /const start = joined\.length/.test(src) &&
+    /parts\.push\(\{ el: sp, start, end: joined\.length \}\)/.test(src),
+  '一行被拆成多个 span，不拼接就只能匹配到局部')
+
+check('按行分组出多个矩形（跨行画多块）',
+  /const rows = \[\]/.test(src) &&
+    /lines\.slice\(0, 2\)/.test(src),
+  '整段用一个包围盒会把中间的空白也圈进去')
+
+check('多块能一起淡出并被清理',
+  /let jumpFlashExtraEls = \[\]/.test(src) &&
+    /for \(const el of jumpFlashExtraEls\) el\?\.setAttribute\?\.\('data-fade', '1'\)/.test(src) &&
+    /for \(const el of jumpFlashExtraEls\) el\?\.remove\?\.\(\)/.test(src),
+  '只清第一块会让第二行以后的高亮永久留在页面上')
+
+check('匹配结果有独立诊断（jump:flash-match）',
+  /event: 'jump:flash-match'/.test(src) &&
+    /spansHit: located\.spanCount/.test(src) &&
+    /text: located\.matchedText/.test(src),
+  '下次还不对时，能从日志分清是匹配错了行还是几何算错了')
+
+check('needle 截断时去掉省略号（否则永远匹配不上）',
+  /const ell = needle\.indexOf\('…'\)/.test(src),
+  'extractDestPreview 会在超长时加 …')
 
 check('闪烁块与定时器都有清理',
   /const clearJumpFlash = \(\) =>/.test(src) &&
@@ -646,11 +734,11 @@ check('位图区也没有边框',
     !/\.zr-link-tip \.zr-tip-shot\{[^}]*border:1px solid/.test(src),
   '里层再来一圈边框照样是黑框')
 
-check('0.5s 延迟消失（既不在链接也不在浮窗上才隐藏）',
+check('0.3s 延迟消失（既不在链接也不在浮窗上才隐藏）',
   /const cancelHideTip = \(\) =>/.test(src) &&
     /const scheduleHideTip = \(\) =>/.test(src) &&
-    /setTimeout\(\(\) => \{[\s\S]{0,120}?hideLinkTip\(\)[\s\S]{0,20}?\}, 500\)/.test(src),
-  '立即隐藏的话鼠标够不到浮窗，没法滚动')
+    /setTimeout\(\(\) => \{[\s\S]{0,120}?hideLinkTip\(\)[\s\S]{0,20}?\}, 300\)/.test(src),
+  '用户实测后要求从 0.5s 缩短到 0.3s')
 
 /**
  * 0.5s 判定由**链接与浮窗两侧**共同驱动：
@@ -697,6 +785,53 @@ check('延迟消失定时器有清理',
 
 check('位图槽位有加载占位（避免先塌后跳）',
   /data-loading/.test(src) && /zr-tip-shot\[data-loading="1"\]/.test(src))
+
+/* ---------- 4j. 宽度与滚动（用户第二轮四项） ---------- */
+
+/**
+ * 用户的原话：「参考文献的显示不要这么长，就 1/2 栏，
+ * 一行放不下自动换行至所有内容都放下去」。
+ * 文字预览半栏宽，且不能有 max-height 截断。
+ */
+check('文字预览宽度为半栏（0.5）',
+  /const widthRatio = opts\?\.bitmap \? 0\.8 : 0\.5/.test(src),
+  '整页宽会一行塞很多字，用户要 1/2 栏')
+
+check('文字预览不被高度截断（内容全部放下去）',
+  !/\.zr-link-tip \.zr-tip-line\{[^}]*max-height/.test(src) &&
+    !/\.zr-link-tip \.zr-tip-dim\{[^}]*max-height/.test(src),
+  '用户要求「所有内容都放下去」')
+
+/**
+ * 用户的原话：「悬浮窗的页面大概是 pdf 的 80% 就可以了」。
+ */
+check('图片浮窗宽度为页面的 80%',
+  /opts\?\.bitmap \? 0\.8 : 0\.5/.test(src),
+  '原来用 left/right 双约束等于整页宽')
+
+check('浮窗横向居中于页面（不是贴左边界）',
+  /const pageCenter = \(pageRect\.left \+ pageRect\.right\) \/ 2/.test(src),
+  '半栏宽贴左边界会停在栏缝里')
+
+/**
+ * 用户报「现在滑动没有任何效果」。
+ *
+ * 根因：裁切区域原本只有页高 42%（≈354px），而容器 max-height 是
+ * min(58vh,460px)（≥406px）—— 内容根本不溢出，
+ * scrollHeight - clientHeight 恒为 0，滚轮自然滚不动。
+ * 修法：裁切成整页 + 容器限高，内容必然溢出。
+ */
+check('位图裁切为整页（保证内容溢出容器，从而可滚）',
+  /const h = heightPt/.test(src),
+  '只裁 42% 时内容比容器矮，滚轮永远滚不动')
+
+check('可滚容器限高（内容必然超出）',
+  /\.zr-link-tip \.zr-tip-shot\{[^}]*max-height:min\(46vh/.test(src),
+  '容器不限高就没有可滚的余量')
+
+check('位图插入后主动滚到目标位置',
+  /shot\.scrollHeight \* ratio - shot\.clientHeight \* 0\.18/.test(src),
+  '整页位图若不定位，用户看到的是页首而不是目标')
 
 
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
