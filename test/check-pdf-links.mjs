@@ -1066,13 +1066,15 @@ check('滚轮只在真能滚时才拦截（不误吞）',
   '无条件 preventDefault 会让纯文字浮窗上滚不动 PDF')
 
 check('canvas 显示尺寸用 contain（完整装下，不填满宽也不填满高）',
-  /const scaleFit = Math\.min\(availW \/ region\.w, availH \/ region\.h, MAX_SCALE\)/.test(src) &&
+  /const scaleFit = Math\.min\(availW \/ region\.w, availH \/ region\.h, scaleCap\)/.test(src) &&
     /let cssW = Math\.max\(40, region\.w \* scaleFit\)/.test(src) &&
     /out\.style\.width = `\$\{Math\.round\(cssW\)\}px`/.test(src),
   '填满高度会算出 3136px 宽必须横向滚；填满宽度则纵向图溢出')
 
-check('contain 有 3x 上限（超过无肉眼增益且发虚）',
-  /const MAX_SCALE = 3/.test(src))
+check('contain 有 4x 上限，且受画布像素预算兜底',
+  /const MAX_SCALE = 4/.test(src) &&
+    /const scaleCap = Math\.min\(MAX_SCALE, bitmapMaxWidthPx \/ Math\.max\(1, region\.w\)\)/.test(src),
+  '只调常量不够：窄区域 4x 会超出 1400px 画布预算')
 
 check('距离区域含已有更高分辨率时按显示宽度重渲',
   /if \(needPxW > curPxW \* 1\.15\)/.test(src),
@@ -1103,6 +1105,50 @@ check('canvas 实际尺寸有诊断（tip:bitmap）',
     /canvasCssW:/.test(src) && /shotClientH:/.test(src) &&
     /shotScrollH:/.test(src) && /regionW:/.test(src),
   '分不清「图没放大」还是「被容器截断」')
+/* ---------- 4n. 区域推导：按栏扫空白 + 邻栏空才跨栏 ---------- */
+
+/**
+ * 用户主诉「图太小」。整页裁切是根因 —— 图本体埋在一整页里，
+ * contain 后只有 0.93x。区域推导把它抠出来。
+ */
+check('有 inferDestRegion 按文本层推导区域',
+  /const inferDestRegion = async \(dest, widthPt, heightPt\) =>/.test(src))
+
+check('按 dest[2] 定栏（left 落在中线哪一侧）',
+  /const destIsLeft = anchorX === null \? true : anchorX < mid/.test(src),
+  '实测 fig1 left=61(左) fig8 left=317(右) eq1 left=118(左)，中线 297.6')
+
+/**
+ * 只在 caption 所在栏判断空白 —— 这是 fig8 那个坑的修法。
+ * 若要求「全宽无文本」才认图区，单栏图永远不成立。
+ */
+check('纵向区间只在本栏内扫（不看邻栏）',
+  /for \(const it of colItems\) \{\s*\n\s*if \(it\.y <= label\.y \+ 1\) continue/.test(src),
+  '把邻栏正文当障碍的话，单栏图永远推不出来')
+
+check('邻栏在该区间为空才跨栏（fig1），否则保持本栏（fig8）',
+  /const crossColumn = overlap\.length === 0/.test(src) &&
+    /if \(crossColumn && otherCol\.length > 0\)/.test(src),
+  '同一条规则要自动给出两种结果，不需要特判')
+
+/**
+ * 页眉/页脚是版面边缘，不该阻挡跨栏。
+ * 实测 fig1：右栏在 y∈[640,801] 只有一条 DOI 页眉，
+ * 不减掉它就会误判「邻栏有内容」而拒绝跨栏。
+ */
+check('判定邻栏空白时排除页眉/页脚',
+  /const edgeBand = heightPt \* 0\.08/.test(src) &&
+    /v\.y > edgeBand && v\.y < heightPt - edgeBand/.test(src),
+  '页眉会被误判成邻栏内容，导致 fig1 不跨栏')
+
+check('区域上下各外扩 40%（留上下文，保留滚动）',
+  /const pad = h \* 0\.4/.test(src),
+  '用户要求浮窗可滑动，纯抠图会贴死边框')
+
+check('跨栏/倍率上限/区域尺寸进诊断',
+  /crossColumn: canvas\.dataset\?\.crossColumn === '1'/.test(src) &&
+    /scaleCap: Number\(canvas\.dataset\?\.scaleCap/.test(src),
+  '下次要能从日志直接看出是否跨栏、倍率被谁卡住')
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
 
 /**

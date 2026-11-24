@@ -4530,30 +4530,36 @@ window.__ModuleLoader__.load({
             /**
              * **从文本层推出目标区域（图 / 公式）；推不出返回 null。**
              *
-             * 背景：这类 LaTeX 论文的命名目标几乎全是 `XYZ` ——
-             * 只有锚点 (x, y)，没有 figure 边界。整页裁切于是把图本体
-             * 埋在一整页里，`contain` 后只有 0.93x，永远是「图太小」。
+             * 背景：这类 LaTeX 论文的命名目标几乎全是 `XYZ` —— 只有锚点
+             * (x, y)，没有 figure 边界。整页裁切把图本体埋在一整页里，
+             * `contain` 后只有 0.93x，永远「图太小」。
              *
-             * 三条规则（全部由真实 PDF 实测确认）：
+             * 规则（由 lead 定稿，逐条对应真实 PDF 实测）：
              *
-             * ① **分栏用 `dest[2]`（XYZ 的 left）。** 实测 fig1 left=61（左栏）、
-             *    fig8 left=317（右栏）、eq1 left=118（左栏），页面中线 297.6 ——
-             *    全部判断正确。早先用 ±120pt 窗口不分栏，把 fig8 的右栏
-             *    目标探成了满屏左栏正文。
+             * ① **栏 = `dest[2]`（XYZ 的 left）落在中线哪一侧。**
+             *    实测 fig1 left=61（左栏）、fig8 left=317（右栏）、
+             *    eq1 left=118（左栏），页面中线 297.6，全部判断正确。
              *
-             * ② **figure：图在 caption 上方**（PDF 坐标 y 更大）。
-             *    实测 fig1：`FIGURE 1` 在 y=653.4，其上直到页眉 y=801.5 全是空白，
-             *    那段空白就是图；fig8：`FIGURE 8` y=397.4，其上到 y=613.4 空白 216pt。
-             *    所以区域 = [caption 上沿, 该栏内再往上的第一个文本块下沿]。
+             * ② **在该栏内向上扫**，直到遇到该栏的第一个文本块，
+             *    得到纵向区间 [yBot, yTop]。**只在 caption 所在栏判断空白** ——
+             *    这是关键：fig8 的 caption 在右栏，它描述的是右栏的图；
+             *    左栏那段正文是**另一块内容**，与这张图无关。
+             *    若要求「全宽无文本」才认图区，单栏图就永远不成立。
              *
-             * ③ **公式：靠编号 `(N)` 定位。** 实测 eq1 的 `(1)` 在 y=88.0、
-             *    与公式同基线，其上下最近的正文块分别是 y=127.8 与 y=35.4（页脚）。
-             *    区域 = [下一个文本块上边, 上一个文本块下边]。
+             * ③ **横向：检查另一栏在同一 [yBot, yTop] 区间内是否为空。**
+             *    · 空   → 扩到另一栏边界（跨栏）。实测 fig1：y∈[662,782]
+             *             右栏也空 → 扩到 497pt 宽（三张热图并排，确实跨栏）
+             *    · 非空 → 保持本栏。实测 fig8：左栏 y∈[410,613] 有大量正文
+             *             → 保持 230pt 宽
+             *    同一条规则自动给出两种结果，不需要特判。
              *
-             * 推不出（无标签、栏内无文本）就返回 null，调用方退回整页。
+             * ④ 上下各外扩 40%（钳到页面范围）。
              *
-             * @returns {Promise<{x:number,y:number,w:number,h:number,kindName:string}|null>}
-             *   坐标是 PDF 点、左下原点，与 destRegionPts 的约定一致。
+             * ⑤ FitR 直接用矩形（不走本函数）。
+             *
+             * ⑥ 都推不出来 → 返回 null，调用方退回整页。
+             *
+             * @returns {Promise<{x,y,w,h,kindName,crossColumn}|null>} PDF 点、左下原点
              */
             const inferDestRegion = async (dest, widthPt, heightPt) => {
               const kind = dest?.[1]?.name
@@ -4566,10 +4572,6 @@ window.__ModuleLoader__.load({
               try {
                 const pdfDocument = pdfRef.current?.doc
                 if (!pdfDocument) return null
-                /**
-                 * dest 里带的是 page ref，要换回页号。换算失败就放弃
-                 * （这里不做重活，调用方已经有 pageNo，但为独立性这里自算）。
-                 */
                 const pageNo = await destPageOf(dest)
                 if (!pageNo) return null
                 const page = await pdfDocument.getPage(pageNo)
@@ -4583,74 +4585,111 @@ window.__ModuleLoader__.load({
                   items.push({ s: it.str.trim(), x, y, w: it.width ?? 0 })
                 }
                 if (items.length === 0) return null
+
+                // ---- ① 定栏 ----
                 const mid = widthPt / 2
+                const destIsLeft = anchorX === null ? true : anchorX < mid
+                const inSameCol = (v) => (v.x < mid) === destIsLeft
+                const colItems = items.filter(inSameCol)
+                if (colItems.length < 4) return null
+
                 /**
-                 * 分栏：有 anchorX 就用它；没有就退回 caption/锚点所在侧，
-                 * 再不行就用整页（宁可范围大一点也不串栏）。
+                 * 本栏 / 邻栏的横向边界。用 item 的实际极值，
+                 * 不是整页宽 —— 保持单栏时不能把邻栏带进来。
                  */
-                const colItems = (() => {
-                  if (anchorX === null) return items
-                  const isLeft = anchorX < mid
-                  const side = items.filter((v) => (v.x < mid) === isLeft)
-                  return side.length >= 4 ? side : items
-                })()
-                colItems.sort((a, b) => b.y - a.y)   // y 从高到低（页面从上到下）
+                const colX0 = Math.max(0, Math.min(...colItems.map((v) => v.x)) - 6)
+                const colX1 = Math.min(widthPt, Math.max(...colItems.map((v) => v.x + v.w)) + 6)
+                const otherCol = items.filter((v) => !inSameCol(v))
 
                 const LABEL_RE = /^(FIGURE|Figure|Fig\.?|TABLE|Table|Algorithm|ALGORITHM)\s*\d/i
                 const EQ_NO_RE = /^\(\d+\)$/
 
                 /**
-                 * 该栏的横向范围（裁切用）。取本栏 item 的左右极值，
-                 * 留 6pt 边距；不给整页宽 —— 双栏论文按整页裁会把另一栏也带进来。
-                 */
-                const colX0 = Math.max(0, Math.min(...colItems.map((v) => v.x)) - 6)
-                const colX1 = Math.min(widthPt, Math.max(...colItems.map((v) => v.x + v.w)) + 6)
-
-                /**
-                 * ---- 规则 ②：figure / table / algorithm ----
-                 * 找离锚点最近的那个标签（同栏），图在标签上方。
+                 * ---- ② figure：caption 在锚点附近，图在 caption 上方 ----
+                 * 实测 fig1：caption y=653.4，往上到页眉 y=782 全空白 → 图区 [662,782]
+                 * 实测 fig8：caption y=397.4，往上到 FIGURE 7 caption 尾巴 y=613 → [410,613]
                  */
                 let label = null
                 let bestDy = Infinity
                 for (const it of colItems) {
                   if (!LABEL_RE.test(it.s)) continue
                   const dy = Math.abs(it.y - anchorY)
-                  if (dy < bestDy) { bestDy = dy; label = it }
+                  if (dy < bestDy && dy <= 160) { bestDy = dy; label = it }
                 }
                 if (label) {
                   /**
-                   * 图区上界（PDF y 更大的一侧）：从标签往上扫，
-                   * 遇到第一个「文本块」的下沿就停 —— 更上面是正文。
-                   * 实测 fig1 会停在页眉 y=801.5，fig8 停在 y=613.4。
+                   * 上界：只在本栏内向上扫，遇到第一个文本块就停。
+                   * 不看邻栏 —— 邻栏内容与本图无关（那是 fig8 的坑）。
                    */
-                  let top = heightPt
+                  let yTop = heightPt
                   for (const it of colItems) {
-                    if (it.y <= label.y + 1) continue      // 只看标签上方的
-                    if (it.y < top) top = it.y
+                    if (it.y <= label.y + 1) continue      // 只看 caption 上方
+                    if (it.y < yTop) yTop = it.y
                   }
                   /**
-                   * 下界：标签下方的那几行 caption 文字（连续、间距小）。
-                   * 实测 caption 高 9~12pt 一行，向下逐行直到间距明显变大。
+                   * 下界：caption 自身那几行（间距小、连续）。
                    */
-                  let bottom = label.y - 4
-                  const captionSorted = colItems
+                  let yBot = label.y - 4
+                  const captionRows = colItems
                     .filter((it) => it.y < label.y && it.y > label.y - 90)
                     .sort((a, b) => b.y - a.y)
                   let prevY = label.y
-                  for (const it of captionSorted) {
-                    if (prevY - it.y > 22) break          // 间距突变 → 正文开始
-                    bottom = it.y - 4
+                  for (const it of captionRows) {
+                    if (prevY - it.y > 22) break           // 间距突变 → 正文开始
+                    yBot = it.y - 4
                     prevY = it.y
                   }
-                  const h = top - bottom
-                  if (h > 40) {
-                    return { x: colX0, y: bottom, w: colX1 - colX0, h, kindName: 'figure' }
+                  const h = yTop - yBot
+                  if (h > 30) {
+                    /**
+                     * ---- ③ 横向：邻栏在同一纵向区间是否为空 ----
+                     * 空 → 跨栏（fig1）；非空 → 保持本栏（fig8）。
+                     *
+                     * **要排除页眉/页脚。** 实测 fig1：右栏在 y∈[640,801]
+                     * 区间里只有一条页眉（DOI 号，y=801），若把它算作
+                     * 「邻栏有内容」就会拒绝跨栏 —— 但页眉属于版面边缘，
+                     * 与图区无关，不该挡路。
+                     *
+                     * 判据：距页面上下边缘 8% 以内的文本视为边缘装饰。
+                     */
+                    const edgeBand = heightPt * 0.08
+                    const overlap = otherCol.filter(
+                      (v) => v.y >= yBot - 2 && v.y <= yTop + 2
+                        && v.y > edgeBand && v.y < heightPt - edgeBand,
+                    )
+                    const crossColumn = overlap.length === 0
+                    let x0 = colX0
+                    let x1 = colX1
+                    if (crossColumn && otherCol.length > 0) {
+                      x0 = Math.max(0, Math.min(x0, Math.min(...otherCol.map((v) => v.x)) - 6))
+                      x1 = Math.min(widthPt, Math.max(x1, Math.max(...otherCol.map((v) => v.x + v.w)) + 6))
+                    }
+                    /**
+                     * ---- ④ 上下各外扩 40% ----
+                     * 钳在页面内，且不越过已找到的相邻文本块
+                     * （yTop 上方 / yBot 下方的第一个文本块）。
+                     */
+                    const pad = h * 0.4
+                    let yLo = Math.max(0, yBot - pad)
+                    let yHi = Math.min(heightPt, yTop + pad)
+                    // 不越过本栏内更近的文本块
+                    for (const it of colItems) {
+                      if (it.y < yBot && it.y + 6 > yLo && it.y < yBot) yLo = Math.max(yLo, it.y + 6)
+                      if (it.y > yTop && it.y - 6 < yHi && it.y > yTop) yHi = Math.min(yHi, it.y - 6)
+                    }
+                    if (yHi - yLo > 20) {
+                      return {
+                        x: x0, y: yLo, w: x1 - x0, h: yHi - yLo,
+                        kindName: 'figure', crossColumn,
+                      }
+                    }
                   }
                 }
 
                 /**
-                 * ---- 规则 ③：公式（靠编号 (N) 定位）----
-                 * 找离锚点最近的编号，区域取编号所在行上下最近的正文块。
+                 * ---- ⑤ 公式：靠编号 (N) 定位 ----
+                 * 实测 eq1 的 (1) 在 y=88.0、与公式同基线，
+                 * 其上下最近的正文块是 y=127.8 与 y=35.4（页脚）。
                  */
                 let eqNo = null
                 let eqDy = Infinity
@@ -4660,39 +4699,39 @@ window.__ModuleLoader__.load({
                   if (dy < eqDy) { eqDy = dy; eqNo = it }
                 }
                 if (eqNo && eqDy <= 60) {
-                  /**
-                   * 公式区：从编号行往上找第一个「间距正常」的正文行之前，
-                   * 往下同理。实测 eq1：上界 127.8（正文结束），下界 35.4（页脚）。
-                   */
                   const around = colItems
                     .filter((it) => Math.abs(it.y - eqNo.y) <= 120)
                     .sort((a, b) => b.y - a.y)
-                  let top = heightPt
-                  let bottom = 0
+                  let yTop = heightPt
                   let prev = eqNo.y + 30
                   for (const it of around) {
-                    if (it.y > eqNo.y) {
-                      if (prev - it.y > 26) { top = it.y; break }
-                      prev = it.y
-                      top = it.y
-                    }
+                    if (it.y <= eqNo.y) continue
+                    if (prev - it.y > 26) { yTop = it.y; break }
+                    prev = it.y
+                    yTop = it.y
                   }
+                  let yBot = 0
                   prev = eqNo.y - 30
                   for (const it of around) {
-                    if (it.y < eqNo.y) {
-                      if (it.y < prev - 26) { bottom = it.y; break }
-                      prev = it.y
-                      bottom = it.y
-                    }
+                    if (it.y >= eqNo.y) continue
+                    if (it.y < prev - 26) { yBot = it.y; break }
+                    prev = it.y
+                    yBot = it.y
                   }
-                  const h = top - bottom
-                  if (h > 30 && top > bottom) {
-                    return { x: colX0, y: bottom, w: colX1 - colX0, h, kindName: 'equation' }
+                  if (yTop - yBot > 20) {
+                    const pad = (yTop - yBot) * 0.4
+                    const yLo = Math.max(0, yBot - pad)
+                    const yHi = Math.min(heightPt, yTop + pad)
+                    return {
+                      x: colX0, y: yLo, w: colX1 - colX0, h: yHi - yLo,
+                      kindName: 'equation', crossColumn: false,
+                    }
                   }
                 }
                 return null
               } catch { return null }
             }
+
             const destRegionPts = (dest, widthPt, heightPt) => {
               const kind = dest?.[1]?.name
               const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -4845,8 +4884,22 @@ window.__ModuleLoader__.load({
                   ? opts.targetCssWidth
                   : (typeof opts?.availW === 'number' && opts.availW > 0 ? opts.availW : bitmap.cssWidth)
                 const availH = typeof opts?.availH === 'number' && opts.availH > 0 ? opts.availH : Infinity
-                const MAX_SCALE = 3
-                const scaleFit = Math.min(availW / region.w, availH / region.h, MAX_SCALE)
+                /**
+                 * **contain 的倍率上限：4，且受画布像素预算兜底。**
+                 *
+                 * 取 4 的依据（实测）：3x 时 eq1 只有 516×360（比整页 −6%，
+                 * 荒谬），4x 到 688×480（+25%）才正常；fig1 单栏 +76%；
+                 * 而 fig8 在 4x 时已撞 availH（879），再高也没用 —— 说明 4
+                 * 已接近瓶颈，5x 只多 1.56 倍渲染量换边际清晰度。
+                 *
+                 * **但只调常量不够**：它和 bitmapMaxWidthPx 表达的是同一件事
+                 * （别渲染太大）。窄区域（如公式 172pt）4x 后
+                 * 172×4×dpr2 = 1376px 刚好卡在 1400 的边缘，再加一列就溢出。
+                 * 所以实际生效上限取两者较小值。
+                 */
+                const MAX_SCALE = 4
+                const scaleCap = Math.min(MAX_SCALE, bitmapMaxWidthPx / Math.max(1, region.w))
+                const scaleFit = Math.min(availW / region.w, availH / region.h, scaleCap)
                 let cssW = Math.max(40, region.w * scaleFit)
                 let cssH = Math.max(24, region.h * scaleFit)
                 /**
@@ -4909,6 +4962,8 @@ window.__ModuleLoader__.load({
                   out.dataset.targetCssW = String(Math.round(availW))
                   out.dataset.regionKind = inferred ? inferred.kindName : (dest?.[1]?.name === 'FitR' ? 'fitr' : 'page')
                   out.dataset.scale = String(Math.round(scaleFit * 100) / 100)
+                  out.dataset.scaleCap = String(Math.round(scaleCap * 100) / 100)
+                  out.dataset.crossColumn = inferred ? (inferred.crossColumn ? '1' : '0') : '0'
                 } catch { /* ignore */ }
                 return out
               } catch { return null }
@@ -6449,7 +6504,10 @@ const placeBox = (el, l, t, wd, ht) => {
                             popupW: Math.round(tipRect.width),
                             popupH: Math.round(tipRect.height),
                             scale: Number(canvas.dataset?.scale ?? 0),
+                            scaleCap: Number(canvas.dataset?.scaleCap ?? 0),
                             regionKind: canvas.dataset?.regionKind ?? null,
+                            /** 是否跨栏（figure 的横向是否扩到了邻栏） */
+                            crossColumn: canvas.dataset?.crossColumn === '1',
                             viewportW: Math.round(window.innerWidth),
                             regionW: Number(canvas.dataset?.regionW ?? 0) || null,
                             regionH: Number(canvas.dataset?.regionH ?? 0) || null,
