@@ -7111,6 +7111,13 @@ const placeBox = (el, l, t, wd, ht) => {
                             canvasCssH: Number(canvas.dataset?.cssH ?? 0) || Math.round(canvas.getBoundingClientRect().height),
                             shotClientH: shotEl ? Math.round(shotEl.clientHeight) : null,
                             shotScrollH: shotEl ? Math.round(shotEl.scrollHeight) : null,
+                            /**
+                             * 横向尺寸：槽的内容宽比浮窗窄多少，就是滚动条
+                             * 吃掉的宽度。`shotClientH` 若比 popupH 少几像素，
+                             * 只有这里能看出是不是被横向滚动条扣掉了。
+                             */
+                            shotClientW: shotEl ? Math.round(shotEl.clientWidth) : null,
+                            shotScrollW: shotEl ? Math.round(shotEl.scrollWidth) : null,
                             /** 尺寸单一源：页面矩形 → popupW/popupH（目标值） */
                             pageRectW: size.pageRectW,
                             pageRectH: size.pageRectH,
