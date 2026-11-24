@@ -795,15 +795,48 @@ check('wasOn 分支按实际高度重新决定位置（修盖住链接）',
   (() => {
     const at = src.indexOf('const showLinkTip = (lines, anchor')
     if (at < 0) return false
-    const seg = src.slice(at, at + 6000)
+    const seg = src.slice(at, at + 7000)
     const wasOn = seg.indexOf('if (wasOn) {')
     if (wasOn < 0) return false
-    const branch = seg.slice(wasOn, wasOn + 1600)
+    const branch = seg.slice(wasOn, wasOn + 2200)
     return /const actualH = tip\.offsetHeight/.test(branch) &&
       /computeTipPlacement\(anchor, actualH, Boolean/.test(branch) &&
       /tip\.style\.top = /.test(branch)
   })(),
   '只 return 不重算，位图变高后底部会盖住链接')
+
+/**
+ * **相邻引用之间移动时必须重算横向。**
+ *
+ * 用户报「参考文献的浮窗 x 所有引用都一样」：`cancelHideTip` 让
+ * `data-on` 保持 '1'，于是每次都走 wasOn 提前返回，left 永远是
+ * 第一条引用的值。
+ *
+ * 判据必须是 `tipPlacedAnchor`（只在写完 left/width 后赋值），
+ * **不能**用 `linkTipAnchor` —— 后者在 mouseover 时就提前更新了，
+ * 分不出「换了链接」和「同一链接的位图回流」。
+ */
+check('换了链接时 wasOn 分支强制重算横向',
+  (() => {
+    const at = src.indexOf('const showLinkTip = (lines, anchor')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 7000)
+    const wasOn = seg.indexOf('if (wasOn) {')
+    if (wasOn < 0) return false
+    const branch = seg.slice(wasOn, wasOn + 2200)
+    return /anchor !== tipPlacedAnchor/.test(branch) &&
+      /placeHorizontal\(tip, anchor, opts\)/.test(branch)
+  })(),
+  '不重算横向，所有引用会挤在同一个 x')
+
+check('tipPlacedAnchor 在 hideLinkTip 里复位',
+  /tipPlacedAnchor = null/.test(src) &&
+    (() => {
+      const at = src.indexOf('const hideLinkTip = () => {')
+      if (at < 0) return false
+      return /tipPlacedAnchor = null/.test(src.slice(at, at + 900))
+    })(),
+  '不复位的话下次弹出会被误判成「同一锚点回流」，仍然不写 left')
 
 check('wasOn 重算时不动横向（避免左右跳）',
   (() => {
@@ -837,9 +870,21 @@ check('位图槽位有加载占位（避免先塌后跳）',
  * 一行放不下自动换行至所有内容都放下去」。
  * 文字预览半栏宽，且不能有 max-height 截断。
  */
-check('文字预览宽度为半栏（0.5）',
-  /const widthRatio = opts\?\.bitmap \? 0\.9 : 0\.5/.test(src),
-  '整页宽会一行塞很多字，用户要 1/2 栏')
+/**
+ * 文字预览宽度：用户说「就 1/2 **栏**」—— 栏 = column，不是 page。
+ * 双栏论文里 0.5×页宽比一整栏还宽：右栏引用会被视口 clamp 压成同一个 x。
+ * 现在按测出的栏宽算，拿不到才退回 0.28×页宽。
+ */
+check('文字预览宽度按栏宽（不是 0.5×页宽）',
+  /const measureColumnWidth = \(pageEl\) =>/.test(src) &&
+    /const colW = measureColumnWidth\(pageEl\)/.test(src) &&
+    /targetW = colW \|\| baseW \* 0\.28/.test(src),
+  '0.5×页宽比一整栏还宽，文字会被拉成一行长条')
+
+check('文字预览以链接中心为中心（不是左边界对齐）',
+  /centerX = \(ar\.left \+ ar\.right\) \/ 2/.test(src) &&
+    /left = centerX - targetW \/ 2/.test(src),
+  '左边界对齐 + 右侧 clamp 会把右栏引用全压成同一个 left')
 
 check('文字预览不被高度截断（内容全部放下去）',
   !/\.zr-link-tip \.zr-tip-line\{[^}]*max-height/.test(src) &&
@@ -850,12 +895,14 @@ check('文字预览不被高度截断（内容全部放下去）',
  * 用户的原话：「悬浮窗的页面大概是 pdf 的 80% 就可以了」。
  */
 check('图片浮窗宽度为页面的 90%',
-  /opts\?\.bitmap \? 0\.9 : 0\.5/.test(src),
+  /const isBitmap = Boolean\(opts\?\.bitmap\)/.test(src) &&
+    /targetW = Math\.min\(baseW \* 0\.9, window\.innerWidth - 16\)/.test(src),
   '用户先要 80%，后改 90%')
 
-check('浮窗横向居中于页面（不是贴左边界）',
-  /const pageCenter = \(pageRect\.left \+ pageRect\.right\) \/ 2/.test(src),
-  '半栏宽贴左边界会停在栏缝里')
+check('位图浮窗横向居中于页面（文字才跟链接）',
+  /const pageCenter = pageRect && pageRect\.width > 0/.test(src) &&
+    /left = pageCenter - targetW \/ 2/.test(src),
+  'figure 常跨栏/居中，跟随链接 x 会让同一张图弹在不同位置')
 
 /**
  * 用户报「现在滑动没有任何效果」。
@@ -931,6 +978,50 @@ check('放哪边、多高、top 由单个函数一次给出（首帧与复核共
     /top = placement\.top/.test(src),
   '两处各写一遍容易不一致；分开算还会因规则矛盾压住链接')
 
+
+/* ---------- 4l. tip:place 诊断：必须记浮窗最终 left/width ---------- */
+
+/**
+ * 上一轮误判的教训：`tip:place` 只记了 `linkLeft`（链接自身），
+ * 没记浮窗最终写入的 left/width，于是「日志里 x 在变」被当成
+ * 「浮窗 x 在变」—— 实际 DOM 上只在第一次写过。
+ */
+check('tip:place 记录浮窗最终的 left 与宽度',
+  /left: horiz \? Math\.round\(horiz\.left\) : null/.test(src) &&
+    /tipW: horiz \? Math\.round\(horiz\.width\) : null/.test(src),
+  '只记 linkLeft 会让人误以为浮窗 x 已跟随链接')
+
+check('tip:place 记录视口尺寸',
+  /viewportW: Math\.round\(window\.innerWidth\)/.test(src) &&
+    /viewportH: Math\.round\(window\.innerHeight\)/.test(src))
+
+check('tip:place 用 path 区分首次/回流/换链接',
+  /path,/.test(src) &&
+    /'fresh'/.test(src) && /'reflow-moved'/.test(src),
+  '分不清路径就看不出「换链接时到底有没有重写 left」')
+
+/**
+ * wasOn 分支以前根本不发诊断，日志里完全看不到换链接的定位过程。
+ * 现在它走同一个 reportTipPlace 出口。
+ */
+check('wasOn 回流也发定位诊断',
+  (() => {
+    const at = src.indexOf('const showLinkTip = (lines, anchor')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 7000)
+    const wasOn = seg.indexOf('if (wasOn) {')
+    if (wasOn < 0) return false
+    return /reportTipPlace\(anchor, placed, opts/.test(seg.slice(wasOn, wasOn + 2400))
+  })(),
+  '不发诊断就看不到换链接时的定位过程')
+
+/**
+ * 位图高度：`mayCover` 分支必须按整屏可用高度给，不能被
+ * `r.top - gap - 8` 截断（那会让链接位于视口中部时只给到 511）。
+ */
+check('位图高度按整屏可用高度给（不被链接上沿截断）',
+  /const height = Math\.max\(MIN_H, Math\.min\(want, viewportH - 16\)\)/.test(src),
+  '被 r.top 截断会让 figure 在高链接位置上只能拿到半屏')
 
 /* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
 

@@ -5110,6 +5110,21 @@ const placeBox = (el, l, t, wd, ht) => {
             let linkTipTimer = 0
             /** 当前悬停的那条链接，用于 mouseover 冒泡去重。 */
             let linkTipAnchor = null
+            /**
+             * **上一次真正做过横向定位的锚点。**
+             *
+             * 为什么不能直接用 `linkTipAnchor` 判断「换链接」：
+             * 它在 `onPdfLinkOver` 里于 500ms 延时**之前**就更新了，
+             * 等延时到点执行时它早已指向新链接，分不出「换了链接」
+             * 和「同一个链接的位图异步回流」。
+             *
+             * 这个变量只在**写完 left/width 之后**赋值，所以它精确表示
+             * 「DOM 上现在这个位置是为谁摆的」。相邻引用之间移动鼠标时
+             * （`(Anderson, 1983; Lerner, 2012)`），`cancelHideTip` 让
+             * `data-on` 保持 '1'，但锚点已经变了 —— 靠它能识别出来，
+             * 从而强制重算横向。这正是用户报「所有引用的 x 都一样」的根因。
+             */
+            let tipPlacedAnchor = null
             /** 自动隐藏句柄（只有告警用）。 */
             let linkWarnTimer = 0
             /**
@@ -5140,6 +5155,8 @@ const placeBox = (el, l, t, wd, ht) => {
               if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
               cancelHideTip()
               linkTipAnchor = null
+              // 复位「已定位给谁」：下次弹出必须重新算横向
+              tipPlacedAnchor = null
               // 位图槽位的加载态也一并复位，下次悬停重新开始
               try {
                 const shot = linkTip?.querySelector?.('.zr-tip-shot')
@@ -5360,6 +5377,178 @@ const placeBox = (el, l, t, wd, ht) => {
               top = Math.min(top, maxTop)
               return { top: Math.max(8, top), height }
             }
+            /**
+             * **量出当前页的栏宽（PDF 双栏布局的单栏宽度）。**
+             *
+             * 用户原话是「参考文献的显示不要这么长，就 1/2 栏」——
+             * 栏 = column，不是 page。双栏论文里 1/2 栏 ≈ 页宽的 1/4 左右，
+             * 用 0.5×页宽会得到比一整栏还宽的卡片，右侧引用还会被视口
+             * clamp 压成同一个 x（用户报的「所有引用 x 都一样」的另一半原因）。
+             *
+             * 量法：取当前页文本层的元素，按它们的 left/right 分布找出
+             * 「左右两组」——双栏时两组的 x 区间分离，栏宽即每组的宽度。
+             * 拿不到（文本层还没画、或单栏）就返回 null，调用方退回比例估算。
+             */
+            const measureColumnWidth = (pageEl) => {
+              try {
+                if (!pageEl) return null
+                const spans = pageEl.querySelectorAll('.textLayer span')
+                if (spans.length < 8) return null
+                const pageRect = pageEl.getBoundingClientRect()
+                if (!(pageRect.width > 0)) return null
+                /**
+                 * 收集每个 span 的横向区间（相对页面），
+                 * 只取有实质宽度的，避免标点/空白干扰。
+                 */
+                const items = []
+                for (const sp of spans) {
+                  const r = sp.getBoundingClientRect()
+                  if (r.width < 4 || r.height < 2) continue
+                  items.push({ l: r.left - pageRect.left, r: r.right - pageRect.left })
+                }
+                if (items.length < 8) return null
+                const mid = pageRect.width / 2
+                /**
+                 * 按「中线左右」分两组，再看两组是否真的分离
+                 * （右侧组的起点明显大于左侧组的终点 → 是双栏）。
+                 */
+                const lefts = items.filter((v) => (v.l + v.r) / 2 < mid)
+                const rights = items.filter((v) => (v.l + v.r) / 2 >= mid)
+                if (lefts.length < 4 || rights.length < 4) return null
+                const leftMaxR = Math.max(...lefts.map((v) => v.r))
+                const rightMinL = Math.min(...rights.map((v) => v.l))
+                // 两组之间要有可见的栏间距，否则视为单栏（浮动元素会把区间撑满）
+                if (rightMinL - leftMaxR < pageRect.width * 0.02) return null
+                /**
+                 * 栏宽取两组的「典型宽度」：用 75 分位而不是最大值，
+                 * 避免跨栏的 figure / 标题把估计撑大。
+                 */
+                const percentile = (arr, p) => {
+                  const sorted = [...arr].sort((a, b) => a - b)
+                  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]
+                }
+                const lw = percentile(lefts.map((v) => v.r - v.l), 0.75)
+                const rw = percentile(rights.map((v) => v.r - v.l), 0.75)
+                const colW = Math.max(lw, rw)
+                if (!(colW > 40)) return null
+                return colW
+              } catch { return null }
+            }
+
+            /**
+             * **横向定位：算出浮窗的 left 与 width 并写进 DOM。**
+             *
+             * 抽成函数是因为它要跑两次：首次弹出、以及**换了链接时的回流**
+             * （相邻引用之间移动鼠标，`data-on` 仍为 '1' 但锚点已变）。
+             *
+             * 规则（用户多轮反馈定下来的）：
+             *   · 位图：宽 0.9×页宽，**居中于页面**（figure 常跨栏/居中，
+             *     跟随链接 x 会让同一张图在不同链接位置弹在不同地方）。
+             *   · 文字：宽约**一栏**，**以链接中心为中心**对齐。
+             *     早先「左边界对齐链接」，但右侧引用会被视口 clamp
+             *     全部压到同一个 x —— 这正是用户报的 bug。
+             *
+             * 写完 left/width 后记 `tipPlacedAnchor`，表示「这个位置是为谁摆的」。
+             *
+             * @returns {{left:number,width:number,path:string}}
+             */
+            const placeHorizontal = (tip, anchor, opts) => {
+              let pageRect = null
+              try {
+                const linkPage = anchor?.closest?.('.page')
+                pageRect = linkPage?.getBoundingClientRect?.() ?? null
+                if (!pageRect || !(pageRect.width > 0)) {
+                  const anyPage = host?.querySelector?.('.page')
+                  pageRect = anyPage?.getBoundingClientRect?.() ?? null
+                }
+              } catch { /* 取不到就退回视口居中 */ }
+
+              const isBitmap = Boolean(opts?.bitmap)
+              let left
+              let targetW
+              if (isBitmap) {
+                // 位图：0.9 × 页宽，居中于页面
+                const baseW = pageRect && pageRect.width > 0 ? pageRect.width : Math.min(560, window.innerWidth - 16)
+                targetW = Math.min(baseW * 0.9, window.innerWidth - 16)
+                targetW = Math.max(160, targetW)
+                const pageCenter = pageRect && pageRect.width > 0
+                  ? (pageRect.left + pageRect.right) / 2
+                  : window.innerWidth / 2
+                left = pageCenter - targetW / 2
+              } else {
+                /**
+                 * 文字：宽度按**栏宽**算，居中于链接。
+                 *
+                 * 先量真实栏宽；量不到就用页宽的 0.28 作退路
+                 * （双栏论文的一栏大致在这个量级，比 0.5 明显更窄）。
+                 */
+                const pageEl = anchor?.closest?.('.page') ?? host?.querySelector?.('.page') ?? null
+                const colW = measureColumnWidth(pageEl)
+                const baseW = pageRect && pageRect.width > 0 ? pageRect.width : window.innerWidth
+                targetW = colW || baseW * 0.28
+                // 别窄到放不下一行字，也别宽到跨栏
+                targetW = Math.max(180, Math.min(targetW, window.innerWidth - 16))
+                /**
+                 * 以**链接中心**为中心，而不是左边界对齐。
+                 * 这样相邻引用（x 各不相同）会弹在各自的位置，
+                 * 不会因为右侧 clamp 被压到同一个值。
+                 */
+                let centerX = window.innerWidth / 2
+                try {
+                  if (anchor) {
+                    const ar = anchor.getBoundingClientRect()
+                    centerX = (ar.left + ar.right) / 2
+                  } else if (pageRect && pageRect.width > 0) {
+                    centerX = (pageRect.left + pageRect.right) / 2
+                  }
+                } catch { /* 用视口中心 */ }
+                left = centerX - targetW / 2
+              }
+              // 夹进视口（只是保底，正常情况下不会触发）
+              left = Math.max(8, Math.min(left, window.innerWidth - targetW - 8))
+              tip.style.right = 'auto'
+              tip.style.left = `${Math.round(left)}px`
+              tip.style.width = `${Math.round(targetW)}px`
+              /**
+               * 记下「这个横向位置是为谁摆的」。换了链接时靠它识别回流。
+               */
+              tipPlacedAnchor = anchor || null
+              return { left, width: targetW }
+            }
+
+            /**
+             * **定位诊断（统一出口）。**
+             *
+             * 上一轮 `tip:place` 只记了 `linkLeft`（链接自身），没记浮窗最终
+             * 写入的 left/width，导致误判「x 已经跟随链接变化」——
+             * 实际 DOM 上 left 只在第一次写过。所以这里必须同时记
+             * 链接矩形与浮窗矩形，并标明走的是哪条路径（首次 / 同位图回流 / 换链接回流）。
+             */
+            const reportTipPlace = (anchor, placed, opts, path, horiz) => {
+              if (!anchor) return
+              try {
+                const ar = anchor.getBoundingClientRect()
+                reportDiag({
+                  event: 'tip:place',
+                  href: (anchor.getAttribute('href') || '').slice(0, 60),
+                  path,
+                  linkTop: Math.round(ar.top),
+                  linkBottom: Math.round(ar.bottom),
+                  linkLeft: Math.round(ar.left),
+                  linkW: Math.round(ar.width),
+                  linkH: Math.round(ar.height),
+                  desiredH: placed && placed.height ? Math.round(placed.height) : null,
+                  chosenH: placed ? Math.round(placed.height) : null,
+                  chosenTop: placed ? Math.round(placed.top) : null,
+                  /** 浮窗最终写入的值 —— 这是上一轮缺的关键字段 */
+                  left: horiz ? Math.round(horiz.left) : null,
+                  tipW: horiz ? Math.round(horiz.width) : null,
+                  viewportW: Math.round(window.innerWidth),
+                  viewportH: Math.round(window.innerHeight),
+                  bitmap: Boolean(opts?.bitmap),
+                })
+              } catch { /* 诊断失败不影响定位 */ }
+            }
             const showLinkTip = (lines, anchor, autoHideMs = 0, warn = false, opts = null) => {
               const tip = ensureTip()
               /**
@@ -5389,16 +5578,29 @@ const placeBox = (el, l, t, wd, ht) => {
               }
               if (wasOn) {
                 /**
-                 * **已在显示：只按新内容的高度重算纵向，不动横向。**
+                 * **已在显示：按新内容的高度重算纵向；换了链接还要重算横向。**
                  *
-                 * 原来这里直接 return、完全不重算位置 —— 本意是防止
-                 * 「鼠标移进浮窗时位置跳动」，但把「位图到位后浮窗变高、
-                 * 必须重新摆正」也一起挡掉了。结果浮窗向下长出去盖住链接，
-                 * 正是用户报的那个 bug。
+                 * 这里分两种情况，之前的代码把它们混成了一种：
                  *
-                 * 只重算 top 不会造成左右跳（横向本来就固定对齐页面），
-                 * 所以这里用实际高度复核一次是安全的。
+                 *   ① **同一个锚点的异步回流**（位图到位后补内容）：
+                 *      横向保持不动，只按实际高度重排纵向 —— 否则鼠标移进
+                 *      浮窗时卡片会左右/上下乱跳。
+                 *
+                 *   ② **换了链接**（相邻引用之间移动鼠标）：
+                 *      必须连横向一起重算。用户报「参考文献的浮窗 x 所有引用
+                 *      都一样」就是这个漏洞：`cancelHideTip` 让 `data-on`
+                 *      保持 '1'，于是每次都走 wasOn 提前返回，left 永远是
+                 *      第一条引用的值。
+                 *
+                 * 判据用 `tipPlacedAnchor` 而不是 `linkTipAnchor` ——
+                 * 后者在 mouseover 时就提前更新了，区分不出这两种情况。
                  */
+                const anchorChanged = Boolean(anchor) && anchor !== tipPlacedAnchor
+                /**
+                 * 本次实际写入的横向值（换链接时才有）。
+                 * 诊断要用它，才能从日志看出 left 到底变没变。
+                 */
+                let horiz = null
                 tip.style.visibility = ''
                 if (anchor) {
                   /**
@@ -5413,6 +5615,16 @@ const placeBox = (el, l, t, wd, ht) => {
                   const placed = computeTipPlacement(anchor, actualH, Boolean(opts?.bitmap))
                   tip.style.maxHeight = `${Math.round(placed.height)}px`
                   tip.style.top = `${Math.round(placed.top)}px`
+                  if (anchorChanged) {
+                    /**
+                     * 换了链接：横向也要重算。
+                     * 这一步是「所有引用 x 都一样」的修法 —— 相邻引用之间
+                     * 移动时 data-on 仍是 '1'，只有这里强制重写 left 才能
+                     * 让每条引用弹在自己的位置。
+                     */
+                    horiz = placeHorizontal(tip, anchor, opts)
+                  }
+                  reportTipPlace(anchor, placed, opts, anchorChanged ? 'reflow-moved' : 'reflow', horiz)
                 }
                 cancelHideTip()
                 if (linkWarnTimer) { clearTimeout(linkWarnTimer); linkWarnTimer = 0 }
@@ -5472,110 +5684,18 @@ const placeBox = (el, l, t, wd, ht) => {
                 const shotNow = tip.querySelector('.zr-tip-shot')
                 if (shotNow) shotNow.style.maxHeight = `${Math.round(placement.height)}px`
               }
-              const tipH = placement.height
               /**
-               * **定位诊断。**
+               * **横向定宽定位（首次弹出路径）。**
                *
-               * 「浮窗仍然盖住链接」这类问题光看现象分不清是几何算错、
-               * 还是算对了但被别的东西改掉（异步位图撑高、CSS padding
-               * 让实际高度超出 placement.height、二次定位覆盖）。
-               * 把链接矩形、选边结果、可用空间、期望/实得高度一次记全，
-               * 下次直接看日志即可定性。
+               * 具体规则见 `placeHorizontal` 的说明：位图 0.9×页宽居中，
+               * 文字按**栏宽**并以**链接中心**对齐 —— 后者是用户报
+               * 「所有引用 x 都一样」的修法（旧代码把左侧的链接左对齐 + 视口
+               * clamp，右侧引用全被压成同一个值）。
                */
-              if (anchor) {
-                try {
-                  const ar = anchor.getBoundingClientRect()
-                  reportDiag({
-                    event: 'tip:place',
-                    href: (anchor.getAttribute('href') || '').slice(0, 60),
-                    linkTop: Math.round(ar.top),
-                    linkBottom: Math.round(ar.bottom),
-                    linkLeft: Math.round(ar.left),
-                    linkW: Math.round(ar.width),
-                    linkH: Math.round(ar.height),
-                    desiredH: Math.round(desiredH),
-                    chosenH: Math.round(placement.height),
-                    chosenTop: Math.round(placement.top),
-                    viewportH: Math.round(window.innerHeight),
-                    bitmap: Boolean(opts?.bitmap),
-                  })
-                } catch { /* 诊断失败不影响定位 */ }
-              }
-              /**
-               * 页面矩形：优先用锚点所在页，拿不到再退到可见页。
-               * 页面元素是定位的参照物，浮窗宽度也按它的宽度算 ——
-               * 不再用 min(560px,86vw) 那种与版面无关的硬上限。
-               */
-              let pageRect = null
-              try {
-                const linkPage = anchor?.closest?.('.page')
-                pageRect = linkPage?.getBoundingClientRect?.() ?? null
-                if (!pageRect || !(pageRect.width > 0)) {
-                  const anyPage = host?.querySelector?.('.page')
-                  pageRect = anyPage?.getBoundingClientRect?.() ?? null
-                }
-              } catch { /* 取不到就退回视口居中 */ }
-
-              let left
               let top
-              /**
-               * **宽度按内容类型分开定，横向锚点也分开。**
-               *
-               * 宽度：参考文献「就 1/2 栏」→ 文字半栏；「窗口开 90%」→ 位图 90%。
-               *
-               * 横向锚点（用户后续反馈修正过）：
-               *   · 位图：**居中对齐页面**。figure/公式通常跨栏或居中，
-               *     跟随链接 x 会让同一张图在不同链接位置弹出不同横向位置。
-               *   · 文字：**对齐链接自身**。用户明确指出「参考文献的悬浮窗
-               *     的 x 似乎没更新，所有引用的 x 都是一样的」—— 因为之前
-               *     两者都用了 pageCenter。文献引用散布在正文里，x 各不相同，
-               *     贴着自己那条引用显示才符合直觉。
-               */
-              const widthRatio = opts?.bitmap ? 0.9 : 0.5
-              if (pageRect && pageRect.width > 0) {
-                /**
-                 * 目标宽度 = 页宽 × 比例，并夹进视口。
-                 * 页面被放得很大时（>12:1 之外）夹住，别让浮窗跑到屏幕外。
-                 */
-                let targetW = pageRect.width * widthRatio
-                targetW = Math.min(targetW, window.innerWidth - 16)
-                targetW = Math.max(160, targetW)
-                let targetLeft
-                if (opts?.bitmap) {
-                  // 位图：居中于页面
-                  const pageCenter = (pageRect.left + pageRect.right) / 2
-                  targetLeft = pageCenter - targetW / 2
-                } else {
-                  /**
-                   * 文字：让卡片左边界对齐链接左边界；
-                   * 右侧超出视口时整体左移，保证整块可见。
-                   */
-                  let anchorLeft = pageRect.left
-                  try {
-                    if (anchor) anchorLeft = anchor.getBoundingClientRect().left
-                  } catch { /* 拿不到就用页面左边界 */ }
-                  targetLeft = anchorLeft
-                  if (targetLeft + targetW > window.innerWidth - 8) {
-                    targetLeft = window.innerWidth - targetW - 8
-                  }
-                }
-                // 夹进视口
-                targetLeft = Math.max(8, Math.min(targetLeft, window.innerWidth - targetW - 8))
-                left = targetLeft
-                /**
-                 * 用 left + 显式 width 定宽（不再用 left/right 双约束）：
-                 * 双约束会让宽度被页面宽度绑定死，没法按比例收窄。
-                 */
-                tip.style.right = 'auto'
-                tip.style.left = `${Math.round(targetLeft)}px`
-                tip.style.width = `${Math.round(targetW)}px`
-              } else {
-                tip.style.right = 'auto'
-                const fallbackW = Math.min(560, window.innerWidth - 16)
-                left = Math.max(8, (window.innerWidth - fallbackW) / 2)
-                tip.style.left = `${Math.round(left)}px`
-                tip.style.width = opts?.bitmap ? `${Math.round(fallbackW)}px` : ''
-              }
+              const horiz = placeHorizontal(tip, anchor, opts)
+              /** 首次定位的诊断，与 wasOn 回流共用同一个出口 */
+              reportTipPlace(anchor, placement, opts, 'fresh', horiz)
               /**
                * **纵向直接用 placement.top。**
                *
