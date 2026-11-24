@@ -4732,6 +4732,36 @@ window.__ModuleLoader__.load({
             }
 
             let linkTip = null
+            /**
+             * 浮窗内的滚轮处理：先滚浮窗自己，滚到头也不外溢。
+             *
+             * 只有 `.zr-tip-shot` 真正可滚（overflow:auto），
+             * 所以把 wheel 转给它；到边界时 preventDefault 兜住，
+             * 避免滚动链继续往 PDF 那个滚动容器传。
+             */
+            const onTipWheel = (event) => {
+              event.stopPropagation()
+              try {
+                const shot = linkTip?.querySelector?.('.zr-tip-shot')
+                if (shot) {
+                  const maxTop = shot.scrollHeight - shot.clientHeight
+                  if (maxTop > 0) {
+                    shot.scrollTop += event.deltaY
+                    // 滚到边界后不让事件继续传播（否则会滚 PDF）
+                    if (shot.scrollTop <= 0 || shot.scrollTop >= maxTop) {
+                      shot.scrollTop = Math.max(0, Math.min(maxTop, shot.scrollTop))
+                    }
+                  }
+                }
+              } catch { /* ignore */ }
+              /**
+               * 无论如何都不让这一下滚轮影响 PDF：浮窗是覆盖层，
+               * 它内部的滚动不该带动背后文档。
+               */
+              event.preventDefault()
+            }
+
+
             const ensureTip = () => {
               if (linkTip && linkTip.isConnected) return linkTip
               linkTip = document.createElement('div')
@@ -4762,35 +4792,6 @@ window.__ModuleLoader__.load({
               linkTip.addEventListener('wheel', onTipWheel, { passive: false })
               document.body.appendChild(linkTip)
               return linkTip
-            }
-
-            /**
-             * 浮窗内的滚轮处理：先滚浮窗自己，滚到头也不外溢。
-             *
-             * 只有 `.zr-tip-shot` 真正可滚（overflow:auto），
-             * 所以把 wheel 转给它；到边界时 preventDefault 兜住，
-             * 避免滚动链继续往 PDF 那个滚动容器传。
-             */
-            const onTipWheel = (event) => {
-              event.stopPropagation()
-              try {
-                const shot = linkTip?.querySelector?.('.zr-tip-shot')
-                if (shot) {
-                  const maxTop = shot.scrollHeight - shot.clientHeight
-                  if (maxTop > 0) {
-                    shot.scrollTop += event.deltaY
-                    // 滚到边界后不让事件继续传播（否则会滚 PDF）
-                    if (shot.scrollTop <= 0 || shot.scrollTop >= maxTop) {
-                      shot.scrollTop = Math.max(0, Math.min(maxTop, shot.scrollTop))
-                    }
-                  }
-                }
-              } catch { /* ignore */ }
-              /**
-               * 无论如何都不让这一下滚轮影响 PDF：浮窗是覆盖层，
-               * 它内部的滚动不该带动背后文档。
-               */
-              event.preventDefault()
             }
 
             /** 悬停延时句柄；0 表示没有待执行的悬停。 */
