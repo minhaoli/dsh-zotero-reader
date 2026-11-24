@@ -236,7 +236,7 @@ check('提示挂在 body 上（脱离被裁剪的容器）',
  * 抽成函数是因为要跑两次（首帧按预估高度、位图到位后按实际高度）。
  */
 check('放上方还是下方由同一次决策给出（top 与高度自洽）',
-  /const computeTipPlacement = \(anchor, desiredH\) =>/.test(src) &&
+  /const computeTipPlacement = \(anchor, desiredH, isBitmap = false\) =>/.test(src) &&
     /roomAbove/.test(src) && /roomBelow/.test(src) &&
     /preferAbove/.test(src),
   '分开算会因「取较大一侧」与「优先上方」矛盾而压住链接')
@@ -248,7 +248,7 @@ check('放上方时底边贴链接上沿、放下方时顶边贴下沿（都留 
 
 check('高度按所选那一侧的可用空间收窄，并保留上下限',
   /Math\.min\(want, roomAbove\)/.test(src) && /Math\.min\(want, roomBelow\)/.test(src) &&
-    /const MIN_H = 120/.test(src) && /Math\.min\(viewportH \* 0\.46, 420\)/.test(src),
+    /const MIN_H_BITMAP = 120/.test(src) && /Math\.min\(viewportH \* 0\.8, 780\)/.test(src),
   '固定上限在链接偏下时放不下，必然压住链接所在行')
 
 check('浮窗与链接留有间隙（不紧贴）',
@@ -304,7 +304,7 @@ check('getBoundingClientRect 只在定位时各读一次（不反复读）',
      * computeTipPlacement（纵向 + 链接矩形）。合计读取次数要有限，
      * 关键是**不随 mousemove 反复读**。
      */
-    const at = src.indexOf('const computeTipPlacement = (anchor, desiredH)')
+    const at = src.indexOf('const computeTipPlacement = (anchor, desiredH, isBitmap')
     const at2 = src.indexOf('const showLinkTip = (lines, anchor')
     if (at < 0 || at2 < 0) return false
     const end2 = src.indexOf("addEventListener('click', onPdfLinkClick", at2)
@@ -800,7 +800,7 @@ check('wasOn 分支按实际高度重新决定位置（修盖住链接）',
     if (wasOn < 0) return false
     const branch = seg.slice(wasOn, wasOn + 1600)
     return /const actualH = tip\.offsetHeight/.test(branch) &&
-      /computeTipPlacement\(anchor, actualH\)/.test(branch) &&
+      /computeTipPlacement\(anchor, actualH, Boolean/.test(branch) &&
       /tip\.style\.top = /.test(branch)
   })(),
   '只 return 不重算，位图变高后底部会盖住链接')
@@ -870,7 +870,7 @@ check('位图裁切为整页（保证内容溢出容器，从而可滚）',
   '只裁 42% 时内容比容器矮，滚轮永远滚不动')
 
 check('可滚容器限高（内容必然超出）',
-  /\.zr-link-tip \.zr-tip-shot\{[^}]*max-height:min\(46vh/.test(src),
+  /max-height:min\(80vh,780px\)/.test(src),
   '容器不限高就没有可滚的余量')
 
 check('位图插入后主动滚到目标位置',
@@ -917,17 +917,17 @@ check('文字预览仍保留页码（那条没有图，页码是唯一位置线�
  * 等真位图（几百 px）进来，浮窗向下长出去，底边盖住链接。
  */
 check('位图浮窗高度上限按可用空间算（不写死，否则链接偏下时必被盖住）',
-  /const computeTipPlacement = \(anchor, desiredH\) =>/.test(src) &&
+  /const computeTipPlacement = \(anchor, desiredH, isBitmap = false\) =>/.test(src) &&
     /shotNow\.style\.maxHeight/.test(src) &&
     /placement\.height/.test(src),
   '固定上限在链接偏下时放不下，必然压住链接所在行')
 
-check('高度上限保留 46vh/420 的天花板与 120px 下限',
-  /Math\.min\(viewportH \* 0\.46, 420\)/.test(src) && /const MIN_H = 120/.test(src),
-  '要和 .zr-tip-shot 的 max-height 语义一致，且不能小到看不清内容')
+check('高度天花板为 80vh/780、下限 120px',
+  /Math\.min\(viewportH \* 0\.8, 780\)/.test(src) && /const MIN_H_BITMAP = 120/.test(src),
+  'CSS 默认值与 JS 天花板必须一致；下限不能小到看不清内容')
 
 check('放哪边、多高、top 由单个函数一次给出（首帧与复核共用）',
-  /const computeTipPlacement = \(anchor, desiredH\) =>/.test(src) &&
+  /const computeTipPlacement = \(anchor, desiredH, isBitmap = false\) =>/.test(src) &&
     /top = placement\.top/.test(src),
   '两处各写一遍容易不一致；分开算还会因规则矛盾压住链接')
 
@@ -1016,4 +1016,5 @@ check('不处理 zotero:// （交给全局拦截器）',
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)
+
 

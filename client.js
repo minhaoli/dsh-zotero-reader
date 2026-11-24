@@ -1431,8 +1431,12 @@ window.__ModuleLoader__.load({
        * 现在裁切改成整页（见 destRegionPts），这里同时把高度收到
        * min(46vh,420px)，内容必然溢出 → 滚轮与滚动条都可用。
        */
+      /* 位图区高度上限。JS 会按链接上下可用空间再设一次行内 maxHeight，
+         这里只是兜底默认值，与 computeTipPlacement 的天花板保持一致
+         （min(80vh,780px)）——两边不同步的话，行内值没设上的场合
+         会退回这个旧的小上限，浮窗又变矮。 */
       .zr-link-tip .zr-tip-shot{display:block;overflow:auto;
-        max-height:min(46vh,420px);background:#fff;border-radius:3px;
+        max-height:min(80vh,780px);background:#fff;border-radius:3px;
         overscroll-behavior:contain}
       .zr-link-tip .zr-tip-shot canvas{display:block;max-width:100%;height:auto}
       /* 位图加载中的占位，避免浮窗先塌成一条线再突然撑开 */
@@ -5257,11 +5261,36 @@ const placeBox = (el, l, t, wd, ht) => {
              * @param {number} desiredH 期望高度（位图用上限，文字用实际高度）
              * @returns {{top: number, height: number}}
              */
-            const computeTipPlacement = (anchor, desiredH) => {
+            const computeTipPlacement = (anchor, desiredH, isBitmap = false) => {
               const gap = 20
               const viewportH = window.innerHeight
-              const MIN_H = 120
-              const hardCap = Math.min(viewportH * 0.46, 420)
+              /**
+               * 文字浮窗的可用下限与位图不同。
+               *
+               * 120 是为**位图**定的：位图区太小就看不清内容。
+               * 但文字预览本来就可能只有一两行（实测 `cite.anderson1983`
+               * 的内容高度只有 45px），强行抬到 120 会让卡片底部留出一大块
+               * 空白，视觉上像“浮窗飘在远离链接的地方”——用户就是这么报的。
+               *
+               * 所以文字类型退到 48：足够放下两行正文 + 一行页码，且不会
+               * 比内容高出太多。实测那几条引用正好落在 45~64px 区间。
+               */
+              const MIN_H_BITMAP = 120
+              const MIN_H_TEXT = 48
+              // 下限按类型取：位图要够看清，文字贴着内容即可
+              const MIN_H = isBitmap ? MIN_H_BITMAP : MIN_H_TEXT
+              /**
+               * 高度天花板。
+               *
+               * 原来是 `min(46vh, 420px)` —— 420 太保守，一篇双栏论文的
+               * figure 连图注一起看时明显不够，用户反馈「窗口太小了」。
+               *
+               * 现在放到 `min(80vh, 780px)`：占视口八成、上限 780。
+               * 上限仍要给，否则在超宽屏上浮窗会高到半页都是它；
+               * 真正能放多高由 `computeTipPlacement` 按链接上下可用空间
+               * 再收一次，所以这个值只决定「空间充足时的最大尺寸」。
+               */
+              const hardCap = Math.min(viewportH * 0.8, 780)
               if (!anchor) {
                 const height = Math.min(desiredH || hardCap, hardCap)
                 return { top: 56, height }
@@ -5354,7 +5383,7 @@ const placeBox = (el, l, t, wd, ht) => {
                    */
                   tip.style.maxHeight = 'none'
                   const actualH = tip.offsetHeight || 120
-                  const placed = computeTipPlacement(anchor, actualH)
+                  const placed = computeTipPlacement(anchor, actualH, Boolean(opts?.bitmap))
                   tip.style.maxHeight = `${Math.round(placed.height)}px`
                   tip.style.top = `${Math.round(placed.top)}px`
                 }
@@ -5409,9 +5438,9 @@ const placeBox = (el, l, t, wd, ht) => {
                * 若拿不到（首帧还没内容）退回一个保守值。
                */
               const desiredH = opts?.bitmap
-                ? Math.min(window.innerHeight * 0.46, 420)
+                ? Math.min(window.innerHeight * 0.8, 780)
                 : (tip.offsetHeight || 120)
-              const placement = computeTipPlacement(anchor, desiredH)
+              const placement = computeTipPlacement(anchor, desiredH, Boolean(opts?.bitmap))
               if (opts?.bitmap) {
                 const shotNow = tip.querySelector('.zr-tip-shot')
                 if (shotNow) shotNow.style.maxHeight = `${Math.round(placement.height)}px`
