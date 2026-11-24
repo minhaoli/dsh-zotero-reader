@@ -4495,9 +4495,41 @@ window.__ModuleLoader__.load({
                 clearJumpFlash()
                 const host = hostRef.current
                 const pageEl = host?.querySelector?.(`.page[data-page-number="${pageNo}"]`)
-                if (!pageEl) return
+                /**
+                 * **页元素可能还不存在。**
+                 *
+                 * `jumpToNamedDest` 里刚调完 scrollPageIntoView 就调到这里，
+                 * 而 pdf.js 的目标页常常是懒渲染的：页元素要等它把
+                 * 可视区滚过去之后才创建。原来在这里 `return` 掉，
+                 * 结果就是「跳转成功、但高亮从不出现」——正是用户报的
+                 * 「超链接跳转后也没有一个高亮窗口」。
+                 *
+                 * 所以页元素还没出来时，改挂到 pagesinit/pagechanging 上
+                 * 等一次，别直接放弃。诊断里区分两种情况，便于日后判断。
+                 */
+                if (!pageEl) {
+                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'no-page-el' })
+                  const bus = eventBusRef.current
+                  if (!bus) return
+                  let once = false
+                  const retry = () => {
+                    if (once) return
+                    once = true
+                    try { bus.off('pagerendered', retry) } catch { /* ignore */ }
+                    // 等一帧，让 pdf.js 把页元素真正插进 DOM
+                    setTimeout(() => flashJumpTarget(pageNo, offset, previewText), 60)
+                  }
+                  try {
+                    bus.on('pagerendered', retry)
+                    setTimeout(retry, 400)
+                  } catch { /* 总线不可用就放弃 */ }
+                  return
+                }
                 const pageRect = pageEl.getBoundingClientRect()
-                if (!(pageRect.width > 0 && pageRect.height > 0)) return
+                if (!(pageRect.width > 0 && pageRect.height > 0)) {
+                  reportDiag({ event: 'jump:flash-skip', pageNo, offset, reason: 'zero-size' })
+                  return
+                }
 
                 const box = document.createElement('div')
                 box.className = 'zr-jump-flash'
@@ -4557,8 +4589,11 @@ window.__ModuleLoader__.load({
 
                 /**
                  * 定位优先用文本层矩形；拿不到才用估算横条。
+                 * 结果记进 alignedNow 供诊断用 —— 不能为了诊断再调一次
+                 * alignToTextLayer（它读写共享的 x/y/w/h，重入会互相污染）。
                  */
-                if (alignToTextLayer()) {
+                const alignedNow = alignToTextLayer()
+                if (alignedNow) {
                   left = x
                   top = y
                   width = w
@@ -4571,6 +4606,27 @@ window.__ModuleLoader__.load({
                  */
                 pageEl.appendChild(box)
                 jumpFlashEl = box
+                /**
+                 * **几何留痕。**
+                 *
+                 * 用户报「跳转后没有高亮」，而这条链路全程 try/catch 吞错，
+                 * 光看代码无法区分「没创建」「创建了但位置在页外」
+                 * 「创建了但看不见（配色/混合模式）」。这条诊断把落点的
+                 * 实际几何记进 client-log.jsonl，一次实测就能定性。
+                 */
+                reportDiag({
+                  event: 'jump:flash',
+                  pageNo,
+                  offset,
+                  aligned: alignedNow === true,
+                  left: Math.round(left),
+                  top: Math.round(top),
+                  w: Math.round(width),
+                  h: Math.round(height),
+                  pageW: Math.round(pageRect.width),
+                  pageH: Math.round(pageH),
+                  hasPreview: Boolean(previewText),
+                })
 
                 /**
                  * **文本层可能还没画出来。**
@@ -5198,6 +5254,20 @@ window.__ModuleLoader__.load({
                    * 所以这里要先解析 dest（getDestination 只读字典，很轻），
                    * 再用 isPreviewableDest 分流。
                    */
+                  /**
+                   * **按目标类型分流：图/公式走位图，其余具名目标走文字。**
+                   *
+                   * 用户的两次表态合起来是：
+                   *   · 「只有图、公式需要悬浮窗」→ 位图浮窗只给这三类；
+                   *   · 「参考文献要退回文字预览」→ 引用类不该完全没提示。
+                   * 所以这里不是「弹/不弹」的二值判断，而是三级：
+                   *   位图预览（fig/eq/table）> 文字预览（cite 等其他具名目标）
+                   *   > 不弹（#page=N 已在上面 return）。
+                   *
+                   * 关键：文字这条路径**绝不调用 renderDestBitmap** ——
+                   * 那是整页 canvas 渲染的重操作，只为取几行字不值得。
+                   * 只用 extractDestPreview（读文本层，按页缓存）。
+                   */
                   void (async () => {
                     try {
                       const pdfDocument = pdfRef.current?.doc
@@ -5205,19 +5275,6 @@ window.__ModuleLoader__.load({
                       let dest = await pdfDocument.getDestination(decName)
                       if (typeof dest === 'string') dest = await pdfDocument.getDestination(dest)
                       if (!Array.isArray(dest) || dest.length === 0) return
-                      /**
-                       * 不是图/公式 → 直接不弹。
-                       * 注意这里**还没有渲染任何位图**，代价只是一次字典查询。
-                       */
-                      if (!isPreviewableDest(decName, dest)) return
-                      /**
-                       * 类型确认之后才出浮窗骨架 —— 期间用户可能已经移开，
-                       * 所以要先确认还是同一条链接，避免给旧链接弹窗。
-                       */
-                      if (linkTipAnchor !== anchor || !anchor.isConnected) return
-                      showLinkTip([
-                        { kind: 'dim', text: '正在渲染目标区域…' },
-                      ], anchor, 0, false, { bitmap: true })
                       const destRef = dest[0]
                       let pageIndex
                       if (Number.isInteger(destRef)) pageIndex = destRef
@@ -5230,8 +5287,40 @@ window.__ModuleLoader__.load({
                       if (!Number.isInteger(pageIndex) || pageIndex < 0) return
                       const pageNo = pageIndex + 1
                       /**
+                       * ---- 非图/公式：文字预览 ----
+                       *
+                       * 先把 dest 解析出来拿到 pageNo（文字提取需要它），
+                       * 但**不碰位图**。取不到文字时退回目标名，不留空窗。
+                       */
+                      if (!isPreviewableDest(decName, dest)) {
+                        const preview = await extractDestPreview(dest, pageNo)
+                        if (linkTipAnchor !== anchor || !anchor.isConnected) return
+                        const caption = `第 ${pageNo} 页 · ${decName}`
+                        showLinkTip(
+                          preview
+                            ? [
+                              { kind: 'line', text: preview },
+                              { kind: 'dim', text: caption },
+                            ]
+                            : [
+                              { kind: 'dim', text: caption },
+                            ],
+                          anchor,
+                        )
+                        return
+                      }
+                      /**
+                       * 类型确认之后才出浮窗骨架 —— 期间用户可能已经移开，
+                       * 所以要先确认还是同一条链接，避免给旧链接弹窗。
+                       */
+                      if (linkTipAnchor !== anchor || !anchor.isConnected) return
+                      showLinkTip([
+                        { kind: 'dim', text: '正在渲染目标区域…' },
+                      ], anchor, 0, false, { bitmap: true })
+                      /**
                        * **只渲染目标这一页**（用户明确要求），不预取邻页。
                        * 页位图按 pageNo 缓存，同页的不同目标复用同一张图。
+                       * pageNo 已在上面统一解析（文字/位图两条路共用）。
                        */
                       const canvas = await renderDestBitmap(dest, pageNo)
                       const preview = canvas ? null : await extractDestPreview(dest, pageNo)

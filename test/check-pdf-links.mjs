@@ -410,6 +410,27 @@ check('闪烁块与定时器都有清理',
     /jumpFlashTimer\) \{ clearTimeout\(jumpFlashTimer\)/.test(src),
   '不清的话切文档后残留方块，定时器还会去改已移除的节点')
 
+/**
+ * 用户报「跳转后没有高亮」。这条链路全程 try/catch 吞错，
+ * 只看代码分不清「没创建」「位置在页外」「创建了但看不见」。
+ * 诊断必须能把这三种情况区分开。
+ */
+check('闪烁有几何诊断（能区分没创建 / 看不见）',
+  /event: 'jump:flash'/.test(src) &&
+    /aligned: alignedNow === true/.test(src) &&
+    /left: Math\.round\(left\)/.test(src) && /w: Math\.round\(width\)/.test(src),
+  '只吞错不留痕，线上永远查不出高亮为什么不显示')
+
+check('页元素还没渲染时不直接放弃（等待后重试）',
+  /event: 'jump:flash-skip'/.test(src) &&
+    /reason: 'no-page-el'/.test(src) &&
+    /bus\.on\('pagerendered', retry\)/.test(src),
+  'pdf.js 懒渲染：刚滚过去时 .page 可能还不存在，直接 return 就永远不显示')
+
+check('诊断不会为了取 aligned 再跑一次对齐',
+  !/aligned: alignToTextLayer\(\)/.test(src),
+  'alignToTextLayer 读写共享的 x/y/w/h，重入会互相污染')
+
 /* ---------- 4f. 安全：全程不拼 innerHTML ---------- */
 
 check('链接相关的提示/闪烁都不用 innerHTML',
@@ -488,14 +509,29 @@ check('FitR 矩形作为「图/表块」的强信号',
   /kind === 'FitR'/.test(src) && /isPreviewableDest/.test(src),
   '矩形框定的目标绝大多数是图/表/公式块，比名字更硬')
 
-check('名字不像图/公式时保守不弹',
-  /return false\s*\n\s*\}/.test(src) &&
-    /if \(!isPreviewableDest\(decName, dest\)\) return/.test(src),
-  '宁可少弹，也不要乱弹一屏正文')
+check('名字不像图/公式时退回文字预览（不再完全不弹）',
+  /if \(!isPreviewableDest\(decName, dest\)\) \{/.test(src) &&
+    /const preview = await extractDestPreview\(dest, pageNo\)/.test(src),
+  '用户明确要求：参考文献要退回文字预览')
 
-check('类型不合的目标不触发位图渲染（先分流再渲染）',
+/**
+ * 文字预览这条路径**不能**渲染位图。
+ * 用户要的只是几行字，而 renderDestBitmap 是整页 canvas 渲染。
+ */
+check('文字预览不调用 renderDestBitmap',
   (() => {
-    const guard = src.indexOf('if (!isPreviewableDest(decName, dest)) return')
+    const at = src.indexOf('if (!isPreviewableDest(decName, dest)) {')
+    if (at < 0) return false
+    const seg = src.slice(at, at + 1400)
+    const end = seg.indexOf('return')
+    const branch = end > 0 ? seg.slice(0, end) : seg
+    return !/renderDestBitmap/.test(branch) && /extractDestPreview/.test(branch)
+  })(),
+  '引用类只需要几行文字，不该付整页渲染的成本')
+
+check('类型不合的目标不触发位图渲染（位图分支在其后）',
+  (() => {
+    const guard = src.indexOf('if (!isPreviewableDest(decName, dest)) {')
     const render = src.indexOf('await renderDestBitmap(dest, pageNo)', guard)
     return guard > 0 && render > guard
   })(),
@@ -613,6 +649,49 @@ check('延迟消失定时器有清理',
 check('位图槽位有加载占位（避免先塌后跳）',
   /data-loading/.test(src) && /zr-tip-shot\[data-loading="1"\]/.test(src))
 
+
+/* ---------- 4i. TDZ：const 箭头函数必须先定义后使用 ---------- */
+
+/**
+ * 真实事故（5f0b66d 修）：`ensureTip()` 里引用了 `onTipWheel`，
+ * 而 `const onTipWheel = ...` 声明在它**后面 12 行**。
+ *
+ * `const` 箭头函数没有提升，首次调用就抛
+ *   ReferenceError: Cannot access 'onTipWheel' before initialization
+ * 后果是那一行之后的语句**全部没执行**：
+ *   · wheel 监听没挂上 → 滚轮穿透到 PDF
+ *   · mouseenter/mouseleave 没挂 → 浮窗不再消失
+ *   · document.body.appendChild 没跑 → 浮窗根本进不了 DOM
+ *
+ * 这类错误 node --check 抓不到（语法合法），运行时才炸，
+ * 而且表现千奇百怪。用静态断言盯住这个具体模式。
+ */
+check('onTipWheel 定义在 ensureTip 之前（防 TDZ 回归）',
+  (() => {
+    const def = src.indexOf('const onTipWheel =')
+    const use = src.indexOf("addEventListener('wheel', onTipWheel")
+    return def > 0 && use > 0 && def < use
+  })(),
+  'const 箭头函数没有提升，声明前使用会抛 ReferenceError')
+
+/**
+ * 只盯「注册时就求值」的位置：`addEventListener('wheel', onTipWheel, ...)`
+ * 这一行在 ensureTip 执行时立即读 onTipWheel，它必须先声明。
+ *
+ * 注意 cancelHideTip / scheduleHideTip 虽然在 ensureTip 之后声明，
+ * 但它们只出现在 `() => { ... }` 回调体里，事件触发时才求值 ——
+ * 属于安全的延迟求值，不该被这条断言误伤。
+ */
+check('ensureTip 注册 wheel 时引用的 onTipWheel 已先行声明',
+  (() => {
+    const def = src.indexOf('const onTipWheel =')
+    const at = src.indexOf('const ensureTip = () =>')
+    if (def < 0 || at < 0) return false
+    const reg = src.indexOf("addEventListener('wheel', onTipWheel", at)
+    // 注册发生在此函数体内，且定义必须在注册之前
+    return reg > at && def < reg
+  })(),
+  '注册时立即求值，声明在后就抛 ReferenceError（5f0b66d 的坑）')
 
 /* ---------- 5. 监听必须清理（否则累积） ---------- */
 
