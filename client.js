@@ -1428,10 +1428,17 @@ window.__ModuleLoader__.load({
        * 内容是一整页（同一页在 630px 宽下约 892px）→ 必然溢出，
        * 滚轮与滚动条才有可滚的余量（scrollHeight - clientHeight 大于 0）。
        *
+       * **只允许纵向滚动。** 纵向滚动条会占掉约 5px 内容宽，630 宽的 canvas
+       * 在 625 的内容框里就会横向溢出，浏览器再加一条横向滚动条 ——
+       * 用户以前吐槽的「两个进度条」正是这么来的（实测 shotClientH 比
+       * popupH 少 5px）。位图是按宽度等比缩放的，横向滚动没有意义，
+       * 直接 overflow-x:hidden 把那条线去掉；代价是页面右缘约 5px
+       * （通常是白边）被裁掉。
+       *
        * 这里保留 max-height 只作骨架帧兜底：JS 还没写行内高度时，
        * 别让空槽塌成 0 高；一旦写入行内 height，它优先于这条规则。
        */
-      .zr-link-tip .zr-tip-shot{display:block;overflow:auto;
+      .zr-link-tip .zr-tip-shot{display:block;overflow-y:auto;overflow-x:hidden;
         max-height:min(80vh,780px);background:#fff;border-radius:3px;
         overscroll-behavior:contain}
       /*

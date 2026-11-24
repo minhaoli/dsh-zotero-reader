@@ -704,8 +704,11 @@ check('类型不合的目标不触发位图渲染（位图分支在其后）',
  *   如果落在悬浮窗上需要有滑动悬浮窗页面的功能」。
  */
 check('浮窗位图区可滚动（需要有滑动功能）',
-  /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow:auto/.test(src),
+  /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow-y:auto/.test(src),
   '用户明确要求「需要有滑动悬浮窗页面的功能」')
+check('位图区只纵向滚动（横向溢出会多出一条滚动条）',
+  /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow-x:hidden/.test(src),
+  '纵横都 auto 时，纵向滚动条占掉的 5px 会让 630 宽的 canvas 溢出，多出横向条')
 
 check('浮窗接收鼠标事件（pointer-events:auto）',
   /\.zr-link-tip\{[^}]*pointer-events:auto/.test(src) &&
@@ -1057,7 +1060,7 @@ check('外层浮窗不再是滚动容器（只有一个滚动面）',
   '两层都 auto 就会出现两条并排滚动条')
 
 check('位图槽仍是唯一滚动面',
-  /\.zr-link-tip \.zr-tip-shot\{display:block;overflow:auto/.test(src))
+  /\.zr-link-tip \.zr-tip-shot\{display:block;overflow-y:auto/.test(src))
 
 /**
  * 纯文字浮窗没有 .zr-tip-shot，旧代码无条件 preventDefault 会把滚轮吞掉，
