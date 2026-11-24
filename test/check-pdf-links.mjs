@@ -961,11 +961,16 @@ check('文字预览仍保留页码（那条没有图，页码是唯一位置线�
  * 根因：tipH 用的是位图插入前的占位高度（min-height:96px），
  * 等真位图（几百 px）进来，浮窗向下长出去，底边盖住链接。
  */
-check('位图浮窗高度上限按可用空间算（不写死，否则链接偏下时必被盖住）',
+/**
+ * 位图浮窗现在由 contain 一次算定尺寸（canvas 的 style 宽高），
+ * 外层 maxHeight = placement.height 是唯一约束；内层不再设 maxHeight，
+ * 避免双层限制把内容截两次。
+ */
+check('位图浮窗高度由 placement 唯一约束（内层不重复限制）',
   /const computeTipPlacement = \(anchor, desiredH, isBitmap = false\) =>/.test(src) &&
-    /shotNow\.style\.maxHeight/.test(src) &&
-    /placement\.height/.test(src),
-  '固定上限在链接偏下时放不下，必然压住链接所在行')
+    /tip\.style\.maxHeight = `\$\{Math\.round\(placement\.height\)\}px`/.test(src) &&
+    !/shotNow\.style\.maxHeight/.test(src),
+  '内外层各设一次会在同一高度上截两次')
 
 check('高度天花板为 80vh/780、下限 120px',
   /Math\.min\(viewportH \* 0\.8, 780\)/.test(src) && /const MIN_H_BITMAP = 120/.test(src),
@@ -1060,10 +1065,18 @@ check('滚轮只在真能滚时才拦截（不误吞）',
   })(),
   '无条件 preventDefault 会让纯文字浮窗上滚不动 PDF')
 
-check('canvas 显示尺寸受可用宽与可用高双向约束',
-  /let cssW = Math\.min\(availW, availH \* aspect\)/.test(src) &&
+check('canvas 显示尺寸用 contain（完整装下，不填满宽也不填满高）',
+  /const scaleFit = Math\.min\(availW \/ region\.w, availH \/ region\.h, MAX_SCALE\)/.test(src) &&
+    /let cssW = Math\.max\(40, region\.w \* scaleFit\)/.test(src) &&
     /out\.style\.width = `\$\{Math\.round\(cssW\)\}px`/.test(src),
-  '只按宽度算会让图撑出浮窗、再被父层裁掉')
+  '填满高度会算出 3136px 宽必须横向滚；填满宽度则纵向图溢出')
+
+check('contain 有 3x 上限（超过无肉眼增益且发虚）',
+  /const MAX_SCALE = 3/.test(src))
+
+check('距离区域含已有更高分辨率时按显示宽度重渲',
+  /if \(needPxW > curPxW \* 1\.15\)/.test(src),
+  '按固定宽度渲染再放大到 3x，canvas 像素不够会发虚')
 
 check('FitR 用区域自身宽高比（不是整页比例）',
   /const aspect = region\.w \/ Math\.max\(1e-6, region\.h\)/.test(src),

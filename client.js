@@ -4424,6 +4424,275 @@ window.__ModuleLoader__.load({
               return false
             }
 
+            /**
+             * **只读诊断：捞锚点附近的文本层，判断能否据此推出 figure 边界。**
+             *
+             * 背景：当前论文的图/公式目标全是 `XYZ`——只有锚点 y、没有矩形边界，
+             * 所以只能整页裁切，figure 本体只占中间一段，被整页高度绑死。
+             * 若能从文本层找到「FIGURE N」这类图注行，就能把裁切区域收窄，
+             * 图自然被放大。
+             *
+             * 这一步**不改任何渲染行为**，只把实测数据记进日志，
+             * 供决定裁切规则（尤其是「图在标签上方还是下方」这个方向问题）。
+             *
+             * @returns {Promise<object|null>} 诊断载荷
+             */
+            const probeDestText = async (dest, pageNo) => {
+              try {
+                const pdfDocument = pdfRef.current?.doc
+                if (!pdfDocument) return null
+                const page = await pdfDocument.getPage(pageNo)
+                const vp = page.getViewport({ scale: 1 })
+                const kind = dest?.[1]?.name ?? null
+                /**
+                 * 锚点 y：XYZ 在 [3]，FitH/FitBH 在 [2]。
+                 * FitR 用矩形上边 [5] 作参照。
+                 */
+                let anchorY = null
+                if (kind === 'XYZ') anchorY = typeof dest[3] === 'number' ? dest[3] : null
+                else if (kind === 'FitH' || kind === 'FitBH') anchorY = typeof dest[2] === 'number' ? dest[2] : null
+                else if (kind === 'FitR') anchorY = typeof dest[5] === 'number' ? dest[5] : null
+                const content = await page.getTextContent()
+                const items = []
+                for (const it of content?.items ?? []) {
+                  if (!it?.str || !it.str.trim()) continue
+                  const x = it.transform?.[4]
+                  const y = it.transform?.[5]
+                  if (typeof x !== 'number' || typeof y !== 'number') continue
+                  items.push({ s: it.str.trim(), x, y, w: it.width ?? 0, h: it.height ?? 0 })
+                }
+                /**
+                 * 锚点 ±120pt 内的文本（PDF 点）。取 ±120 是因为
+                 * 图本体 + 图注在纵向上通常就跨这个量级。
+                 */
+                const WINDOW = 120
+                const near = anchorY === null
+                  ? []
+                  : items
+                    .filter((v) => Math.abs(v.y - anchorY) <= WINDOW)
+                    .sort((a, b) => b.y - a.y)
+                    .slice(0, 40)
+                /**
+                 * 图注/公式标签识别。命中它就能拿到「图在哪里」的定位锚。
+                 */
+                const LABEL_RE = /^(FIGURE|Figure|Fig\.?|TABLE|Table|Algorithm|ALGORITHM|Eq\.?|Equation)\s*\d/i
+                const labels = items
+                  .filter((v) => LABEL_RE.test(v.s))
+                  .map((v) => ({ str: v.s.slice(0, 40), y: Math.round(v.y * 10) / 10, x: Math.round(v.x) }))
+                  .slice(0, 10)
+                return {
+                  destKind: kind,
+                  anchorY: anchorY === null ? null : Math.round(anchorY * 10) / 10,
+                  pageWpt: Math.round(vp.width * 10) / 10,
+                  pageHpt: Math.round(vp.height * 10) / 10,
+                  totalItems: items.length,
+                  nearCount: near.length,
+                  /** 锚点附近文本：str 前 40 字 + y 坐标（PDF 点，原点左下） */
+                  near: near.map((v) => ({
+                    t: v.s.slice(0, 40),
+                    y: Math.round(v.y * 10) / 10,
+                    dy: Math.round((v.y - (anchorY ?? 0)) * 10) / 10,
+                    x: Math.round(v.x),
+                  })),
+                  /** 整页命中的标签（不限于窗口内），用于判断图注在哪 */
+                  labels,
+                  hasLabelInWindow: near.some((v) => LABEL_RE.test(v.s)),
+                }
+              } catch { return null }
+            }
+
+            /**
+             * **dest[0]（页 ref / 页号）→ 页号（1 基）。**
+             *
+             * 这段换算原先在跳转与预览两处各写了一遍，抽出来共用。
+             * dest[0] 可能是 page ref 对象，也可能直接是 0 基页号。
+             */
+            const destPageOf = async (dest) => {
+              try {
+                const pdfDocument = pdfRef.current?.doc
+                if (!pdfDocument) return null
+                const destRef = dest?.[0]
+                let pageIndex
+                if (Number.isInteger(destRef)) pageIndex = destRef
+                else {
+                  const cached = pdfDocument.cachedPageNumber?.(destRef)
+                  pageIndex = Number.isInteger(cached) && cached > 0
+                    ? cached - 1
+                    : await pdfDocument.getPageIndex(destRef)
+                }
+                if (!Number.isInteger(pageIndex) || pageIndex < 0) return null
+                const pageNo = pageIndex + 1
+                const total = pdfDocument.numPages || 0
+                if (total > 0 && pageNo > total) return null
+                return pageNo
+              } catch { return null }
+            }
+            /**
+             * **从文本层推出目标区域（图 / 公式）；推不出返回 null。**
+             *
+             * 背景：这类 LaTeX 论文的命名目标几乎全是 `XYZ` ——
+             * 只有锚点 (x, y)，没有 figure 边界。整页裁切于是把图本体
+             * 埋在一整页里，`contain` 后只有 0.93x，永远是「图太小」。
+             *
+             * 三条规则（全部由真实 PDF 实测确认）：
+             *
+             * ① **分栏用 `dest[2]`（XYZ 的 left）。** 实测 fig1 left=61（左栏）、
+             *    fig8 left=317（右栏）、eq1 left=118（左栏），页面中线 297.6 ——
+             *    全部判断正确。早先用 ±120pt 窗口不分栏，把 fig8 的右栏
+             *    目标探成了满屏左栏正文。
+             *
+             * ② **figure：图在 caption 上方**（PDF 坐标 y 更大）。
+             *    实测 fig1：`FIGURE 1` 在 y=653.4，其上直到页眉 y=801.5 全是空白，
+             *    那段空白就是图；fig8：`FIGURE 8` y=397.4，其上到 y=613.4 空白 216pt。
+             *    所以区域 = [caption 上沿, 该栏内再往上的第一个文本块下沿]。
+             *
+             * ③ **公式：靠编号 `(N)` 定位。** 实测 eq1 的 `(1)` 在 y=88.0、
+             *    与公式同基线，其上下最近的正文块分别是 y=127.8 与 y=35.4（页脚）。
+             *    区域 = [下一个文本块上边, 上一个文本块下边]。
+             *
+             * 推不出（无标签、栏内无文本）就返回 null，调用方退回整页。
+             *
+             * @returns {Promise<{x:number,y:number,w:number,h:number,kindName:string}|null>}
+             *   坐标是 PDF 点、左下原点，与 destRegionPts 的约定一致。
+             */
+            const inferDestRegion = async (dest, widthPt, heightPt) => {
+              const kind = dest?.[1]?.name
+              if (kind === 'FitR') return null  // 有矩形，交给 destRegionPts
+              if (kind !== 'XYZ' && kind !== 'FitH' && kind !== 'FitBH') return null
+              const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+              const anchorY = kind === 'XYZ' ? num(dest[3]) : num(dest[2])
+              if (anchorY === null) return null
+              const anchorX = num(dest[2])
+              try {
+                const pdfDocument = pdfRef.current?.doc
+                if (!pdfDocument) return null
+                /**
+                 * dest 里带的是 page ref，要换回页号。换算失败就放弃
+                 * （这里不做重活，调用方已经有 pageNo，但为独立性这里自算）。
+                 */
+                const pageNo = await destPageOf(dest)
+                if (!pageNo) return null
+                const page = await pdfDocument.getPage(pageNo)
+                const content = await page.getTextContent()
+                const items = []
+                for (const it of content?.items ?? []) {
+                  if (!it?.str || !it.str.trim()) continue
+                  const x = it.transform?.[4]
+                  const y = it.transform?.[5]
+                  if (typeof x !== 'number' || typeof y !== 'number') continue
+                  items.push({ s: it.str.trim(), x, y, w: it.width ?? 0 })
+                }
+                if (items.length === 0) return null
+                const mid = widthPt / 2
+                /**
+                 * 分栏：有 anchorX 就用它；没有就退回 caption/锚点所在侧，
+                 * 再不行就用整页（宁可范围大一点也不串栏）。
+                 */
+                const colItems = (() => {
+                  if (anchorX === null) return items
+                  const isLeft = anchorX < mid
+                  const side = items.filter((v) => (v.x < mid) === isLeft)
+                  return side.length >= 4 ? side : items
+                })()
+                colItems.sort((a, b) => b.y - a.y)   // y 从高到低（页面从上到下）
+
+                const LABEL_RE = /^(FIGURE|Figure|Fig\.?|TABLE|Table|Algorithm|ALGORITHM)\s*\d/i
+                const EQ_NO_RE = /^\(\d+\)$/
+
+                /**
+                 * 该栏的横向范围（裁切用）。取本栏 item 的左右极值，
+                 * 留 6pt 边距；不给整页宽 —— 双栏论文按整页裁会把另一栏也带进来。
+                 */
+                const colX0 = Math.max(0, Math.min(...colItems.map((v) => v.x)) - 6)
+                const colX1 = Math.min(widthPt, Math.max(...colItems.map((v) => v.x + v.w)) + 6)
+
+                /**
+                 * ---- 规则 ②：figure / table / algorithm ----
+                 * 找离锚点最近的那个标签（同栏），图在标签上方。
+                 */
+                let label = null
+                let bestDy = Infinity
+                for (const it of colItems) {
+                  if (!LABEL_RE.test(it.s)) continue
+                  const dy = Math.abs(it.y - anchorY)
+                  if (dy < bestDy) { bestDy = dy; label = it }
+                }
+                if (label) {
+                  /**
+                   * 图区上界（PDF y 更大的一侧）：从标签往上扫，
+                   * 遇到第一个「文本块」的下沿就停 —— 更上面是正文。
+                   * 实测 fig1 会停在页眉 y=801.5，fig8 停在 y=613.4。
+                   */
+                  let top = heightPt
+                  for (const it of colItems) {
+                    if (it.y <= label.y + 1) continue      // 只看标签上方的
+                    if (it.y < top) top = it.y
+                  }
+                  /**
+                   * 下界：标签下方的那几行 caption 文字（连续、间距小）。
+                   * 实测 caption 高 9~12pt 一行，向下逐行直到间距明显变大。
+                   */
+                  let bottom = label.y - 4
+                  const captionSorted = colItems
+                    .filter((it) => it.y < label.y && it.y > label.y - 90)
+                    .sort((a, b) => b.y - a.y)
+                  let prevY = label.y
+                  for (const it of captionSorted) {
+                    if (prevY - it.y > 22) break          // 间距突变 → 正文开始
+                    bottom = it.y - 4
+                    prevY = it.y
+                  }
+                  const h = top - bottom
+                  if (h > 40) {
+                    return { x: colX0, y: bottom, w: colX1 - colX0, h, kindName: 'figure' }
+                  }
+                }
+
+                /**
+                 * ---- 规则 ③：公式（靠编号 (N) 定位）----
+                 * 找离锚点最近的编号，区域取编号所在行上下最近的正文块。
+                 */
+                let eqNo = null
+                let eqDy = Infinity
+                for (const it of colItems) {
+                  if (!EQ_NO_RE.test(it.s)) continue
+                  const dy = Math.abs(it.y - anchorY)
+                  if (dy < eqDy) { eqDy = dy; eqNo = it }
+                }
+                if (eqNo && eqDy <= 60) {
+                  /**
+                   * 公式区：从编号行往上找第一个「间距正常」的正文行之前，
+                   * 往下同理。实测 eq1：上界 127.8（正文结束），下界 35.4（页脚）。
+                   */
+                  const around = colItems
+                    .filter((it) => Math.abs(it.y - eqNo.y) <= 120)
+                    .sort((a, b) => b.y - a.y)
+                  let top = heightPt
+                  let bottom = 0
+                  let prev = eqNo.y + 30
+                  for (const it of around) {
+                    if (it.y > eqNo.y) {
+                      if (prev - it.y > 26) { top = it.y; break }
+                      prev = it.y
+                      top = it.y
+                    }
+                  }
+                  prev = eqNo.y - 30
+                  for (const it of around) {
+                    if (it.y < eqNo.y) {
+                      if (it.y < prev - 26) { bottom = it.y; break }
+                      prev = it.y
+                      bottom = it.y
+                    }
+                  }
+                  const h = top - bottom
+                  if (h > 30 && top > bottom) {
+                    return { x: colX0, y: bottom, w: colX1 - colX0, h, kindName: 'equation' }
+                  }
+                }
+                return null
+              } catch { return null }
+            }
             const destRegionPts = (dest, widthPt, heightPt) => {
               const kind = dest?.[1]?.name
               const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -4522,10 +4791,79 @@ window.__ModuleLoader__.load({
               try {
                 const pdfDocument = pdfRef.current?.doc
                 if (!pdfDocument) return null
-                const bitmap = await renderPageBitmap(pdfDocument, pageNo, opts?.targetCssWidth)
+                /**
+                 * **先算渲染分辨率。**
+                 *
+                 * 顺序很重要：要先把「显示多大」算出来，才知道该按什么分辨率
+                 * 渲染。旧顺序是先按固定宽度渲染、再算显示尺寸 ——
+                 * 于是 contain 放大到 3x 时 canvas 像素根本不够，图会发虚。
+                 *
+                 * 这里先要一个基准位图拿到页面点尺寸，再用它推区域与显示尺寸，
+                 * 需要更高分辨率时再渲一次（分辨率变化会走缓存的新 key）。
+                 */
+                let bitmap = await renderPageBitmap(pdfDocument, pageNo, opts?.targetCssWidth)
                 if (!bitmap) return null
-                const { canvas, scale, widthPt, heightPt, cssWidth } = bitmap
-                const region = destRegionPts(dest, widthPt, heightPt)
+                const { widthPt, heightPt } = bitmap
+                /**
+                 * ---- 区域：优先文本层推导，其次 dest 矩形，最后整页 ----
+                 * 推导出的区域通常比整页小得多（fig1 实测高 148pt vs 整页 842），
+                 * 区域越小 contain 的倍率越高，图才真正变大。
+                 */
+                const inferred = await inferDestRegion(dest, widthPt, heightPt)
+                const baseRegion = inferred || destRegionPts(dest, widthPt, heightPt)
+                /**
+                 * **上下各外扩 15% 留上下文。**
+                 *
+                 * 用户要求「落在悬浮窗上需要有滑动悬浮窗页面的功能」，
+                 * 纯抠图会贴死边框、滚动条变成死的。
+                 *
+                 * 为什么是 15% 而不是 40%：实测外扩比例直接影响 contain 倍率 ——
+                 *   fig1（宽区域）：15% 与 40% 都是 2.49x（宽度先撞上限），无差别
+                 *   fig8（窄区域）：15% -> 3.00x(+31%)，40% -> 2.26x(-1%)，变差
+                 * 因为窄区域外扩后宽高比更窄、高度先撞上限。
+                 * 15% 是「既有上下文、又不牺牲放大」的平衡点。
+                 */
+                const padY = baseRegion.h * 0.15
+                const region = {
+                  x: baseRegion.x,
+                  w: baseRegion.w,
+                  y: Math.max(0, baseRegion.y - padY),
+                  h: Math.min(heightPt, baseRegion.y + baseRegion.h + padY) - Math.max(0, baseRegion.y - padY),
+                }
+                /**
+                 * **contain 定尺寸（不是填满宽、也不是填满高）。**
+                 *
+                 * 填满高度：fig1 区域宽高比 4.02，会算出 3136px 宽，
+                 * 必须横向滚动画 —— 读图灾难。
+                 * 填满宽度：纵向图（fig8 窄高）会溢出。
+                 * contain 让整个区域完整可见、长边贴边、短边留白。
+                 *
+                 * 上限 3x：再高肉眼无增益，反而轮廓发虚。
+                 */
+                const aspect = region.w / Math.max(1e-6, region.h)
+                const availW = typeof opts?.targetCssWidth === 'number' && opts.targetCssWidth > 0
+                  ? opts.targetCssWidth
+                  : (typeof opts?.availW === 'number' && opts.availW > 0 ? opts.availW : bitmap.cssWidth)
+                const availH = typeof opts?.availH === 'number' && opts.availH > 0 ? opts.availH : Infinity
+                const MAX_SCALE = 3
+                const scaleFit = Math.min(availW / region.w, availH / region.h, MAX_SCALE)
+                let cssW = Math.max(40, region.w * scaleFit)
+                let cssH = Math.max(24, region.h * scaleFit)
+                /**
+                 * 放大后若需要更高分辨率（cssW×dpr 超过当前 canvas 的裁切宽），
+                 * 按新宽度重渲一次。缓存 key 已带宽度，不会命中旧图。
+                 */
+                try {
+                  const dprNow = Math.min(2, Math.max(1, window.devicePixelRatio || 1))
+                  const needPxW = Math.ceil(cssW * dprNow)
+                  const curPxW = Math.ceil(region.w * bitmap.scale)
+                  if (needPxW > curPxW * 1.15) {
+                    const better = await renderPageBitmap(pdfDocument, pageNo, Math.ceil(cssW))
+                    if (better) bitmap = better
+                  }
+                } catch { /* 用现有分辨率也够 */ }
+                const scale = bitmap.scale
+                const canvas = bitmap.canvas
                 // PDF 点 → 位图像素（横向不需要翻转，纵向见下）
                 const sx = Math.max(0, Math.floor(region.x * scale))
                 const sw = Math.max(1, Math.min(canvas.width - sx, Math.ceil(region.w * scale)))
@@ -4549,35 +4887,19 @@ window.__ModuleLoader__.load({
                 ctx.fillRect(0, 0, out.width, out.height)
                 ctx.drawImage(canvas, sx, syFromTop, sw, copyH, 0, 0, sw, copyH)
                 /**
-                 * **显示尺寸：显式按「目标宽 + 双向约束」写，不用 out.width/scale。**
+                 * **显示尺寸用前面 contain 算出的 cssW/cssH。**
                  *
-                 * 旧写法 `out.width / scale` 数学上恒等于 `region.w`（PDF 点），
-                 * 与 dpr、与浮窗宽度都无关 —— 实测 A4 整页无论 dpr=1 还是 2，
-                 * CSS 尺寸永远是 595×843。于是浮窗宽 630 时横向空 35px，
-                 * 而高度 843 又超过 780 的预算。
-                 *
-                 * 现在按用户给出的规则做双向约束：
-                 *   aspect = region.w / region.h（**用区域自身的宽高比**，
-                 *   不是整页比例 —— FitR 矩形可能只有半页）
-                 *   显示宽 = min(可用宽, 可用高 × aspect)
-                 * 这样宽高都不会超出各自的预算，且保持区域原有比例。
-                 * 位图槽仍 overflow:auto，超出部分可滚动查看。
+                 * 注意不能用 `out.width / scale`：那个式子数学上恒等于
+                 * `region.w`（PDF 点），与 dpr、与浮窗宽度都无关 ——
+                 * 实测 A4 整页无论 dpr=1 还是 2，CSS 永远是 595×843，
+                 * 于是「图总是很小」。
                  */
-                const aspect = region.w / Math.max(1e-6, region.h)
-                const availW = typeof opts?.targetCssWidth === 'number' && opts.targetCssWidth > 0
-                  ? opts.targetCssWidth
-                  : cssWidth
-                const availH = typeof opts?.availH === 'number' && opts.availH > 0
-                  ? opts.availH
-                  : Infinity
-                let cssW = Math.min(availW, availH * aspect)
-                cssW = Math.max(40, cssW)
-                const cssH = cssW / aspect
                 out.style.width = `${Math.round(cssW)}px`
                 out.style.height = `${Math.round(cssH)}px`
                 /**
                  * 把本次实际尺寸挂到元素上，供诊断读取
                  * （判断「被截断」还是「图本身没放大」全靠它）。
+                 * 另外记 regionKind（figure/equation/page）便于回看规则命中情况。
                  */
                 try {
                   out.dataset.cssW = String(Math.round(cssW))
@@ -4585,6 +4907,8 @@ window.__ModuleLoader__.load({
                   out.dataset.regionW = String(Math.round(region.w))
                   out.dataset.regionH = String(Math.round(region.h))
                   out.dataset.targetCssW = String(Math.round(availW))
+                  out.dataset.regionKind = inferred ? inferred.kindName : (dest?.[1]?.name === 'FitR' ? 'fitr' : 'page')
+                  out.dataset.scale = String(Math.round(scaleFit * 100) / 100)
                 } catch { /* ignore */ }
                 return out
               } catch { return null }
@@ -5724,10 +6048,17 @@ const placeBox = (el, l, t, wd, ht) => {
                 ? Math.min(window.innerHeight * 0.8, 780)
                 : (tip.offsetHeight || 120)
               const placement = computeTipPlacement(anchor, desiredH, Boolean(opts?.bitmap))
-              if (opts?.bitmap) {
-                const shotNow = tip.querySelector('.zr-tip-shot')
-                if (shotNow) shotNow.style.maxHeight = `${Math.round(placement.height)}px`
-              }
+              /**
+               * 位图槽**不再单独设 maxHeight**。
+               *
+               * 尺寸已由 contain 一次算定（canvas 的 style 宽高），外层
+               * `tip.style.maxHeight = placement.height` 是唯一的约束。
+               * 再加一层内层 maxHeight 会出现「双层限制」：内层被截一次、
+               * 外层再截一次，既可能切掉内容，也会让滚动条行为难以预测。
+               *
+               * `.zr-tip-shot` 仍保留 overflow:auto —— contain 之后通常
+               * 不需要滚动，但区域比可视区大时（外扩后仍溢出）要能滚。
+               */
               /**
                * **横向定宽定位（首次弹出路径）。**
                *
@@ -6052,39 +6383,23 @@ const placeBox = (el, l, t, wd, ht) => {
                        */
                       showLinkTip([], anchor, 0, false, { bitmap: true })
                       /**
-                       * **算是位图区实际能用的宽高，交给渲染器。**
+                       * **位图浮窗的固定上限尺寸（基于视口，不再绑页面宽度）。**
                        *
-                       * 这是「图片太小」的修法核心：位图必须按浮窗的**实际宽度**
-                       * 渲染，而且显示尺寸要同时受「可用宽」和「可用高」约束
-                       * （高度受限时让宽度妥协，保持宽高比）。
+                       * 用户原话「图片、公式弹出窗口固定吧，现在太小了」——
+                       * 「固定」在这里是**尺寸稳定**：同一个 figure 反复悬停
+                       * 必须得到完全相同的尺寸，不能因为悬停位置/缩放历史而跳。
                        *
-                       * 可用宽与 `placeHorizontal` 的位图分支保持**同一公式**，
-                       * 否则渲染按一个宽度、定位按另一个宽度，两边对不上。
-                       * 可用高用 computeTipPlacement 会给的高度（mayCover 分支
-                       * 对位图按整屏给，即 min(cap, viewportH - 16)）。
+                       * 原来宽度取 0.9 × 页面宽（≈630px），这是「图总是小」的
+                       * 另一半原因：contain 的收益上限完全由可用宽决定，
+                       * 宽度被页宽绑死，区域再小也放不大。
+                       * 改成基于视口：宽 min(innerWidth*0.9, 1240)、高 min(innerHeight*0.88, 880)。
                        */
-                      let pageRectNow = null
-                      try {
-                        const lp = anchor?.closest?.('.page')
-                        pageRectNow = lp?.getBoundingClientRect?.() ?? null
-                        if (!pageRectNow || !(pageRectNow.width > 0)) {
-                          pageRectNow = host?.querySelector?.('.page')?.getBoundingClientRect?.() ?? null
-                        }
-                      } catch { /* 用视口兜底 */ }
-                      const bitmapCssW = Math.max(
-                        160,
-                        Math.min(
-                          (pageRectNow && pageRectNow.width > 0 ? pageRectNow.width : Math.min(560, window.innerWidth - 16)) * 0.9,
-                          window.innerWidth - 16,
-                        ),
-                      )
-                      const bitmapCssH = Math.max(120, Math.min(
-                        Math.min(window.innerHeight * 0.8, 780),
-                        window.innerHeight - 16,
-                      ))
+                      const POPUP_MAX_W = Math.min(window.innerWidth * 0.9, 1240)
+                      const POPUP_MAX_H = Math.min(window.innerHeight * 0.88, 880)
                       const canvas = await renderDestBitmap(dest, pageNo, {
-                        targetCssWidth: bitmapCssW,
-                        availH: bitmapCssH,
+                        targetCssWidth: POPUP_MAX_W,
+                        availW: POPUP_MAX_W,
+                        availH: POPUP_MAX_H,
                       })
                       const preview = canvas ? null : await extractDestPreview(dest, pageNo)
                       // 鼠标已经移走 / 换到别的链接 / 卡片被清理：不要回写
@@ -6112,6 +6427,15 @@ const placeBox = (el, l, t, wd, ht) => {
                          */
                         try {
                           const shotEl = tip.querySelector('.zr-tip-shot')
+                          /**
+                           * 浮窗矩形只读一次（强制布局有成本，诊断不该再添一次）。
+                           */
+                          const tipRect = tip.getBoundingClientRect()
+                          /**
+                           * 顺带捞锚点附近的文本层，用来判断能否按区域裁切。
+                           * 只读，不影响渲染。
+                           */
+                          const probe = await probeDestText(dest, pageNo)
                           reportDiag({
                             event: 'tip:bitmap',
                             href: (anchor.getAttribute('href') || '').slice(0, 60),
@@ -6119,13 +6443,20 @@ const placeBox = (el, l, t, wd, ht) => {
                             canvasCssH: Number(canvas.dataset?.cssH ?? 0) || Math.round(canvas.getBoundingClientRect().height),
                             shotClientH: shotEl ? Math.round(shotEl.clientHeight) : null,
                             shotScrollH: shotEl ? Math.round(shotEl.scrollHeight) : null,
-                            targetCssWidth: Math.round(bitmapCssW),
-                            availH: Math.round(bitmapCssH),
+                            targetCssWidth: Math.round(POPUP_MAX_W),
+                            availH: Math.round(POPUP_MAX_H),
+                            /** 浮窗与 canvas 最终尺寸：核对 contain 是否达到预期 */
+                            popupW: Math.round(tipRect.width),
+                            popupH: Math.round(tipRect.height),
+                            scale: Number(canvas.dataset?.scale ?? 0),
+                            regionKind: canvas.dataset?.regionKind ?? null,
+                            viewportW: Math.round(window.innerWidth),
                             regionW: Number(canvas.dataset?.regionW ?? 0) || null,
                             regionH: Number(canvas.dataset?.regionH ?? 0) || null,
-                            viewportW: Math.round(window.innerWidth),
                             viewportH: Math.round(window.innerHeight),
                             dpr: Math.round((window.devicePixelRatio || 1) * 100) / 100,
+                            /** 文本层探测结果（destKind / anchorY / near / labels 等） */
+                            probe,
                           })
                         } catch { /* 诊断失败不影响显示 */ }
                       } else if (preview) {
