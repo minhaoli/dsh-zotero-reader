@@ -1410,9 +1410,9 @@ window.__ModuleLoader__.load({
         /*
          * **接收鼠标事件。**
          *
-         * 用户澄清了真实意图：「光标不落在悬浮窗以及超链接上连续超过 0.5s
+         * 用户澄清了真实意图：「光标不落在悬浮窗以及超链接上连续超过 0.3s
          * 关闭悬浮窗。如果落在悬浮窗上需要有滑动悬浮窗页面的功能」。
-         * 所以浮窗必须能收 mouseenter/mouseleave（参与 0.5s 判定），
+         * 所以浮窗必须能收 mouseenter/mouseleave（参与 0.3s 判定），
          * 也必须能接收到滚轮去滚动它自己的内容。
          *
          * 注意「不能移动悬浮窗的页面」指的是**滚轮不能穿透到背后的 PDF**，
@@ -1424,14 +1424,17 @@ window.__ModuleLoader__.load({
       /*
        * 位图预览区：按 dest 坐标裁出的那一块页面。
        *
-       * overflow:auto 让用户能在浮窗里滑动看目标附近更多内容
-       * （用户明确要求「需要有滑动悬浮窗页面的功能」）。
-       * 滚轮由 client.js 里的原生 wheel 监听接管，不让它传给 PDF。
+       * **限高是「能滚动」的前提。** 用户报「现在滑动没有任何效果」，
+       * 根因就是这里的 max-height（58vh/460px）比内容（原裁切仅 42% 页高，
+       * ≈354px）还大 —— 内容不溢出，scrollHeight - clientHeight 恒为 0，
+       * 滚轮自然滚不动。
+       * 现在裁切改成整页（见 destRegionPts），这里同时把高度收到
+       * min(46vh,420px)，内容必然溢出 → 滚轮与滚动条都可用。
        */
       .zr-link-tip .zr-tip-shot{display:block;overflow:auto;
-        max-height:min(58vh,460px);background:#fff;border-radius:3px;
+        max-height:min(46vh,420px);background:#fff;border-radius:3px;
         overscroll-behavior:contain}
-      .zr-link-tip .zr-tip-shot canvas{display:block;max-width:none}
+      .zr-link-tip .zr-tip-shot canvas{display:block;max-width:100%;height:auto}
       /* 位图加载中的占位，避免浮窗先塌成一条线再突然撑开 */
       .zr-link-tip .zr-tip-shot[data-loading="1"]{min-height:96px;
         background:var(--dsh-bg-elevated,#2b2b2b)}
@@ -4404,11 +4407,23 @@ window.__ModuleLoader__.load({
                 return { x: 0, y: 0, w: widthPt, h: heightPt }
               }
               /**
-               * 高度取页高的 42%（约半屏），并保证下限。
-               * 用户的诉求是「图片、公式都要是这样的」——
-               * 一条十几像素的横条对 figure 毫无意义。
+               * **裁切高度：整页。**
+               *
+               * 用户报「现在滑动没有任何效果」——根因就在这里：
+               * 原先把裁切区域定为页高的 42%（实测 354px），而容器
+               * `.zr-tip-shot` 的 max-height 是 min(58vh,460px)（≥406px），
+               * 内容根本没溢出，`scrollHeight - clientHeight` 恒为 0，
+               * 滚轮自然滚不动（onTipWheel 里 `if (maxTop > 0)` 永假）。
+               *
+               * 改成整页后，浮窗内可以滑动着看目标前后的完整上下文，
+               * 这也正是用户要的「滑动」语义。可见区域由 CSS 高度限制
+               * （见 .zr-tip-shot 的 max-height），内容必然溢出 → 可滚。
+               *
+               * 从整页里把锚点滚动到视口偏上位置：目标通常在可见区的
+               * 上部，下方留出后续内容。
                */
-              const h = Math.max(120, Math.min(heightPt, heightPt * 0.42))
+              const h = heightPt
+              void anchorY
               /**
                * **区块以锚点为中心、上下对称取。**
                *
@@ -4427,8 +4442,13 @@ window.__ModuleLoader__.load({
                * 代价是块内可能多带一些上下文——这恰恰是任务要求的
                * 「宁可多给上下文也不要只显示一条」。
                */
-              let y = anchorY - h / 2
-              y = Math.max(0, Math.min(heightPt - h, y))
+              /**
+               * 整页裁切时 y 恒为 0（块就是整页）。
+               * 锚点位置改由 `putTipBitmap` 里的 scrollTop 定位 ——
+               * 这样浮窗一出现就滚到目标附近，而不是从页首开始。
+               */
+              let y = 0
+              void anchorY
               /**
                * 横向：默认整页宽。figure 常居中或跨栏，
                * 按 dest.x 去裁会把图裁掉半边，得不偿失。
@@ -4482,6 +4502,8 @@ window.__ModuleLoader__.load({
             const jumpFlashMs = 1000
             /** 当前闪烁元素与定时器，必须能被 cleanup 清掉。 */
             let jumpFlashEl = null
+            /** 多行高亮时除第一块之外的其余块，同样要能被清理。 */
+            let jumpFlashExtraEls = []
             let jumpFlashTimer = 0
             /**
              * **闪烁的代数（generation）。**
@@ -4506,6 +4528,14 @@ window.__ModuleLoader__.load({
             const clearJumpFlash = () => {
               if (jumpFlashTimer) { clearTimeout(jumpFlashTimer); jumpFlashTimer = 0 }
               try { jumpFlashEl?.remove() } catch { /* 已经不在 DOM 里 */ }
+              /**
+               * 多行高亮会有多个块，必须全部移除，否则第二行以后
+               * 的方块会永久留在页面上（它们不在 jumpFlashEl 里）。
+               */
+              try {
+                for (const el of jumpFlashExtraEls) el?.remove?.()
+              } catch { /* ignore */ }
+              jumpFlashExtraEls = []
               jumpFlashEl = null
             }
 
@@ -4579,10 +4609,6 @@ window.__ModuleLoader__.load({
                 let top = pageH * Math.min(0.98, Math.max(0, offset || 0))
                 let width = Math.max(40, pageRect.width - inset * 2)
                 let height = lineH
-                let x = 0
-                let y = 0
-                let w = 0
-                let h = 0
 
                 /**
                  * 更精确的做法：在文本层里找到与预览文字匹配的 span，
@@ -4591,56 +4617,213 @@ window.__ModuleLoader__.load({
                  * 抽成函数是因为它可能要跑两次：目标页首次打开时
                  * `.textLayer` 里的 span 还没生成，得等 textlayerrendered 再补。
                  */
-                const alignToTextLayer = () => {
-                  if (!previewText) return false
-                  try {
-                    const spans = pageEl.querySelectorAll('.textLayer span')
-                    const needle = String(previewText).trim().slice(0, 24)
-                    if (!needle) return false
-                    let hit = null
-                    for (const sp of spans) {
-                      const t = (sp.textContent || '').trim()
-                      if (!t) continue
-                      if (t.length >= 8 && needle.includes(t)) { hit = sp; break }
-                      if (t.length >= 4 && needle.startsWith(t.slice(0, Math.min(t.length, 24)))) { hit = sp; break }
-                    }
-                    if (!hit) return false
-                    const r = hit.getBoundingClientRect()
-                    if (!(r.width > 0 && r.height > 0)) return false
-                    x = Math.max(0, r.left - pageRect.left - 2)
-                    y = Math.max(0, r.top - pageRect.top - 1)
-                    w = Math.min(pageRect.width - x, Math.max(8, r.width + 4))
-                    h = Math.max(8, r.height + 2)
-                    return true
-                  } catch { return false }
-                }
+                                const TEXT_LAYER_MATCH_LIMIT = 60
 
-                const paint = () => {
-                  box.style.left = `${Math.round(left)}px`
-                  box.style.top = `${Math.round(top)}px`
-                  box.style.width = `${Math.round(width)}px`
-                  box.style.height = `${Math.round(height)}px`
-                }
+                                /**
+                                 * **在文本层里定位预览文字，返回若干「行矩形」。**
+                                 *
+                                 * 旧实现把匹配方向写反了：`needle.includes(t)` 判的是
+                                 * 「预览文字里包含这个 span」，于是碰到 `overlap?`、`and`
+                                 * 这种短 span 就立刻命中并 break，真正装着整条文献的那个
+                                 * span 根本没机会被检查 —— 用户看到的就是「高亮只圈住
+                                 * 一个词」。
+                                 *
+                                 * 现在按正确的方向做，分三步：
+                                 *
+                                 * ① **拼接 + 记偏移**：把所有 span 按 DOM 顺序拼成一条
+                                 *    字符串，同时记下每个 span 在串里的起止位置。
+                                 *    PDF 文本层里一行常被拆成多个 span
+                                 *    （"..due to" / "association strength or feature " /
+                                 *     "overlap" / "? A microanalytic review..."），
+                                 *    只有这样跨 span 的匹配才成立。
+                                 *
+                                 * ② **在拼接串里 indexOf(needle)**，拿到绝对区间。
+                                 *
+                                 * ③ **反查出该区间覆盖的 span**，再**按行分组**，
+                                 *    每行合成一个条状矩形。跨行时画多条，贴合真实形状；
+                                 *    用一个大包围盒会把中间的空白也圈进去。
+                                 *
+                                 * 返回 null 表示匹配不到（调用方退回按 offset 估算的横条）。
+                                 */
+                                const locatePreviewLines = () => {
+                                  if (!previewText) return null
+                                  try {
+                                    const spans = pageEl.querySelectorAll('.textLayer span')
+                                    if (spans.length === 0) return null
+                                    /**
+                                     * 预览文字可能被截断并带省略号：取 `…` 之前的部分，
+                                     * 否则 needle 里带着 …，永远匹配不上。
+                                     */
+                                    let needle = String(previewText).trim()
+                                    const ell = needle.indexOf('…')
+                                    if (ell >= 0) needle = needle.slice(0, ell).trim()
+                                    needle = needle.replace(/\s+/g, ' ').slice(0, TEXT_LAYER_MATCH_LIMIT)
+                                    if (needle.length < 4) return null
 
-                /**
-                 * 定位优先用文本层矩形；拿不到才用估算横条。
-                 * 结果记进 alignedNow 供诊断用 —— 不能为了诊断再调一次
-                 * alignToTextLayer（它读写共享的 x/y/w/h，重入会互相污染）。
-                 */
-                const alignedNow = alignToTextLayer()
-                if (alignedNow) {
-                  left = x
-                  top = y
-                  width = w
-                  height = h
+                                    // ① 拼接并按 DOM 顺序记偏移
+                                    const parts = []
+                                    let joined = ''
+                                    for (const sp of spans) {
+                                      const t = (sp.textContent || '')
+                                      if (!t) continue
+                                      const start = joined.length
+                                      joined += t
+                                      parts.push({ el: sp, start, end: joined.length })
+                                    }
+                                    if (!joined) return null
+                                    /**
+                                     * ② **只保留字母数字再比，并记住每个字符的原文位置。**
+                                     *
+                                     * 为什么不能直接 `joined.indexOf(needle)`：文本层与
+                                     * 预览文字的**空格并不一致**。实测本库那篇 page15：
+                                     *   · 文本层原文是 `association strengthor feature`
+                                     *     （`strengthor` 连在一起，没有空格）
+                                     *   · 而 extractDestPreview 聚行时用单空格拼接，
+                                     *     给出的预览是 `strength or feature`
+                                     * 逐字比较必然失败。标点、连字符、连字同理。
+                                     *
+                                     * 剥成纯字母数字后，`strengthor` 与 `strength or`
+                                     * 都归一化成 `strengthor`，就能稳定命中；
+                                     * map 数组把归一化偏移映射回原文偏移，
+                                     * 从而反查出到底覆盖了哪些 span。
+                                     */
+                                    const stripMap = (str) => {
+                                      let out = ''
+                                      const map = []
+                                      for (let k = 0; k < str.length; k += 1) {
+                                        const ch = str[k]
+                                        if (/[A-Za-z0-9]/.test(ch)) {
+                                          out += ch
+                                          map.push(k)
+                                        }
+                                      }
+                                      return { out, map }
+                                    }
+                                    const joinedStrip = stripMap(joined)
+                                    const needleStrip = stripMap(needle)
+                                    if (needleStrip.out.length < 4) return null
+                                    /**
+                                     * 用剥后串的前 50 个字符做定位探针：
+                                     * 太长会因个别差异整体失败，太短容易误匹配到别处。
+                                     */
+                                    const probe = needleStrip.out.slice(0, Math.min(50, needleStrip.out.length))
+                                    const idxS = joinedStrip.out.indexOf(probe)
+                                    if (idxS < 0) return null
+                                    const s0 = joinedStrip.map[idxS]
+                                    const s1 = joinedStrip.map[Math.min(
+                                      joinedStrip.map.length - 1,
+                                      idxS + needleStrip.out.length - 1,
+                                    )]
+                                    if (!(typeof s0 === 'number' && typeof s1 === 'number' && s1 > s0)) return null
+                                    const hitStart = s0
+                                    const hitEnd = s1 + 1
+// ③ 反查覆盖到的 span
+                                    const covered = parts.filter((v) => v.end > hitStart && v.start < hitEnd)
+                                    if (covered.length === 0) return null
+
+                                    // ④ 按行分组（纵向中线接近即同一行）
+                                    const withRect = []
+                                    for (const v of covered) {
+                                      const rr = v.el.getBoundingClientRect()
+                                      if (rr.width > 0 && rr.height > 0) withRect.push({ r: rr, v })
+                                    }
+                                    if (withRect.length === 0) return null
+                                    withRect.sort((a, b) => a.r.top - b.r.top)
+                                    const rows = []
+                                    for (const item of withRect) {
+                                      const mid = item.r.top + item.r.height / 2
+                                      let row = null
+                                      for (const candidate of rows) {
+                                        if (Math.abs(candidate.mid - mid) <= Math.max(2, item.r.height * 0.5)) {
+                                          row = candidate
+                                          break
+                                        }
+                                      }
+                                      if (!row) {
+                                        row = { mid, rects: [] }
+                                        rows.push(row)
+                                      }
+                                      row.rects.push(item.r)
+                                    }
+                                    // 每行取并集矩形
+                                    const lines = []
+                                    for (const row of rows) {
+                                      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+                                      for (const rr of row.rects) {
+                                        x0 = Math.min(x0, rr.left)
+                                        x1 = Math.max(x1, rr.right)
+                                        y0 = Math.min(y0, rr.top)
+                                        y1 = Math.max(y1, rr.bottom)
+                                      }
+                                      if (!(x1 > x0 && y1 > y0)) continue
+                                      lines.push({ x0, x1, y0, y1 })
+                                    }
+                                    if (lines.length === 0) return null
+                                    /**
+                                     * 排序后只保留**开头两行**。
+                                     *
+                                     * 用户要的是「看到跳到哪」的指示。一条参考文献可能跨
+                                     * 五六行，全画会盖住半页；取前两行既够定位又不喧宾夺主。
+                                     */
+                                    lines.sort((a, b) => a.y0 - b.y0)
+                                    const kept = lines.slice(0, 2)
+                                    return {
+                                      lines: kept,
+                                      matchedText: joined.slice(hitStart, Math.min(hitEnd, hitStart + 60)),
+                                      spanCount: covered.length,
+                                    }
+                                  } catch { return null }
+                                }
+
+const placeBox = (el, l, t, wd, ht) => {
+                  el.style.left = `${Math.round(l)}px`
+                  el.style.top = `${Math.round(t)}px`
+                  el.style.width = `${Math.round(wd)}px`
+                  el.style.height = `${Math.round(ht)}px`
                 }
-                paint()
                 /**
-                 * 挂在页面元素上（position:absolute 相对它），
-                 * 这样页面滚动/缩放时闪烁块跟着走，不会浮在半空。
+                 * **多块绘制。**
+                 *
+                 * 一条参考文献可能跨好几行，画一个大包围盒会把中间的
+                 * 空白也圈进去。locatePreviewLines 返回的是**逐行**矩形，
+                 * 每行一块，贴合真实形状。
+                 *
+                 * 匹配不到时退回单块估算横条（按 offset 定位），
+                 * 保证「至少有指示」。
                  */
+                const boxes = [box]
+                const located = locatePreviewLines()
+                const alignedNow = Boolean(located)
+                if (located) {
+                  const first = located.lines[0]
+                  left = Math.max(0, first.x0 - pageRect.left - 2)
+                  top = Math.max(0, first.y0 - pageRect.top - 1)
+                  width = Math.min(pageRect.width, Math.max(8, first.x1 - first.x0 + 4))
+                  height = Math.max(8, first.y1 - first.y0 + 2)
+                  placeBox(box, left, top, width, height)
+                  for (let i = 1; i < located.lines.length; i += 1) {
+                    const ln = located.lines[i]
+                    const extra = document.createElement('div')
+                    extra.className = 'zr-jump-flash'
+                    placeBox(
+                      extra,
+                      Math.max(0, ln.x0 - pageRect.left - 2),
+                      Math.max(0, ln.y0 - pageRect.top - 1),
+                      Math.min(pageRect.width, Math.max(8, ln.x1 - ln.x0 + 4)),
+                      Math.max(8, ln.y1 - ln.y0 + 2),
+                    )
+                    boxes.push(extra)
+                  }
+                } else {
+                  placeBox(box, left, top, width, height)
+                }
                 pageEl.appendChild(box)
+                for (let i = 1; i < boxes.length; i += 1) pageEl.appendChild(boxes[i])
                 jumpFlashEl = box
+                /**
+                 * 多出来的块要能被清理：clearJumpFlash 会一并移除。
+                 */
+                jumpFlashExtraEls = boxes.slice(1)
                 /**
                  * **几何留痕。**
                  *
@@ -4655,6 +4838,8 @@ window.__ModuleLoader__.load({
                   offset,
                   seq,
                   aligned: alignedNow === true,
+                  /** 画了几块（跨行时 > 1） */
+                  blocks: boxes.length,
                   left: Math.round(left),
                   top: Math.round(top),
                   w: Math.round(width),
@@ -4663,6 +4848,33 @@ window.__ModuleLoader__.load({
                   pageH: Math.round(pageH),
                   hasPreview: Boolean(previewText),
                 })
+                /**
+                 * **匹配细节单列一条。**
+                 *
+                 * 万一位置还不对，这条能直接区分：
+                 *   · matchedText 为空 → 根本没匹配上（几何是估算的）
+                 *   · matchedText 不是预期的句子 → 匹配错了行
+                 *   · matchedText 对但几何偏 → 矩形换算有问题
+                 */
+                if (located) {
+                  reportDiag({
+                    event: 'jump:flash-match',
+                    pageNo,
+                    needle: String(previewText).slice(0, 60),
+                    spansHit: located.spanCount,
+                    lines: located.lines.length,
+                    text: located.matchedText.slice(0, 60),
+                  })
+                } else {
+                  reportDiag({
+                    event: 'jump:flash-match',
+                    pageNo,
+                    needle: String(previewText || '').slice(0, 60),
+                    spansHit: 0,
+                    lines: 0,
+                    text: null,
+                  })
+                }
 
                 /**
                  * **文本层可能还没画出来。**
@@ -4675,19 +4887,19 @@ window.__ModuleLoader__.load({
                  * 避免长期挂着或改到已经被替换掉的节点。
                  */
                 const bus = eventBusRef.current
-                if (!alignToTextLayer() && previewText && bus) {
+                if (!alignedNow && previewText && bus) {
                   try {
                     const onTextLayer = (evt) => {
                       if (evt?.pageNumber !== pageNo) return
                       try { bus.off('textlayerrendered', onTextLayer) } catch { /* ignore */ }
                       // 已经被清掉或换成了别的闪块：不要再改
                       if (jumpFlashEl !== box) return
-                      if (!alignToTextLayer()) return
-                      left = x
-                      top = y
-                      width = w
-                      height = h
-                      paint()
+                      /**
+                       * 重新定位：这里要重建块（可能从 1 块变 2 块），
+                       * 所以直接重跑一次 flashJumpTarget，带上同一代。
+                       * 它会先 clearJumpFlash 再画，语义干净。
+                       */
+                      flashJumpTarget(pageNo, offset, previewText, seq)
                     }
                     bus.on('textlayerrendered', onTextLayer)
                     // 兜底：页面始终没抛该事件时也别让监听常驻
@@ -4697,7 +4909,11 @@ window.__ModuleLoader__.load({
 
                 // 先让它可见一拍，再加淡出属性，保证 transition 真的跑起来
                 jumpFlashTimer = setTimeout(() => {
-                  try { box.setAttribute('data-fade', '1') } catch { /* ignore */ }
+                  // 多块要一起淡出，否则除了第一行其余会「啪」地消失
+                  try {
+                    box.setAttribute('data-fade', '1')
+                    for (const el of jumpFlashExtraEls) el?.setAttribute?.('data-fade', '1')
+                  } catch { /* ignore */ }
                   // 淡出结束再移除；多留 500ms 兜住 transition 的尾巴
                   jumpFlashTimer = setTimeout(() => { clearJumpFlash() }, 500)
                 }, jumpFlashMs)
@@ -4860,10 +5076,10 @@ window.__ModuleLoader__.load({
               linkTip.className = 'zr-link-tip'
               linkTip.setAttribute('data-on', '0')
               /**
-               * **浮窗参与 0.5s 消失判定。**
+               * **浮窗参与 0.3s 消失判定。**
                *
                * 用户澄清的语义：「光标不落在悬浮窗以及超链接上连续超过
-               * 0.5s 关闭」。所以移进浮窗要取消消失，移出去要重排消失。
+               * 0.3s 关闭」。所以移进浮窗要取消消失，移出去要重排消失。
                */
               linkTip.addEventListener('mouseenter', () => { cancelHideTip() })
               linkTip.addEventListener('mouseleave', () => { scheduleHideTip() })
@@ -4893,13 +5109,13 @@ window.__ModuleLoader__.load({
             /** 自动隐藏句柄（只有告警用）。 */
             let linkWarnTimer = 0
             /**
-             * **延迟消失句柄（0.5s）。**
+             * **延迟消失句柄（0.3s）。**
              *
-             * 鼠标离开后不立刻隐藏，而是等 0.5s：这段时间里从链接划到
+             * 鼠标离开后不立刻隐藏，而是等 0.3s：这段时间里从链接划到
              * 浮窗里滚动看内容、或回头再看一眼，浮窗都不会闪。
              *
              * **链接与浮窗都算「在里面」**（用户澄清过的语义：光标不落在
-             * 悬浮窗以及超链接上连续超过 0.5s 才关闭）。所以两侧事件都参与：
+             * 悬浮窗以及超链接上连续超过 0.3s 才关闭）。所以两侧事件都参与：
              * 链接 mouseout / 浮窗 mouseleave → 排消失；
              * 链接 mouseover / 浮窗 mouseenter → 取消。
              * 这要求浮窗 `pointer-events:auto`（见 CSS 里那段说明）。
@@ -4929,15 +5145,18 @@ window.__ModuleLoader__.load({
             }
 
             /**
-             * 0.5 秒后隐藏 —— 期间若鼠标回到链接或浮窗上会被 cancelHideTip 取消。
+             * 0.3 秒后隐藏 —— 期间若鼠标回到链接或浮窗上会被 cancelHideTip 取消。
              * 必须声明在 hideLinkTip 之后（它引用了它）。
+             *
+             * 原为 500ms，用户实测后要求缩短到 0.3s：浮窗是预览，
+             * 停留太久反而挡视线。
              */
             const scheduleHideTip = () => {
               cancelHideTip()
               linkHideTimer = setTimeout(() => {
                 linkHideTimer = 0
                 hideLinkTip()
-              }, 500)
+              }, 300)
             }
 
             /**
@@ -4973,8 +5192,14 @@ window.__ModuleLoader__.load({
              *
              * 槽位始终存在（固定顺序：位图在上、文字在下），
              * 这样异步位图到达时不用重排整张卡片，滚动位置也不会跳。
+             *
+             * 整页位图 + 容器限高之后**必须主动定位**：否则用户看到的是
+             * 页首，目标可能在页面中下部，得自己找。这里按锚点的页内比例
+             * 把 scrollTop 滚过去，让目标落在可见区靠上的位置。
+             *
+             * @param {number} [anchorRatio] 锚点在页内的比例（0..1，从顶部算）
              */
-            const putTipBitmap = (tip, canvas) => {
+            const putTipBitmap = (tip, canvas, anchorRatio) => {
               let shot = tip.querySelector('.zr-tip-shot')
               if (!shot) {
                 shot = document.createElement('div')
@@ -4984,6 +5209,18 @@ window.__ModuleLoader__.load({
               shot.textContent = ''
               shot.removeAttribute('data-loading')
               if (canvas) shot.appendChild(canvas)
+              /**
+               * 把目标滚到可见区偏上（留 18% 的上下文在上方），
+               * 并夹在可滚范围内。
+               */
+              if (typeof anchorRatio === 'number' && Number.isFinite(anchorRatio)) {
+                const maxTop = Math.max(0, shot.scrollHeight - shot.clientHeight)
+                if (maxTop > 0) {
+                  const ratio = Math.min(0.98, Math.max(0, anchorRatio))
+                  const wanted = shot.scrollHeight * ratio - shot.clientHeight * 0.18
+                  shot.scrollTop = Math.max(0, Math.min(maxTop, wanted))
+                }
+              }
               return shot
             }
 
@@ -5059,39 +5296,69 @@ window.__ModuleLoader__.load({
 
               let left
               let top
+              /**
+               * **宽度按内容类型分开定。**
+               *
+               * 用户的原话：
+               *   · 参考文献「就 1/2 栏，一行放不下自动换行」→ 文字预览半栏；
+               *   · 「悬浮窗的页面大概是 pdf 的 80% 就可以了」→ 图片浮窗 80%。
+               *
+               * 两者都**居中于页面**（而不是贴左边界）：贴着页面左边界时，
+               * 半栏宽的卡片会停在栏缝里，看着像没对齐。
+               */
+              const widthRatio = opts?.bitmap ? 0.8 : 0.5
               if (pageRect && pageRect.width > 0) {
                 /**
-                 * 横向与页面同宽同左边界，并夹进视口。
-                 * 页面比视口宽时（放大很多）夹住，别让浮窗跑到屏幕外。
+                 * 目标宽度 = 页宽 × 比例，并夹进视口。
+                 * 页面被放得很大时（>12:1 之外）夹住，别让浮窗跑到屏幕外。
                  */
-                const pageLeft = Math.max(8, Math.min(pageRect.left, window.innerWidth - 120))
-                const pageRight = Math.min(window.innerWidth - 8, Math.max(pageRect.right, pageLeft + 120))
-                left = pageLeft
-                // 宽度交给 CSS：用 left/right 同时约束，比算 px 更稳
-                tip.style.left = `${Math.round(left)}px`
-                tip.style.right = `${Math.round(window.innerWidth - pageRight)}px`
-                tip.style.width = 'auto'
+                let targetW = pageRect.width * widthRatio
+                targetW = Math.min(targetW, window.innerWidth - 16)
+                targetW = Math.max(160, targetW)
+                // 居中于页面
+                const pageCenter = (pageRect.left + pageRect.right) / 2
+                let targetLeft = pageCenter - targetW / 2
+                // 夹进视口
+                targetLeft = Math.max(8, Math.min(targetLeft, window.innerWidth - targetW - 8))
+                left = targetLeft
+                /**
+                 * 用 left + 显式 width 定宽（不再用 left/right 双约束）：
+                 * 双约束会让宽度被页面宽度绑定死，没法按比例收窄。
+                 */
+                tip.style.right = 'auto'
+                tip.style.left = `${Math.round(targetLeft)}px`
+                tip.style.width = `${Math.round(targetW)}px`
               } else {
                 tip.style.right = 'auto'
-                left = Math.max(8, (window.innerWidth - Math.min(560, window.innerWidth - 16)) / 2)
+                const fallbackW = Math.min(560, window.innerWidth - 16)
+                left = Math.max(8, (window.innerWidth - fallbackW) / 2)
                 tip.style.left = `${Math.round(left)}px`
-                tip.style.width = ''
+                tip.style.width = opts?.bitmap ? `${Math.round(fallbackW)}px` : ''
               }
+              /**
+               * **纵向与链接留出间隙。**
+               *
+               * 用户的原话：「如果在上方，那么底部要在超链接再往上一些位置。
+               * 如果是下方，在是顶部在往下一些位置」——即不要把浮窗紧贴在
+               * 链接上。原来只留 8px，改成 20px。
+               */
+              const gap = 20
               if (anchor) {
                 const r = anchor.getBoundingClientRect()
-                top = r.top - tipH - 8
-                if (top < 8) top = r.bottom + 8
+                top = r.top - tipH - gap
+                // 上方放不下就翻到下方
+                if (top < 8) top = r.bottom + gap
               } else {
                 top = 56
               }
-              // 下方空间也不够时，贴住视口底部，至少让最上面几行可见
+              // 上方下方都放不下时，贴住视口并保证不遮住链接所在行
               if (top + tipH > window.innerHeight - 8) {
                 top = Math.max(8, window.innerHeight - tipH - 8)
               }
               tip.style.top = `${Math.round(top)}px`
               tip.setAttribute('data-on', '1')
               /**
-               * 显示出来就说明鼠标在链接上（或刚离开但在 0.5s 窗口内），
+               * 显示出来就说明鼠标在链接上（或刚离开但在 0.3s 窗口内），
                * 此时不该有挂起的消失任务。
                */
               cancelHideTip()
@@ -5254,7 +5521,7 @@ window.__ModuleLoader__.load({
                */
               if (anchor.hasAttribute('title')) anchor.removeAttribute('title')
               /**
-               * 鼠标回到链接上 → 取消挂起的消失（与浮窗共用 0.5s 判定）。
+               * 鼠标回到链接上 → 取消挂起的消失（与浮窗共用 0.3s 判定）。
                */
               cancelHideTip()
               // 同一条链接内部移动（冒泡）不算换目标，否则会不停重排延时
@@ -5401,10 +5668,10 @@ window.__ModuleLoader__.load({
               // 指针在本链接的子元素之间移动时也会触发 mouseout，那不是离开
               if (event.relatedTarget && anchor.contains?.(event.relatedTarget)) return
               /**
-               * **不立刻隐藏，改为 0.5s 后隐藏。**
+               * **不立刻隐藏，改为 0.3s 后隐藏。**
                *
                * 鼠标要从链接移到浮窗上滚动，中途必然经过空隙；立即隐藏的话
-               * 用户根本够不到浮窗。这 0.5s 里若鼠标进了浮窗或回到链接，
+               * 用户根本够不到浮窗。这 0.3s 里若鼠标进了浮窗或回到链接，
                * cancelHideTip 会把任务取消（见 ensureTip 里的 mouseenter）。
                */
               scheduleHideTip()
