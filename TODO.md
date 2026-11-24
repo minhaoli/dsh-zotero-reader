@@ -187,3 +187,15 @@ PDF 页本身是 canvas，底色由 pdf.js 决定，换主题只影响栏内 UI 
 合并策略：main 与 rebase 后的分支各带一份等价的历史功能、git 无法自动识别，最终用 `git reset --hard 108a583` 让 main 指向包含全部成果的 commit（`git diff 5645ec8 108a583` 证实差异是纯粹的 preview 增量）。
 
 **以后派子代理改 client.js，必须在指令里强调保持 CRLF。**
+---
+
+## 悬停浮窗四条修正（2026-11-24，进行中）
+
+用户实测位图预览后提的四点：
+
+1. **只对图和公式显示浮窗**。现在所有内链都弹（`#cite.*`、`#page=N`、`#eq1`、`#fig8` 全弹），用户只要 figure 和 equation。判定不能只靠名字前缀猜，要结合 dest 类型与坐标（如 `FitR` 给矩形通常意味着图）。不弹的类型要在渲染位图之前分流，避免白渲染一页。
+2. **浮窗横向与正文页面对齐**，不跟随链接左右移动。现在 `left` 跟着链接 x 走，链接在左在右会让浮窗左右跳。改用页面元素的 `getBoundingClientRect` 取横向边界。纵向仍按链接算（上方优先，空间不够放下方）。
+3. **光标移进浮窗后不能滚动它**。`pointer-events:auto` + `overflow:auto` 的代价是鼠标进去能滚。改回 `none` 并去掉 overflow，但要注意这会破坏 0.5s 消失依赖的 `mouseenter`/`mouseleave`——需简化成「链接 mouseout 排消失、mouseover 取消」。
+4. **去掉外圈黑框**。`.zr-link-tip` 的 `border` + `box-shadow`、`.zr-tip-shot` 的 `border` 都去掉，观感改成「位图直接浮在页面上」，不要容器感。
+
+由 links-agent 在 `fix-popup` 分支实现。
