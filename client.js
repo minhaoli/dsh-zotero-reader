@@ -136,10 +136,13 @@ window.__ModuleLoader__.load({
       outline: '大纲',
       /* 当前文档查找（Ctrl+F / 工具条放大镜）；计数文案带两个变量，避免拼接。 */
       findInDoc: '在本文中查找',
-      findPlaceholder: '在本文中查找（Ctrl+F）',
+      findPlaceholder: '在文件中查找',
       findPrev: '上一个（Shift+Enter）',
       findNext: '下一个（Enter）',
       findClose: '关闭查找',
+      findHighlightAll: '高亮所有',
+      findCase: '区分大小写',
+      findWholeWord: '整词',
       findCount: '第 {{current}} 个 / 共 {{total}} 个',
       findCountEmpty: '0/0 · 无匹配',
       findScanning: '扫描 {{done}}/{{total}} 页…',
@@ -290,10 +293,13 @@ window.__ModuleLoader__.load({
       selectionEmpty: 'Select some text first',
       outline: 'Outline',
       findInDoc: 'Find in document',
-      findPlaceholder: 'Find in document (Ctrl+F)',
+      findPlaceholder: 'Find in file',
       findPrev: 'Previous (Shift+Enter)',
       findNext: 'Next (Enter)',
       findClose: 'Close find',
+      findHighlightAll: 'Highlight all',
+      findCase: 'Match case',
+      findWholeWord: 'Whole word',
       findCount: '{{current}} of {{total}}',
       findCountEmpty: '0/0 · No matches',
       findScanning: 'Scanning {{done}}/{{total}}…',
@@ -1324,17 +1330,31 @@ window.__ModuleLoader__.load({
        * 所以虚拟化把它所在的页移出 DOM 时，高亮跟着一起消失，不会留下孤儿节点。
        * 颜色沿用 .zr-hl / .zr-jump-flash 的 multiply 思路，底下文字仍然透得出来。
        */
-      .zr-findbar{display:flex;align-items:center;gap:6px;padding:6px 8px;
+      .zr-findbar{display:flex;flex-direction:column;gap:6px;padding:6px 8px;
         border-bottom:1px solid var(--dsh-border,#333);flex:0 0 auto}
-      .zr-findbar input{flex:1 1 auto;min-width:0;background:transparent;color:inherit;
+      .zr-find-row{display:flex;align-items:center;gap:6px;min-width:0}
+      .zr-findbar input[type="text"]{flex:1 1 auto;min-width:0;background:transparent;color:inherit;
         font-size:12px;border:1px solid var(--dsh-border,#3a3a3a);border-radius:6px;padding:4px 8px}
       .zr-find-count{font-size:11px;color:var(--dsh-text-secondary,#9a9a9a);
-        white-space:nowrap;min-width:76px;text-align:right}
-      .zr-find-layer{position:absolute;inset:0;pointer-events:none;z-index:4}
+        white-space:nowrap;min-width:72px;text-align:right}
+      .zr-find-checks{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+        font-size:11px;color:var(--dsh-text-secondary,#9a9a9a)}
+      .zr-find-check{display:inline-flex;align-items:center;gap:4px;cursor:pointer;user-select:none}
+      .zr-find-check input{width:12px;height:12px;margin:0;cursor:pointer;
+        accent-color:var(--dsh-accent,#3d6af2)}
+      /*
+       * 命中层必须压在 canvas 与文本层之上：pdf.js 的 .textLayer 自带层级，
+       * z-index 取 5（批注层是默认层；.zr-page-anchors 是根容器上的 20，不冲突）。
+       *
+       * 不用 mix-blend-mode：深色主题下 multiply 会把黄块压成看不见的暗色 ——
+       * 这正是「明明算出了命中却看不到任何高亮」的一个来源。改成普通半透明叠色，
+       * 白底（正常 PDF 页）与深底都能看见。
+       */
+      .zr-find-layer{position:absolute;inset:0;pointer-events:none;z-index:5}
       .zr-find-hit{position:absolute;border-radius:2px;pointer-events:none;
-        background:rgba(255,214,0,.30);mix-blend-mode:multiply}
-      .zr-find-hit[data-current="1"]{background:rgba(255,140,0,.52);
-        box-shadow:0 0 0 1px rgba(255,140,0,.9)}
+        background:rgba(255,214,0,.38)}
+      .zr-find-hit[data-current="1"]{background:rgba(255,140,0,.55);
+        box-shadow:0 0 0 1px rgba(255,140,0,.95)}
       .zr-note{padding:10px 12px;color:var(--dsh-text-secondary,#9aa0a6);font-size:12px;line-height:1.7}
       .zr-err{padding:10px 12px;color:#ff8a80;font-size:12px;line-height:1.7}
       .zr-list{overflow:auto;flex:1 1 auto;min-height:0;padding:4px 0}
@@ -3096,6 +3116,14 @@ window.__ModuleLoader__.load({
       const [findIndex, setFindIndex] = useState(-1)
       const [findScan, setFindScan] = useState(null)   // { done, total } | null
       /**
+       * 三个匹配选项，对应查找条第二行的复选框。
+       * 默认与主流阅读器一致：「高亮所有」开，大小写与整词关。
+       * 关掉「高亮所有」时仍然算全部命中（计数与上下跳转不变），只是不画其余块。
+       */
+      const [findHighlightAll, setFindHighlightAll] = useState(true)
+      const [findCase, setFindCase] = useState(false)
+      const [findWhole, setFindWhole] = useState(false)
+      /**
        * Zotero 里已有的批注。用 ref 而不是 state 参与渲染循环 ——
        * 页面 canvas 是命令式渲染的，放 state 会让每次批注变化都重绘整页。
        */
@@ -3241,6 +3269,10 @@ window.__ModuleLoader__.load({
       const findJumpedRef = useRef(false)     // 本次查询是否已经自动跳过（避免扫描时反复拽视图）
       const findScanningRef = useRef(false)
       const findSeqRef = useRef(0)            // 代际：换文档时自增，作废在飞的提取
+      /** 三个选项的即时值：正则编译与重绘都发生在渲染循环之外，必须读 ref。 */
+      const findHighlightAllRef = useRef(true)
+      const findCaseRef = useRef(false)
+      const findWholeRef = useRef(false)
       /**
        * 当前比例的镜像。
        *
@@ -8003,7 +8035,16 @@ const placeBox = (el, l, t, wd, ht) => {
                  * 让给缩放：缩放停下来后 pagerendered 还会再触发一次，
                  * 那一拍补画即可，形状由 decoratePage 按当前 scale 算。
                  */
-                if (perf.now() - zoomAtRef.current < 240) return
+                if (perf.now() - zoomAtRef.current < 240) {
+                  /**
+                   * 刚缩放过就不补批注装饰（会在 pdf.js 重排中途改 DOM）。
+                   * **但查找高亮必须补**：它只画绝对定位块、不参与布局，
+                   * 而且这一页的重画已经把旧层清掉了 —— 这里直接 return 的话，
+                   * 高亮就会永久消失，直到下一次 pagerendered（用户报的「看不到高亮」）。
+                   */
+                  paintFindRef.current?.(pageNo)
+                  return
+                }
                 decoratePageRef.current?.(pageNo)
                 // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
                 paintSelectRef.current?.(annotSelectedRef.current)
@@ -9247,11 +9288,36 @@ const placeBox = (el, l, t, wd, ht) => {
        * 把一个 `getTextContent()` 结果压成「可检索的页」：
        * `{ norm, items, pageH }`。`items` 每项带 norm 串里的 `[s,e)` 与视口矩形。
        */
+      /** 把用户输入转成正则字面量：正则元字符全部转义。 */
+      const escapeFindRegExp = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+      /** 查询词归一化：空白折叠 + 去首尾（与索引串同一套折叠规则）。 */
+      const normalizeFindQuery = (text) => String(text ?? '').replace(/[\s\u00a0]+/g, ' ').trim()
+
+      /**
+       * 编译一次，逐页复用（不要每页 new RegExp）。
+       *
+       * 大小写：不区分时加 `i`，区分时不加 —— 索引里存的是**原始大小写**，
+       * 所以两种模式共用同一份文本，不必建两份索引。
+       *
+       * 整词的边界字符类**必须是 ASCII 的 `[A-Za-z0-9_]`，不能用 `\p{L}` / `\p{N}`**：
+       * `\p{L}` 把汉字算作词字符，于是「整词」下搜「模型」在「计算模型」里会因为
+       * 左边是「算」而被判定不是整词 —— 中文用户预期的是子串匹配。
+       * 换成 ASCII 词字符类后：
+       *   · 中文自然退化为子串匹配（「计算模型」里能搜到「模型」）；
+       *   · 英文仍然守得住边界（`models` 里搜 `model` 不命中，`model-based` 会命中）。
+       */
+      const buildFindRegExp = (query, caseSensitive, wholeWord) => {
+        const body = escapeFindRegExp(query)
+        const pattern = wholeWord ? `(?<![A-Za-z0-9_])${body}(?![A-Za-z0-9_])` : body
+        return new RegExp(pattern, caseSensitive ? 'g' : 'gi')
+      }
+
       const buildPageIndex = (content, vp) => {
         const items = []
         const vpM = vp?.transform
         if (!vpM || !Array.isArray(content?.items)) {
-          return { norm: '', items, pageH: Number(vp?.height) || 0 }
+          return { norm: '', items, pageH: Number(vp?.height) || 0, baseW: Number(vp?.width) || 0 }
         }
         let norm = ''
         for (const it of content.items) {
@@ -9286,30 +9352,42 @@ const placeBox = (el, l, t, wd, ht) => {
           const y0 = Math.min(...ys)
           const y1 = Math.max(...ys)
           if (!(x1 - x0 > 0.1) || !(y1 - y0 > 0.1)) continue
-          // 匹配串：空白折叠 + 小写；换行靠 hasEOL（与 host/pdf.js 的断行判据一致）。
-          // 折叠后的串与偏移一起建，避免「小写化改变长度」把 [s,e) 算错。
-          const text = String(it.str).replace(/[\s\u00a0]+/g, ' ').toLowerCase()
+          // 匹配串：**保留原始大小写**，只做空白折叠（换行靠 hasEOL，与 host/pdf.js 同判据）。
+          // 大小写由正则的 `i` 标志决定，绝不能在建索引时 toLowerCase() 丢掉 ——
+          // 否则「区分大小写」这个选项永远没法实现（原始写法已经不可逆了）。
+          const text = String(it.str).replace(/[\s\u00a0]+/g, ' ')
           const start = norm.length
           norm += text
           if (it.hasEOL) norm += ' '
           items.push({ s: start, e: start + text.length, x0, y0, x1, y1 })
         }
-        return { norm, items, pageH: Number(vp.height) || 0 }
+        return {
+          norm,
+          items,
+          pageH: Number(vp.height) || 0,
+          // 页宽也存一份：绘制时要用它算 CSS/pt 比例，不能依赖 pageSizesRef 已经预取过这一页
+          baseW: Number(vp.width) || 0,
+        }
       }
 
       /**
-       * 在一页的索引里找出全部命中。
-       * 命中可能跨 item（一行在文本层里常被拆成好几段），所以先按 item 的
-       * `[s,e)` 取覆盖区间，再按字符比例把 item 矩形裁成命中那一段。
+       * 在一页的索引里找出全部命中（`re` 是已编译好的全局正则，逐页复用）。
+       *
+       * 用 `re.exec` 而不是 `indexOf`：大小写与整词都交给正则标志处理，
+       * 索引串保持原始大小写、只有一份。命中可能跨 item（一行在文本层里常被拆成
+       * 好几段），所以按 item 的 `[s,e)` 取覆盖区间，再按字符比例裁成命中那一段。
+       *
+       * 推进量由 exec 自己按 `match[0].length` 完成；整词边界是零宽断言，
+       * 命中串长度仍等于查询词长度，不会跳过字符。
        */
-      const matchPage = (pageNo, rec, q) => {
+      const matchPage = (pageNo, rec, re) => {
         const out = []
-        if (!rec || !rec.norm || !q) return out
-        let from = 0
-        for (;;) {
-          const at = rec.norm.indexOf(q, from)
-          if (at < 0) return out
-          const end = at + q.length
+        if (!rec || !rec.norm || !re) return out
+        re.lastIndex = 0
+        let m = re.exec(rec.norm)
+        while (m !== null) {
+          const at = m.index
+          const end = at + m[0].length
           const rects = []
           let top = Infinity
           for (const it of rec.items) {
@@ -9331,19 +9409,22 @@ const placeBox = (el, l, t, wd, ht) => {
             out.push({ pageNo, at, rects, y0: Number.isFinite(top) ? top : 0 })
             if (out.length >= FIND_MATCH_LIMIT) return out
           }
-          from = at + Math.max(1, q.length)
+          // 零宽命中兜底（查询已 trim，正常不会发生）；否则 exec 已按 match[0].length 推进
+          if (m[0].length === 0) re.lastIndex = at + 1
+          m = re.exec(rec.norm)
         }
+        return out
       }
 
-      const collectMatches = useCallback((q) => {
+      const collectMatches = useCallback((re) => {
         const list = []
-        if (!q) return list
+        if (!re) return list
         const cache = textCacheRef.current
         const total = Number(pdfRef.current?.doc?.numPages) || 0
         for (let pageNo = 1; pageNo <= total; pageNo += 1) {
           const rec = cache.get(pageNo)
           if (!rec) continue
-          const hits = matchPage(pageNo, rec, q)
+          const hits = matchPage(pageNo, rec, re)
           for (const hit of hits) {
             list.push(hit)
             if (list.length >= FIND_MATCH_LIMIT) return list
@@ -9360,14 +9441,20 @@ const placeBox = (el, l, t, wd, ht) => {
 
       /**
        * 画某一页的命中块。只处理**已经在 DOM 里**的页；没渲染的页由 pagerendered 补。
-       * `k` 优先取 viewer 的 currentScale（页宽 = viewport.width × scale，二者同源），
-       * 取不到才退回 viewport / clientWidth 估算（与批注层的取值顺序一致）。
+       *
+       * 比例 `k` 的取值顺序（**不能只有 currentScale 这一条**，它一旦取不到就会
+       * 直接 return，表现为「明明算出了命中却什么都看不到」）：
+       *   ① 页面里那张已渲染 canvas 的 CSS 宽 / 页宽(pt) —— 与页面实际像素同源，最准；
+       *   ② viewer.currentScale；
+       *   ③ getPageView().viewport.width / pageSizesRef 页宽；
+       *   ④ 页元素 clientWidth / 页宽。
+       * `baseW` 来自查找自己的页索引，所以即使 pageSizesRef 没预取过这一页也能算。
        */
       const paintFindPage = useCallback((pageNo) => {
         const host = hostRef.current
-        if (!host) return
+        if (!host) return 0
         const pageEl = host.querySelector(`.page[data-page-number="${pageNo}"]`)
-        if (!pageEl) return
+        if (!pageEl) return 0
         let layer = pageEl.querySelector('.zr-find-layer')
         if (!layer) {
           layer = document.createElement('div')
@@ -9375,21 +9462,33 @@ const placeBox = (el, l, t, wd, ht) => {
           pageEl.appendChild(layer)
         }
         layer.textContent = ''
-        const list = findMatchesRef.current.filter((m) => m.pageNo === pageNo)
-        if (list.length === 0) return
+        const rec = textCacheRef.current.get(pageNo)
+        const baseW = rec?.baseW || pageSizesRef.current.get(pageNo)?.w || 0
+        const basePtH = rec?.pageH || pageSizesRef.current.get(pageNo)?.h || 0
         let k = 0
-        try { k = Number(viewerRef.current?.currentScale) || 0 } catch { k = 0 }
+        const canvas = pageEl.querySelector('canvas')
+        if (canvas && baseW > 0 && canvas.clientWidth > 0) k = canvas.clientWidth / baseW
         if (!(k > 0)) {
-          const base = pageSizesRef.current.get(pageNo)
-          const vp = viewerRef.current?.getPageView?.(pageNo - 1)?.viewport
-          const w = Number(pageEl.clientWidth) || 0
-          if (vp && base?.w > 0) k = vp.width / base.w
-          else if (base?.w > 0 && w > 0) k = w / base.w
+          try { k = Number(viewerRef.current?.currentScale) || 0 } catch { k = 0 }
         }
-        if (!(k > 0)) return
+        if (!(k > 0)) {
+          const vp = viewerRef.current?.getPageView?.(pageNo - 1)?.viewport
+          if (vp && baseW > 0) k = vp.width / baseW
+        }
+        if (!(k > 0) && baseW > 0 && basePtH > 0) {
+          const w = Number(pageEl.clientWidth) || 0
+          if (w > 0) k = w / baseW
+        }
+        if (!(k > 0)) return 0
+        const list = findMatchesRef.current.filter((m) => m.pageNo === pageNo)
+        if (list.length === 0) return 0
         const cur = findMatchesRef.current[findIndexRef.current]
+        const showAll = findHighlightAllRef.current !== false
+        let painted = 0
         for (const m of list) {
           const isCurrent = Boolean(cur) && cur.pageNo === m.pageNo && cur.at === m.at
+          // 关掉「高亮所有」时只留当前这一条：其余不画，但计数与上下跳转照旧
+          if (!showAll && !isCurrent) continue
           for (const r of m.rects) {
             const box = document.createElement('div')
             box.className = 'zr-find-hit'
@@ -9399,9 +9498,35 @@ const placeBox = (el, l, t, wd, ht) => {
             box.style.width = `${Math.max(1, Math.round((r[2] - r[0]) * k))}px`
             box.style.height = `${Math.max(1, Math.round((r[3] - r[1]) * k))}px`
             layer.appendChild(box)
+            painted += 1
           }
         }
+        return painted
       }, [])
+
+      /**
+       * 把当前结果重画到**所有已经在 DOM 里的页**上。
+       *
+       * 这是「命中变化 → 立刻可见」的主路径。只在 pagerendered 上补画是不够的：
+       * 敲查询词时页面早就渲染完了，不会再抛 pagerendered，已渲染的页永远拿不到
+       * 重画指令（用户实测「输入后看不到任何高亮」就是这条链路断了）。
+       * 顺带解决「只加不减」：没有命中的页在这里会被清成空层（paintFindPage 先清后画）。
+       */
+      const paintFindAll = useCallback(() => {
+        const host = hostRef.current
+        if (!host) return 0
+        let pages = 0
+        let marks = 0
+        for (const el of host.querySelectorAll('.page[data-page-number]')) {
+          const n = Number(el.dataset.pageNumber)
+          if (Number.isFinite(n) && n > 0) {
+            pages += 1
+            marks += paintFindPage(n) || 0
+          }
+        }
+        reportDiag({ event: 'find:paint', pages, marks, matches: findMatchesRef.current.length })
+        return marks
+      }, [paintFindPage])
 
       // 与 decoratePageRef 同一套「先占位、定义完再赋值」：pagerendered 里要用它补画
       paintFindRef.current = paintFindPage
@@ -9442,7 +9567,6 @@ const placeBox = (el, l, t, wd, ht) => {
        */
       const applyFindSearch = useCallback((advance = 0) => {
         const q = findQueryRef.current
-        const prev = findMatchesRef.current[findIndexRef.current]
         if (!q) {
           findMatchesRef.current = []
           findIndexRef.current = -1
@@ -9451,7 +9575,9 @@ const placeBox = (el, l, t, wd, ht) => {
           clearFindMarks()
           return
         }
-        const list = collectMatches(q)
+        // 正则每轮只编译一次，逐页复用（含大小写与整词标志）
+        const re = buildFindRegExp(q, findCaseRef.current, findWholeRef.current)
+        const list = collectMatches(re)
         const len = list.length
         let next = -1
         if (len > 0) {
@@ -9476,9 +9602,10 @@ const placeBox = (el, l, t, wd, ht) => {
           findJumpedRef.current = true
           revealFindMatch(list[next])
         }
-        if (prev) paintFindPage(prev.pageNo)
-        paintFindPage(list[next].pageNo)
-      }, [clearFindMarks, collectMatches, paintFindPage, revealFindMatch])
+        // 主路径：结果一变就把**所有已渲染页**重画一遍（含清掉不再有命中的旧块）。
+        // 只画当前页/上一页是不够的 —— 敲查询词时页面早已渲染完，不会再抛 pagerendered。
+        paintFindAll()
+      }, [clearFindMarks, collectMatches, paintFindAll, revealFindMatch])
 
       const goFind = useCallback((delta) => {
         if (!findQueryRef.current) return
@@ -9511,7 +9638,7 @@ const placeBox = (el, l, t, wd, ht) => {
       const changeFindQuery = useCallback((value) => {
         const text = String(value ?? '')
         setFindQuery(text)
-        findQueryRef.current = text.replace(/[\s\u00a0]+/g, ' ').toLowerCase()
+        findQueryRef.current = normalizeFindQuery(text)
         findJumpedRef.current = false
         findIndexRef.current = -1
         applyFindSearch(0)
@@ -9553,7 +9680,7 @@ const placeBox = (el, l, t, wd, ht) => {
               try { page.cleanup?.() } catch { /* 取完就还给 pdf.js；失败不影响结果 */ }
             } catch (error) {
               // 单页失败也要占位，否则每次重查都会重扫这一页
-              cache.set(pageNo, { norm: '', items: [], pageH: 0 })
+              cache.set(pageNo, { norm: '', items: [], pageH: 0, baseW: 0 })
               reportDiag({ event: 'find:page-failed', pageNo, message: String(error?.message ?? error) })
             }
           }))
@@ -9607,6 +9734,22 @@ const placeBox = (el, l, t, wd, ht) => {
         const gen = findSeqRef.current
         ensureTextIndex(gen).finally(() => { findScanningRef.current = false })
       }, [findOpen, findQuery, ensureTextIndex])
+
+      /**
+       * 切换「区分大小写 / 整词」→ 立刻重算并重新定位，不需要用户再敲一次查询。
+       * 顺序不能反：先同步 ref，再调 applyFindSearch（它读 ref，不读 state）。
+       */
+      useEffect(() => {
+        findCaseRef.current = findCase
+        findWholeRef.current = findWhole
+        if (findQueryRef.current) applyFindSearch(0)
+      }, [findCase, findWhole, applyFindSearch])
+
+      /** 「高亮所有」只决定画多少块，不改变命中集合 —— 重绘即可，不必重算。 */
+      useEffect(() => {
+        findHighlightAllRef.current = findHighlightAll
+        paintFindAll()
+      }, [findHighlightAll, paintFindAll])
 
       /**
        * 键位。只在**本阅读器面板可见**时拦截：
@@ -11330,54 +11473,85 @@ const placeBox = (el, l, t, wd, ht) => {
          */
         findOpen
           ? h('div', { className: 'zr-findbar', ref: finderRef },
-            h('input', {
-              type: 'text',
-              ref: findInputRef,
-              value: findQuery,
-              placeholder: t('findPlaceholder'),
-              'aria-label': t('findPlaceholder'),
-              onChange: (e) => changeFindQuery(e.target.value),
-              onKeyDown: (e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  goFind(e.shiftKey ? -1 : 1)
-                  return
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault()
-                  closeFind()
-                }
-              },
-            }),
             /*
-             * 计数区：每次结果变化都要说话（aria-live），无命中明确显示 0/0，
-             * 不做「静默清空」—— 用户报过「搜了没反应，不知道是没匹配还是坏了」。
+             * 第一行：输入框 + 计数 + 上一个 / 下一个 / 关闭。
+             * 输入框自己处理 Enter / Shift+Enter（上/下一个）与 Esc（关闭）；
+             * Ctrl+F、F3 走 document 层那条键位监听（见键位 effect）。
+             * Ctrl+F 提示放在 title，不挤进 placeholder —— 截图里 placeholder 只有「在文件中查找」。
              */
-            h('span', {
-              className: 'zr-find-count',
-              role: 'status',
-              'aria-live': 'polite',
-            }, findCountText),
-            h('button', {
-              className: 'zr-btn',
-              title: t('findPrev'),
-              'aria-label': t('findPrev'),
-              disabled: findMatches.length === 0,
-              onClick: () => goFind(-1),
-            }, '↑'),
-            h('button', {
-              className: 'zr-btn',
-              title: t('findNext'),
-              'aria-label': t('findNext'),
-              disabled: findMatches.length === 0,
-              onClick: () => goFind(1),
-            }, '↓'),
-            h('button', {
-              className: 'zr-btn',
-              title: t('findClose'),
-              'aria-label': t('findClose'),
-              onClick: closeFind,
-            }, '×'),
+            h('div', { className: 'zr-find-row' },
+              h('input', {
+                type: 'text',
+                ref: findInputRef,
+                value: findQuery,
+                placeholder: t('findPlaceholder'),
+                title: t('findInDoc'),
+                'aria-label': t('findInDoc'),
+                onChange: (e) => changeFindQuery(e.target.value),
+                onKeyDown: (e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    goFind(e.shiftKey ? -1 : 1)
+                    return
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault()
+                    closeFind()
+                  }
+                },
+              }),
+              /*
+               * 计数区：每次结果变化都要说话（aria-live），无命中明确显示 0/0，
+               * 不做「静默清空」—— 用户报过「搜了没反应，不知道是没匹配还是坏了」。
+               */
+              h('span', {
+                className: 'zr-find-count',
+                role: 'status',
+                'aria-live': 'polite',
+              }, findCountText),
+              h('button', {
+                className: 'zr-btn',
+                title: t('findPrev'),
+                'aria-label': t('findPrev'),
+                disabled: findMatches.length === 0,
+                onClick: () => goFind(-1),
+              }, '∧'),
+              h('button', {
+                className: 'zr-btn',
+                title: t('findNext'),
+                'aria-label': t('findNext'),
+                disabled: findMatches.length === 0,
+                onClick: () => goFind(1),
+              }, '∨'),
+              h('button', {
+                className: 'zr-btn',
+                title: t('findClose'),
+                'aria-label': t('findClose'),
+                onClick: closeFind,
+              }, '×'),
+            ),
+            /*
+             * 第二行：三个复选框（与截图一致的形态，不是按钮选中态）。
+             * 「高亮所有」默认开：关掉后只画当前命中那一个，计数与上下跳转行为不变。
+             */
+            h('div', { className: 'zr-find-checks' },
+              ...[
+                [t('findHighlightAll'), findHighlightAll, setFindHighlightAll],
+                [t('findCase'), findCase, setFindCase],
+                [t('findWholeWord'), findWhole, setFindWhole],
+              ].map(([text, checked, setter]) => h('label', {
+                key: text,
+                className: 'zr-find-check',
+              },
+                h('input', {
+                  type: 'checkbox',
+                  checked,
+                  'aria-label': text,
+                  onChange: () => setter((v) => !v),
+                }),
+                h('span', null, text),
+              )),
+            ),
           )
           : null,
 
