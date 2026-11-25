@@ -134,6 +134,15 @@ window.__ModuleLoader__.load({
       noText: '这一页没有可提取的文字（可能是扫描页）',
       selectionEmpty: '选中文本后再点按钮',
       outline: '大纲',
+      /* 当前文档查找（Ctrl+F / 工具条放大镜）；计数文案带两个变量，避免拼接。 */
+      findInDoc: '在本文中查找',
+      findPlaceholder: '在本文中查找（Ctrl+F）',
+      findPrev: '上一个（Shift+Enter）',
+      findNext: '下一个（Enter）',
+      findClose: '关闭查找',
+      findCount: '第 {{current}} 个 / 共 {{total}} 个',
+      findCountEmpty: '0/0 · 无匹配',
+      findScanning: '扫描 {{done}}/{{total}} 页…',
       settings: '设置',
       annotations: '批注',
       annotEmpty: '这篇文献在 Zotero 里还没有批注。划选文字后点「高亮」即可添加。',
@@ -280,6 +289,14 @@ window.__ModuleLoader__.load({
       noText: 'No extractable text on this page (possibly scanned)',
       selectionEmpty: 'Select some text first',
       outline: 'Outline',
+      findInDoc: 'Find in document',
+      findPlaceholder: 'Find in document (Ctrl+F)',
+      findPrev: 'Previous (Shift+Enter)',
+      findNext: 'Next (Enter)',
+      findClose: 'Close find',
+      findCount: '{{current}} of {{total}}',
+      findCountEmpty: '0/0 · No matches',
+      findScanning: 'Scanning {{done}}/{{total}}…',
       settings: 'Settings',
       annotations: 'Annotations',
       annotEmpty: 'No annotations yet. Select text and click Highlight to add one.',
@@ -1296,6 +1313,28 @@ window.__ModuleLoader__.load({
         background:rgba(64,150,255,.34);mix-blend-mode:multiply;
         opacity:1;transition:opacity .45s ease-out}
       .zr-jump-flash[data-fade="1"]{opacity:0}
+      /*
+       * 当前文档查找（Ctrl+F / 工具条放大镜）。
+       *
+       * 查找条是工具条**下方独立一行**，不浮在正文上：右栏只有 ~400px 宽，
+       * 右上角还被大纲面板占着（.zr-page-anchors），浮层必撞；内联行不盖正文、
+       * 不参与页面坐标，收起时高度自然还原。
+       *
+       * 命中块挂在每页自己的 .zr-find-layer 里（与 .zr-annot-layer 同形），
+       * 所以虚拟化把它所在的页移出 DOM 时，高亮跟着一起消失，不会留下孤儿节点。
+       * 颜色沿用 .zr-hl / .zr-jump-flash 的 multiply 思路，底下文字仍然透得出来。
+       */
+      .zr-findbar{display:flex;align-items:center;gap:6px;padding:6px 8px;
+        border-bottom:1px solid var(--dsh-border,#333);flex:0 0 auto}
+      .zr-findbar input{flex:1 1 auto;min-width:0;background:transparent;color:inherit;
+        font-size:12px;border:1px solid var(--dsh-border,#3a3a3a);border-radius:6px;padding:4px 8px}
+      .zr-find-count{font-size:11px;color:var(--dsh-text-secondary,#9a9a9a);
+        white-space:nowrap;min-width:76px;text-align:right}
+      .zr-find-layer{position:absolute;inset:0;pointer-events:none;z-index:4}
+      .zr-find-hit{position:absolute;border-radius:2px;pointer-events:none;
+        background:rgba(255,214,0,.30);mix-blend-mode:multiply}
+      .zr-find-hit[data-current="1"]{background:rgba(255,140,0,.52);
+        box-shadow:0 0 0 1px rgba(255,140,0,.9)}
       .zr-note{padding:10px 12px;color:var(--dsh-text-secondary,#9aa0a6);font-size:12px;line-height:1.7}
       .zr-err{padding:10px 12px;color:#ff8a80;font-size:12px;line-height:1.7}
       .zr-list{overflow:auto;flex:1 1 auto;min-height:0;padding:4px 0}
@@ -3042,6 +3081,21 @@ window.__ModuleLoader__.load({
       const [hopDepth, setHopDepth] = useState(0)
       const [highlight, setHighlight] = useState(null)  // { page, rects:[{x,y,w,h}] }
       /**
+       * 当前文档查找（Ctrl+F / 工具条放大镜）。
+       *
+       * `findMatches` 每项是 `{ pageNo, at, rects, y0 }`：`rects` 为「scale-1 视口坐标、
+       * 左上原点」的矩形，绘制时只乘当前 scale；`at` 是命中在该页 norm 串里的起点，
+       * 重算后拿它认出「当前命中」，不用把整个结果集 diff 一遍。
+       *
+       * `findOpen` 是查找条是否展开（工具条按钮的选中态由它驱动），
+       * 与「有没有查询词」是两件事：展开但还没输入时，计数区什么都不显示。
+       */
+      const [findOpen, setFindOpen] = useState(false)
+      const [findQuery, setFindQuery] = useState('')
+      const [findMatches, setFindMatches] = useState([])
+      const [findIndex, setFindIndex] = useState(-1)
+      const [findScan, setFindScan] = useState(null)   // { done, total } | null
+      /**
        * Zotero 里已有的批注。用 ref 而不是 state 参与渲染循环 ——
        * 页面 canvas 是命令式渲染的，放 state 会让每次批注变化都重绘整页。
        */
@@ -3162,6 +3216,31 @@ window.__ModuleLoader__.load({
       const [annotVersion, setAnnotVersion] = useState(0)
       /** 每页在 scale=1 时的尺寸（pt）：缩放时先按它把所有页撑到位，避免只有可见页跟着变。 */
       const pageSizesRef = useRef(new Map())
+      /**
+       * 逐页文本索引（`getTextContent()` 的产物，坐标已换算到 scale-1 视口）。
+       *
+       * 为什么自己建一份而不是复用别处：`pageTextLines`（链接预览那条链路）的缓存
+       * 是**每次装载新建的局部 Map**，而且只留聚行结果、丢掉字符偏移 —— 查找要的是
+       * 「命中在页内哪个区间 → 对应哪几个矩形」，粒度不同，合并不了。
+       *
+       * 换文档 / 刷新时清空（见 itemKey 那条重置 effect），否则会读到上一篇的字。
+       */
+      const textCacheRef = useRef(new Map())
+      /** 查找条输入框 + 容器（定位焦点与 Esc 归属）。 */
+      const findInputRef = useRef(null)
+      const finderRef = useRef(null)
+      /**
+       * 查找的即时值镜像。
+       * 键位监听、pagerendered 补画、扫描批次回调都跑在 React 渲染循环之外，
+       * 读 state 会拿到旧闭包值，所以这几份必须走 ref；state 只负责驱动渲染。
+       */
+      const findMatchesRef = useRef([])
+      const findIndexRef = useRef(-1)
+      const findQueryRef = useRef('')
+      const findOpenRef = useRef(false)
+      const findJumpedRef = useRef(false)     // 本次查询是否已经自动跳过（避免扫描时反复拽视图）
+      const findScanningRef = useRef(false)
+      const findSeqRef = useRef(0)            // 代际：换文档时自增，作废在飞的提取
       /**
        * 当前比例的镜像。
        *
@@ -3525,6 +3604,7 @@ window.__ModuleLoader__.load({
           try { pdfRef.current?.doc?.destroy?.() } catch { /* 已销毁或未建出来 */ }
           pdfRef.current = null
           pageElsRef.current.clear()
+          textCacheRef.current.clear()
         }
         /**
          * **依赖里不再放 active。**
@@ -3628,6 +3708,12 @@ window.__ModuleLoader__.load({
        * 直接引用会触发 TDZ（静态检查也会报）。ref 在这里先占位，赋值在下面。
        */
       const decoratePageRef = useRef(null)
+      /**
+       * 查找高亮层的绘制入口镜像。
+       * viewer 的 effect 声明在 paintFindPage 之前，直接引用会踩 TDZ；
+       * 与 decoratePageRef 同一套办法：先占位，定义完再赋值。
+       */
+      const paintFindRef = useRef(null)
       /** 新建批注的默认颜色（与 Zotero 自带调色板一致；与 annotColor 是同一个状态）。 */
       /**
        * 当前的粘性标注工具。
@@ -7921,6 +8007,8 @@ const placeBox = (el, l, t, wd, ht) => {
                 decoratePageRef.current?.(pageNo)
                 // 页面重画会把层清空，外框一起没了 —— 补回来（无选中时是空操作）
                 paintSelectRef.current?.(annotSelectedRef.current)
+                // 查找高亮与批注层一样挂在页面元素里，页面重画后要补这一次
+                paintFindRef.current?.(pageNo)
               }
               if (typeof requestAnimationFrame === 'function') {
                 requestAnimationFrame(() => {
@@ -9131,6 +9219,442 @@ const placeBox = (el, l, t, wd, ht) => {
         }
         requestAnimationFrame(() => setTimeout(retry, 60))
       }, [pageCount, pushHop])
+
+      /* ---------- 当前文档查找（Ctrl+F / 工具条放大镜） ---------- */
+      /**
+       * 只查**当前文档**，不做跨库正文检索 —— 后者是 host 侧全文检索的职责。
+       *
+       * 文本来源：浏览器侧 `pdfRef.current.doc.getPage(n).getTextContent()`。
+       * **不读 `.textLayer span`**：官方 viewer 是虚拟化的，只有可见页才有文本层，
+       * 而查找必须能命中整篇（包括还没滚到的页）。
+       *
+       * 坐标一律存「scale-1 视口坐标、左上原点」，绘制时只乘当前 scale。
+       * 推导：`item.transform` 把文本空间（字号归一为 1）映射到 PDF 用户空间，
+       * `viewport.transform` 再映射到视口（含旋转与 y 翻转），所以
+       * `m = viewport.transform ∘ item.transform` 直接给出「文本空间 → 视口」。
+       * 取文本空间单位盒 (0,0)-(adv,1) 的四角经 m 变换后求包围盒：
+       *   · 旋转 0 时与 pdf.js 文本层自己的 left/top/width/height 逐项相等
+       *     （用 539 页真实 PDF 实测，抽样 80/80 项一致）；
+       *   · 90°/180°/270° 页给出正确的外接矩形（页面只可能按 90° 旋转）。
+       * 注意：pdfjs 6.5 的 `Util.applyTransform` 是**原地改参数并返回 undefined**，
+       * 这里不碰它，直接写矩阵乘法（与 `Util.transform` 同一算式）。
+       */
+      const FIND_CONCURRENCY = 4      // 并发抓页数：单页实测 2–3ms，4 并发足够跑满
+      const FIND_MATCH_LIMIT = 5000   // 命中上限：600 页里 "the" 这类词可能上万条
+      const FIND_SCAN_TICK_MS = 150   // 扫描中刷新计数/结果的节流间隔
+
+      /**
+       * 把一个 `getTextContent()` 结果压成「可检索的页」：
+       * `{ norm, items, pageH }`。`items` 每项带 norm 串里的 `[s,e)` 与视口矩形。
+       */
+      const buildPageIndex = (content, vp) => {
+        const items = []
+        const vpM = vp?.transform
+        if (!vpM || !Array.isArray(content?.items)) {
+          return { norm: '', items, pageH: Number(vp?.height) || 0 }
+        }
+        let norm = ''
+        for (const it of content.items) {
+          if (typeof it?.str !== 'string' || !it.str) continue
+          const t = it.transform
+          if (!t || t.length < 6) continue
+          // m = vp ∘ item.transform（pdfjs.Util.transform 的算式）
+          const m = [
+            vpM[0] * t[0] + vpM[2] * t[1],
+            vpM[1] * t[0] + vpM[3] * t[1],
+            vpM[0] * t[2] + vpM[2] * t[3],
+            vpM[1] * t[2] + vpM[3] * t[3],
+            vpM[0] * t[4] + vpM[2] * t[5] + vpM[4],
+            vpM[1] * t[4] + vpM[3] * t[5] + vpM[5],
+          ]
+          const fontH = Math.hypot(m[2], m[3])   // 视口里「1 个字号的像素数」
+          if (!(fontH > 0)) continue
+          // item.width 与 fontSize 同单位（实测 height/fontSize 恒为 1），
+          // 除以 fontH 得到「以字号为单位的推进长度」；缺失时按半角 0.5em 估。
+          const adv = it.width > 0 ? it.width / fontH : it.str.length * 0.5
+          if (!(adv > 0)) continue
+          const xs = []
+          const ys = []
+          for (const corner of [[0, 0], [adv, 0], [0, 1], [adv, 1]]) {
+            const u = corner[0]
+            const v = corner[1]
+            xs.push(m[0] * u + m[2] * v + m[4])
+            ys.push(m[1] * u + m[3] * v + m[5])
+          }
+          const x0 = Math.min(...xs)
+          const x1 = Math.max(...xs)
+          const y0 = Math.min(...ys)
+          const y1 = Math.max(...ys)
+          if (!(x1 - x0 > 0.1) || !(y1 - y0 > 0.1)) continue
+          // 匹配串：空白折叠 + 小写；换行靠 hasEOL（与 host/pdf.js 的断行判据一致）。
+          // 折叠后的串与偏移一起建，避免「小写化改变长度」把 [s,e) 算错。
+          const text = String(it.str).replace(/[\s\u00a0]+/g, ' ').toLowerCase()
+          const start = norm.length
+          norm += text
+          if (it.hasEOL) norm += ' '
+          items.push({ s: start, e: start + text.length, x0, y0, x1, y1 })
+        }
+        return { norm, items, pageH: Number(vp.height) || 0 }
+      }
+
+      /**
+       * 在一页的索引里找出全部命中。
+       * 命中可能跨 item（一行在文本层里常被拆成好几段），所以先按 item 的
+       * `[s,e)` 取覆盖区间，再按字符比例把 item 矩形裁成命中那一段。
+       */
+      const matchPage = (pageNo, rec, q) => {
+        const out = []
+        if (!rec || !rec.norm || !q) return out
+        let from = 0
+        for (;;) {
+          const at = rec.norm.indexOf(q, from)
+          if (at < 0) return out
+          const end = at + q.length
+          const rects = []
+          let top = Infinity
+          for (const it of rec.items) {
+            if (it.e <= at || it.s >= end) continue
+            const span = it.e - it.s
+            if (!(span > 0)) continue
+            const r0 = Math.max(0, (at - it.s) / span)
+            const r1 = Math.min(1, (end - it.s) / span)
+            if (!(r1 > r0)) continue
+            rects.push([
+              it.x0 + (it.x1 - it.x0) * r0,
+              it.y0,
+              it.x0 + (it.x1 - it.x0) * r1,
+              it.y1,
+            ])
+            if (it.y0 < top) top = it.y0
+          }
+          if (rects.length > 0) {
+            out.push({ pageNo, at, rects, y0: Number.isFinite(top) ? top : 0 })
+            if (out.length >= FIND_MATCH_LIMIT) return out
+          }
+          from = at + Math.max(1, q.length)
+        }
+      }
+
+      const collectMatches = useCallback((q) => {
+        const list = []
+        if (!q) return list
+        const cache = textCacheRef.current
+        const total = Number(pdfRef.current?.doc?.numPages) || 0
+        for (let pageNo = 1; pageNo <= total; pageNo += 1) {
+          const rec = cache.get(pageNo)
+          if (!rec) continue
+          const hits = matchPage(pageNo, rec, q)
+          for (const hit of hits) {
+            list.push(hit)
+            if (list.length >= FIND_MATCH_LIMIT) return list
+          }
+        }
+        return list
+      }, [])
+
+      const clearFindMarks = useCallback(() => {
+        const host = hostRef.current
+        if (!host) return
+        for (const el of host.querySelectorAll('.zr-find-layer')) el.remove()
+      }, [])
+
+      /**
+       * 画某一页的命中块。只处理**已经在 DOM 里**的页；没渲染的页由 pagerendered 补。
+       * `k` 优先取 viewer 的 currentScale（页宽 = viewport.width × scale，二者同源），
+       * 取不到才退回 viewport / clientWidth 估算（与批注层的取值顺序一致）。
+       */
+      const paintFindPage = useCallback((pageNo) => {
+        const host = hostRef.current
+        if (!host) return
+        const pageEl = host.querySelector(`.page[data-page-number="${pageNo}"]`)
+        if (!pageEl) return
+        let layer = pageEl.querySelector('.zr-find-layer')
+        if (!layer) {
+          layer = document.createElement('div')
+          layer.className = 'zr-find-layer'
+          pageEl.appendChild(layer)
+        }
+        layer.textContent = ''
+        const list = findMatchesRef.current.filter((m) => m.pageNo === pageNo)
+        if (list.length === 0) return
+        let k = 0
+        try { k = Number(viewerRef.current?.currentScale) || 0 } catch { k = 0 }
+        if (!(k > 0)) {
+          const base = pageSizesRef.current.get(pageNo)
+          const vp = viewerRef.current?.getPageView?.(pageNo - 1)?.viewport
+          const w = Number(pageEl.clientWidth) || 0
+          if (vp && base?.w > 0) k = vp.width / base.w
+          else if (base?.w > 0 && w > 0) k = w / base.w
+        }
+        if (!(k > 0)) return
+        const cur = findMatchesRef.current[findIndexRef.current]
+        for (const m of list) {
+          const isCurrent = Boolean(cur) && cur.pageNo === m.pageNo && cur.at === m.at
+          for (const r of m.rects) {
+            const box = document.createElement('div')
+            box.className = 'zr-find-hit'
+            if (isCurrent) box.dataset.current = '1'
+            box.style.left = `${Math.round(r[0] * k)}px`
+            box.style.top = `${Math.round(r[1] * k)}px`
+            box.style.width = `${Math.max(1, Math.round((r[2] - r[0]) * k))}px`
+            box.style.height = `${Math.max(1, Math.round((r[3] - r[1]) * k))}px`
+            layer.appendChild(box)
+          }
+        }
+      }, [])
+
+      // 与 decoratePageRef 同一套「先占位、定义完再赋值」：pagerendered 里要用它补画
+      paintFindRef.current = paintFindPage
+
+      /**
+       * 滚到某条命中。
+       *
+       * 不复用 `gotoPage()`：它会压跳转历史（`pushHop`）、把这次查找写成会话高亮
+       * （`setHighlight`）、还会记一条 `jump` 性能度量 —— 三样都不是查找该有的副作用。
+       * 这里只借两件事：`viewer.currentPageNumber`（让官方按需建页）+ 模块级
+       * `scrollPageIntoView()`（几何滚动），重试形状与 `gotoPage` 内部那段一致。
+       */
+      const revealFindMatch = useCallback((match) => {
+        if (!match) return
+        const pageNo = match.pageNo
+        const base = pageSizesRef.current.get(pageNo)
+        const rec = textCacheRef.current.get(pageNo)
+        const pageH = base?.h || rec?.pageH || 0
+        const offset = pageH > 0 ? Math.min(0.9, Math.max(0, (match.y0 - 24) / pageH)) : 0
+        setJumpPage(pageNo)
+        try {
+          if (viewerRef.current) viewerRef.current.currentPageNumber = pageNo
+        } catch { /* 非整数页等异常忽略：滚动那条路仍然会试 */ }
+        let tries = 0
+        const step = () => {
+          if (scrollPageIntoView(hostRef.current, pageNo, offset)) return
+          if (tries >= 40) return   // ~5s 上限：远页懒渲染要等它把页元素建出来
+          tries += 1
+          requestAnimationFrame(() => setTimeout(step, 120))
+        }
+        step()
+      }, [])
+
+      /**
+       * 重算 + 落索引 + 跳转。`advance`：0 = 查询变化（落在首个命中），
+       * ±1 = 上/下一个（回绕）。扫描过程中会反复调用它，所以「是否已经自动跳过」
+       * 用 `findJumpedRef` 记着，避免每来一批结果就把视图拽回第一条。
+       */
+      const applyFindSearch = useCallback((advance = 0) => {
+        const q = findQueryRef.current
+        const prev = findMatchesRef.current[findIndexRef.current]
+        if (!q) {
+          findMatchesRef.current = []
+          findIndexRef.current = -1
+          setFindMatches([])
+          setFindIndex(-1)
+          clearFindMarks()
+          return
+        }
+        const list = collectMatches(q)
+        const len = list.length
+        let next = -1
+        if (len > 0) {
+          if (advance === 0) {
+            next = findJumpedRef.current
+              ? Math.min(Math.max(findIndexRef.current, 0), len - 1)
+              : 0
+          } else {
+            const base = findIndexRef.current < 0 ? -1 : findIndexRef.current
+            next = ((base + advance) % len + len) % len
+          }
+        }
+        findMatchesRef.current = list
+        setFindMatches(list)
+        findIndexRef.current = next
+        setFindIndex(next)
+        if (next < 0) {
+          clearFindMarks()
+          return
+        }
+        if (advance !== 0 || !findJumpedRef.current) {
+          findJumpedRef.current = true
+          revealFindMatch(list[next])
+        }
+        if (prev) paintFindPage(prev.pageNo)
+        paintFindPage(list[next].pageNo)
+      }, [clearFindMarks, collectMatches, paintFindPage, revealFindMatch])
+
+      const goFind = useCallback((delta) => {
+        if (!findQueryRef.current) return
+        applyFindSearch(delta)
+      }, [applyFindSearch])
+
+      const openFind = useCallback(() => {
+        setFindOpen(true)
+        findOpenRef.current = true
+        if (findQueryRef.current) applyFindSearch(0)
+        requestAnimationFrame(() => {
+          const el = findInputRef.current
+          if (!el) return
+          try { el.focus({ preventScroll: true }) } catch { try { el.focus() } catch { /* 忽略 */ } }
+          try { el.select() } catch { /* 忽略 */ }
+        })
+      }, [applyFindSearch])
+
+      /**
+       * 关掉查找条：清高亮，但**保留**查询词、当前下标与文本缓存 ——
+       * 再按一次 Ctrl+F 要能立刻恢复（600 页重扫一遍是没有必要的代价）。
+       */
+      const closeFind = useCallback(() => {
+        setFindOpen(false)
+        findOpenRef.current = false
+        setFindScan(null)
+        clearFindMarks()
+      }, [clearFindMarks])
+
+      const changeFindQuery = useCallback((value) => {
+        const text = String(value ?? '')
+        setFindQuery(text)
+        findQueryRef.current = text.replace(/[\s\u00a0]+/g, ' ').toLowerCase()
+        findJumpedRef.current = false
+        findIndexRef.current = -1
+        applyFindSearch(0)
+      }, [applyFindSearch])
+
+      /** 可见性判据与 `currentReaderSession()` 同源：隐藏面板的子树 getClientRects() 为 0。 */
+      const isReaderVisible = useCallback(() => {
+        try {
+          const host = hostRef.current
+          return Boolean(host && host.getClientRects().length > 0)
+        } catch { return false }
+      }, [])
+
+      /**
+       * 逐页提取。分批并发 + 每批让出一帧（同「预取每页尺寸」那条链路的做法），
+       * 边扫边更新计数；代际 `gen` 对不上就整体作废（换文档 / 刷新）。
+       */
+      const ensureTextIndex = useCallback(async (gen) => {
+        const doc = pdfRef.current?.doc
+        if (!doc) return
+        const cache = textCacheRef.current
+        const total = Number(doc.numPages) || 0
+        const todo = []
+        for (let n = 1; n <= total; n += 1) if (!cache.has(n)) todo.push(n)
+        if (todo.length === 0) { setFindScan(null); return }
+        let done = total - todo.length
+        let lastTick = 0
+        setFindScan({ done, total })
+        for (let base = 0; base < todo.length; base += FIND_CONCURRENCY) {
+          if (gen !== findSeqRef.current) return
+          const batch = todo.slice(base, base + FIND_CONCURRENCY)
+          await Promise.all(batch.map(async (pageNo) => {
+            try {
+              const page = await doc.getPage(pageNo)
+              const vp = page.getViewport({ scale: 1 })
+              const content = await page.getTextContent()
+              if (gen !== findSeqRef.current) return
+              cache.set(pageNo, buildPageIndex(content, vp))
+              try { page.cleanup?.() } catch { /* 取完就还给 pdf.js；失败不影响结果 */ }
+            } catch (error) {
+              // 单页失败也要占位，否则每次重查都会重扫这一页
+              cache.set(pageNo, { norm: '', items: [], pageH: 0 })
+              reportDiag({ event: 'find:page-failed', pageNo, message: String(error?.message ?? error) })
+            }
+          }))
+          if (gen !== findSeqRef.current) return
+          done = total - (todo.length - Math.min(todo.length, base + batch.length))
+          const now = perf.now()
+          if (now - lastTick >= FIND_SCAN_TICK_MS || base + batch.length >= todo.length) {
+            lastTick = now
+            setFindScan({ done, total })
+            applyFindSearch(0)   // 边出边更新「共 m 个」
+          }
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        if (gen === findSeqRef.current) setFindScan(null)
+      }, [applyFindSearch])
+
+      /**
+       * 换文档 / 刷新：作废在飞的提取、清缓存与状态。
+       * 依赖 itemKey 与 reloadToken 两者 —— 后者是「刷新当前 PDF」按钮，文档对象整个重建，
+       * 旧的命中矩形已经对不上新文档，必须一起丢。
+       */
+      useEffect(() => {
+        findSeqRef.current += 1
+        findScanningRef.current = false
+        textCacheRef.current.clear()
+        findQueryRef.current = ''
+        findMatchesRef.current = []
+        findIndexRef.current = -1
+        findJumpedRef.current = false
+        findOpenRef.current = false
+        setFindOpen(false)
+        setFindQuery('')
+        setFindMatches([])
+        setFindIndex(-1)
+        setFindScan(null)
+        clearFindMarks()
+      }, [itemKey, reloadToken, clearFindMarks])
+
+      useEffect(() => { findOpenRef.current = findOpen }, [findOpen])
+
+      /** 展开且已有查询词时启动提取；已经扫完就什么都不做。 */
+      useEffect(() => {
+        if (!findOpen) return
+        if (!String(findQuery ?? '').trim()) return
+        const doc = pdfRef.current?.doc
+        if (!doc) return
+        const total = Number(doc.numPages) || 0
+        if (total > 0 && textCacheRef.current.size >= total) { setFindScan(null); return }
+        if (findScanningRef.current) return
+        findScanningRef.current = true
+        const gen = findSeqRef.current
+        ensureTextIndex(gen).finally(() => { findScanningRef.current = false })
+      }, [findOpen, findQuery, ensureTextIndex])
+
+      /**
+       * 键位。只在**本阅读器面板可见**时拦截：
+       * 右栏 keepMounted 会让隐藏面板继续活着，不过滤的话别的会话/别的分栏会抢键。
+       * Esc 与批注面板的 Esc 都挂在 document 捕获阶段，这里让批注先关（见下方判据）。
+       */
+      useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.defaultPrevented) return
+          if (!isReaderVisible()) return
+          const key = String(event.key ?? '')
+          const mod = event.ctrlKey || event.metaKey
+          if (mod && !event.altKey && !event.shiftKey && key.toLowerCase() === 'f') {
+            event.preventDefault()
+            event.stopPropagation()
+            openFind()
+            return
+          }
+          if (key === 'F3') {
+            event.preventDefault()
+            if (findQueryRef.current) goFind(event.shiftKey ? -1 : 1)
+            else openFind()
+            return
+          }
+          if (key === 'Escape' && findOpenRef.current) {
+            // 批注卡片/菜单也吃 Esc：它们开着时先让它们关，避免一次按键关两层
+            if (annotPanel || annotMenu) return
+            event.preventDefault()
+            closeFind()
+          }
+        }
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
+      }, [annotMenu, annotPanel, closeFind, goFind, isReaderVisible, openFind])
+
+      /** 计数文案：有命中就报「第 n 个 / 共 m 个」；还在扫且没命中就报进度；扫完 0 条明确 0/0。 */
+      const findCountText = (() => {
+        if (!findOpen) return ''
+        if (!String(findQuery ?? '').trim()) return ''
+        if (findMatches.length > 0) {
+          return t('findCount', {
+            current: Math.min(findMatches.length, Math.max(1, findIndex + 1)),
+            total: findMatches.length,
+          })
+        }
+        if (findScan) return t('findScanning', { done: findScan.done, total: findScan.total })
+        return t('findCountEmpty')
+      })()
 
       /* ---------- 滚动性能探针 ---------- */
       useEffect(() => {
@@ -10782,9 +11306,81 @@ const placeBox = (el, l, t, wd, ht) => {
               if (!annotListOpen) loadAnnotationsFromZotero()
             },
           }, `✎${annotationCount > 0 ? ` ${annotationCount}` : ''}`),
+          /*
+           * 当前文档查找。用户明确要求「工具条上要有搜索按钮」，不能只有 Ctrl+F；
+           * 与快捷键共用同一份 findOpen 状态，所以两种入口的选中态天然一致，
+           * 再点一次即关闭（与工具栏其它开关式按钮同一套 data-on 语义）。
+           */
+          h('button', {
+            className: 'zr-btn',
+            'data-on': findOpen ? '1' : '0',
+            'aria-pressed': findOpen ? 'true' : 'false',
+            'aria-label': t('findInDoc'),
+            title: t('findInDoc'),
+            disabled: status !== 'ready',
+            onClick: () => (findOpen ? closeFind() : openFind()),
+          }, '🔍'),
         ),
 
         // 正文
+        /*
+         * 查找条：工具条下方独立一行，收起时整行不渲染（不占位、不留空边）。
+         * 输入框自己处理 Enter / Shift+Enter（上/下一个）与 Esc（关闭）；
+         * Ctrl+F、F3 走 document 层那条键位监听（见 apply 里的键位 effect）。
+         */
+        findOpen
+          ? h('div', { className: 'zr-findbar', ref: finderRef },
+            h('input', {
+              type: 'text',
+              ref: findInputRef,
+              value: findQuery,
+              placeholder: t('findPlaceholder'),
+              'aria-label': t('findPlaceholder'),
+              onChange: (e) => changeFindQuery(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  goFind(e.shiftKey ? -1 : 1)
+                  return
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  closeFind()
+                }
+              },
+            }),
+            /*
+             * 计数区：每次结果变化都要说话（aria-live），无命中明确显示 0/0，
+             * 不做「静默清空」—— 用户报过「搜了没反应，不知道是没匹配还是坏了」。
+             */
+            h('span', {
+              className: 'zr-find-count',
+              role: 'status',
+              'aria-live': 'polite',
+            }, findCountText),
+            h('button', {
+              className: 'zr-btn',
+              title: t('findPrev'),
+              'aria-label': t('findPrev'),
+              disabled: findMatches.length === 0,
+              onClick: () => goFind(-1),
+            }, '↑'),
+            h('button', {
+              className: 'zr-btn',
+              title: t('findNext'),
+              'aria-label': t('findNext'),
+              disabled: findMatches.length === 0,
+              onClick: () => goFind(1),
+            }, '↓'),
+            h('button', {
+              className: 'zr-btn',
+              title: t('findClose'),
+              'aria-label': t('findClose'),
+              onClick: closeFind,
+            }, '×'),
+          )
+          : null,
+
         h('div', { className: 'zr-page', ref: scrollRef },
           /**
            * 官方 viewer 的挂载点。
