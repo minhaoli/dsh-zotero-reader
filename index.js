@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { loadLibrary, loadAnnotations, loadOneItem } from './host/zotero.js'
 import { extractText, searchChunks, outlineOf } from './host/pdf.js'
-import { translateDocument, translateSelection, pickSelection } from './host/translate.js'
+import { translateSelection, pickSelection } from './host/translate.js'
 import { parseWithMineru, sectionsFromMarkdown } from './host/mineru.js'
 import { searchTool, readTool, askTool } from './host/tools.js'
 import {
@@ -136,7 +136,6 @@ function applyInner(ctx, config = {}) {
    * 落盘时也保持这个分桶结构（`{ 会话id: [key...] }`），重启后隔离关系不变。
    */
   const searched = new Map()
-  const translating = new Map()   // itemKey:lang → 进度
   const state = { libraryCache: null, libraryAt: 0 }
 
   // 数据目录：显式配置 > 环境变量 > ~/.dsh-zotero-reader。
@@ -445,7 +444,7 @@ function applyInner(ctx, config = {}) {
   } catch { /* 没有数据目录就不持久化，只保留内存缓存 */ }
 
   const deps = {
-    findItem, documentOf, library, docs, searched, translating, settings, dataDir, cacheDir, ctx,
+    findItem, documentOf, library, docs, searched, settings, dataDir, cacheDir, ctx,
     writeConfig,
     /**
      * 网络出口。
@@ -565,8 +564,6 @@ function normalizeConfig(config) {
   return {
     zoteroDataDir: config.zoteroDataDir ?? '',
     dataDir: config.dataDir ?? '',
-    translateConcurrency: clampInt(config.translateConcurrency, 1, 16, 4),
-    translateChunkChars: clampInt(config.translateChunkChars, 500, 8000, 2400),
     selectionProvider: config.selectionProvider ?? '',
     selectionModel: config.selectionModel ?? '',
     mineruMode: ['none', 'local', 'cloud'].includes(config.mineruMode) ? config.mineruMode : 'none',
@@ -597,7 +594,7 @@ function normalizeConfig(config) {
     legacyMineruToken: typeof config.mineruCloudToken === 'string' ? config.mineruCloudToken.trim() : '',
     legacyCloudApiKey: typeof config.cloudApiKey === 'string' ? config.cloudApiKey.trim() : '',
     /**
-     * 各功能的模型覆盖：`{ translate|explain|ask|docTranslate: { provider, model, reasoningEffort } }`。
+     * 各功能的模型覆盖：`{ translate|explain|ask: { provider, model, reasoningEffort } }`。
      * 空字符串表示跟随会话当前模型 —— 这是默认，也是用户最容易理解的行为。
      */
     features: normalizeFeatures(config.features),
@@ -610,7 +607,7 @@ function normalizeConfig(config) {
 }
 
 /** 功能键：新增功能时只改这里，前后端契约一起变。 */
-export const FEATURE_KEYS = ['translate', 'explain', 'ask', 'docTranslate']
+export const FEATURE_KEYS = ['translate', 'explain', 'ask']
 /** 默认推理档位回退序列（与 host/translate.js 原硬编码一致）。 */
 export const DEFAULT_TRANSLATE_EFFORTS = ['off', 'low', null]
 
@@ -690,8 +687,6 @@ function publicSettingsView(settings, resolvedDataDir) {
   return {
     zoteroDataDir: settings.zoteroDataDir,
     dataDir: settings.dataDir,
-    translateConcurrency: settings.translateConcurrency,
-    translateChunkChars: settings.translateChunkChars,
     selectionProvider: settings.selectionProvider,
     selectionModel: settings.selectionModel,
     mineruMode: settings.mineruMode,
@@ -755,12 +750,6 @@ function buildConfigPatch(body) {
     if (body[key] === undefined) continue
     if (typeof body[key] !== 'string') throw new Error(`${key} 必须是字符串`)
     patch[key] = body[key].trim()
-  }
-  for (const [key, min, max] of [['translateConcurrency', 1, 16], ['translateChunkChars', 500, 8000]]) {
-    if (body[key] === undefined) continue
-    const n = Number(body[key])
-    if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${key} 必须是 ${min}–${max} 之间的数字`)
-    patch[key] = Math.round(n)
   }
   if (body.mineruMode !== undefined) {
     if (!['none', 'local', 'cloud'].includes(body.mineruMode)) {
@@ -1717,59 +1706,6 @@ async function handleRequest(rctx, req, res, deps) {
       return
     }
 
-    // 全文翻译：按页产出，磁盘缓存
-    if (sub === '/translate') {
-      const item = await deps.findItem(url.searchParams.get('key') ?? '')
-      const force = url.searchParams.get('force') === '1'
-      if (!force) {
-        const cached = await readCache(deps.dataDir, `${item.itemKey}.zh.json`)
-        if (cached) {
-          sendJson(res, 200, { pages: cached.pages, cached: true })
-          return
-        }
-      }
-      const jobKey = `${item.itemKey}:zh`
-      const running = deps.translating.get(jobKey)
-      if (running) {
-        sendJson(res, 409, { error: '正在翻译中', done: running.done, total: running.total })
-        return
-      }
-      const doc = await deps.documentOf(item)
-      const job = { done: 0, total: doc.pages.filter((p) => p.trim()).length }
-      deps.translating.set(jobKey, job)
-      try {
-        const result = await translateDocument(llmFacade(rctx), doc, {
-          chunkChars: deps.settings.translateChunkChars,
-          concurrency: deps.settings.translateConcurrency,
-          override: selectionOverride(deps.settings, 'docTranslate'),
-          efforts: deps.settings.translateEfforts,
-          onPage: () => { job.done += 1 },
-        })
-        await writeCache(deps.dataDir, `${item.itemKey}.zh.json`, {
-          key: item.itemKey,
-          title: item.title,
-          pages: result.pages,
-          approxPages: Boolean(doc.approxPages),
-          at: Date.now(),
-        })
-        sendJson(res, 200, {
-          pages: result.pages,
-          failed: result.failed,
-          approxPages: Boolean(doc.approxPages),
-          cached: false,
-        })
-      } finally {
-        deps.translating.delete(jobKey)
-      }
-      return
-    }
-
-    if (sub === '/translate/progress') {
-      const job = deps.translating.get(`${url.searchParams.get('key')}:zh`)
-      sendJson(res, 200, job ? { running: true, done: job.done, total: job.total } : { running: false })
-      return
-    }
-
     // 划词：翻译 / 解释
     if (sub === '/selection' && method === 'POST') {
       const body = await readJsonBody(req)
@@ -1794,24 +1730,6 @@ async function handleRequest(rctx, req, res, deps) {
   } catch (error) {
     sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
   }
-}
-
-/* ---------------------------------------------------------------- 缓存 */
-
-async function readCache(dataDir, filename) {
-  try {
-    const raw = await fsp.readFile(path.join(dataDir, 'translate', filename), 'utf8')
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed?.pages) ? parsed : null
-  } catch { return null }
-}
-
-async function writeCache(dataDir, filename, value) {
-  try {
-    const dir = path.join(dataDir, 'translate')
-    await fsp.mkdir(dir, { recursive: true })
-    await fsp.writeFile(path.join(dir, filename), JSON.stringify(value), 'utf8')
-  } catch { /* 缓存失败不该让翻译失败 */ }
 }
 
 export { pickSelection }

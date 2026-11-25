@@ -258,7 +258,7 @@ check('GET /config 回 embeddingApiKeyEnv + Present',
   && c0json.config?.embeddingApiKeyPresent === true)
 check('GET /config cloudUserID 被 trim', c0json.config?.cloudUserID === '1234567', JSON.stringify(c0json.config?.cloudUserID))
 check('GET /config resolvedDataDir 是本进程的 dataDir', c0json.config?.resolvedDataDir === C0.dir)
-check('GET /config features 覆盖四个键',
+check('GET /config features 覆盖三个键',
   JSON.stringify(Object.keys(c0json.config?.features ?? {}).sort()) === JSON.stringify([...FEATURE_KEYS].sort()))
 check('GET /config features.translate.provider 被 trim', c0json.config?.features?.translate?.provider === 'p1',
   JSON.stringify(c0json.config?.features?.translate))
@@ -317,8 +317,6 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
       cloudApiKeyEnv: `  ${TEST_ENV_CLOUD}  `,
       embeddingApiKeyEnv: TEST_ENV_EMBED,
       cloudUserID: ' 7654321 ',
-      translateConcurrency: '6',
-      translateChunkChars: '3000',
       mineruLocalUrl: '  http://127.0.0.1:9000  ',
       features: { translate: { provider: 'pp', model: 'mm' } },
       translateEfforts: ['high', 'high', ' low ', null, 5, ''],
@@ -336,8 +334,9 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
   check('POST /config 走过 configEditor（写入一次）', editor.state.edits.length === 1,
     `edits=${editor.state.edits.length}`)
   const written = editor.state.edits[0] ?? {}
-  check('写入值：translateConcurrency 数字化为 6', written.translateConcurrency === 6, String(written.translateConcurrency))
-  check('写入值：translateChunkChars 数字化为 3000', written.translateChunkChars === 3000, String(written.translateChunkChars))
+  check('写入值：已移除的整篇翻译字段不再写入',
+    written.translateConcurrency === undefined && written.translateChunkChars === undefined,
+    `${JSON.stringify(written.translateConcurrency)} / ${JSON.stringify(written.translateChunkChars)}`)
   check('写入值：mineruTokenEnv 已 trim', written.mineruTokenEnv === TEST_ENV_MINERU,
     JSON.stringify(written.mineruTokenEnv))
   check('写入值：cloudApiKeyEnv 已 trim', written.cloudApiKeyEnv === TEST_ENV_CLOUD,
@@ -351,8 +350,9 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
     JSON.stringify(written.cloudApiKey))
   check('写入值：不含运行时解析值 mineruToken', written.mineruToken === undefined)
   check('写入值：不含运行时解析值 embeddingApiKey', written.embeddingApiKey === undefined)
-  check('写入值：features 四键齐全', FEATURE_KEYS.every((k) => written.features?.[k]),
+  check('写入值：features 三键齐全', FEATURE_KEYS.every((k) => written.features?.[k]),
     Object.keys(written.features ?? {}).join(','))
+  check('FEATURE_KEYS 不再包含 docTranslate', !FEATURE_KEYS.includes('docTranslate'), FEATURE_KEYS.join(','))
   check('写入值：features.translate 生效', written.features?.translate?.provider === 'pp',
     JSON.stringify(written.features?.translate))
   check('写入值：translateEfforts 已归一化（去重 / trim / 保留 null / 丢非法）',
@@ -383,9 +383,6 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
     ['translateEfforts=字符串', { translateEfforts: 'off' }],
     ['translateEfforts=对象', { translateEfforts: { 0: 'off' } }],
     ['translateEfforts=null', { translateEfforts: null }],
-    ['translateConcurrency=0', { translateConcurrency: 0 }],
-    ['translateConcurrency=99', { translateConcurrency: 99 }],
-    ['translateChunkChars=100', { translateChunkChars: 100 }],
     ['mineruMode=auto', { mineruMode: 'auto' }],
     ['mineruCloudToken 明文', { mineruCloudToken: 'x' }],
     ['cloudApiKey 明文', { cloudApiKey: 'x' }],
@@ -431,8 +428,6 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
 const LEGACY = {
   zoteroDataDir: '',
   dataDir: '',
-  translateConcurrency: 4,
-  translateChunkChars: 2400,
   selectionProvider: '',
   selectionModel: '',
   mineruMode: 'cloud',
@@ -492,7 +487,7 @@ for (const [label, features] of [
   ['数字', 42],
 ]) {
   const r = await settingsOf(features === undefined ? {} : { features })
-  check(`features=${label} → 响应 200 且补成四键默认结构`,
+  check(`features=${label} → 响应 200 且补成三键默认结构`,
     r.res.statusCode === 200 && defaultShape(r.res.json?.features),
     r.res.text.slice(0, 90))
 }
@@ -509,15 +504,15 @@ for (const [label, features] of [
     feats.translate?.provider === '' && feats.translate?.model === '' && feats.translate?.reasoningEffort === '')
   check('features 只配一半时其余键补默认',
     feats.explain?.provider === 'e' && feats.explain?.model === 'em'
-    && feats.translate?.provider === '' && feats.ask?.provider === '' && feats.docTranslate?.provider === '',
+    && feats.translate?.provider === '' && feats.ask?.provider === '',
     JSON.stringify(feats))
 }
 
 {
-  const r = await settingsOf({ features: { nope: { provider: 'x', model: 'y' } } })
-  check('features 未知键被丢弃',
-    !Object.keys(r.res.json?.features ?? {}).includes('nope'),
-    Object.keys(r.res.json?.features ?? {}).join(','))
+  const r = await settingsOf({ features: { nope: { provider: 'x', model: 'y' }, docTranslate: { provider: 'x', model: 'y' } } })
+  const keys = Object.keys(r.res.json?.features ?? {})
+  check('features 未知键被丢弃（含已删除的 docTranslate）',
+    !keys.includes('nope') && !keys.includes('docTranslate'), keys.join(','))
 }
 
 /* ------------------------------ 10) translateEfforts 默认值与归一化边界 */
@@ -614,6 +609,16 @@ const O5b = await selectionRun({
 }, 'translate')
 check('features.explain 不影响「翻译」（回落 selection*）',
   O5b.provider === 'old-p' && O5b.model === 'old-m', `${O5b.provider}/${O5b.model}`)
+
+/* ------------------- 12) 整篇翻译后端已删除：路由不再存在（404） */
+
+{
+  boot({})
+  const t1 = await call('/zotero-reader/translate?key=ABC')
+  check('GET /translate 已删除 → 404', t1.statusCode === 404, `status=${t1.statusCode}`)
+  const t2 = await call('/zotero-reader/translate/progress?key=ABC')
+  check('GET /translate/progress 已删除 → 404', t2.statusCode === 404, `status=${t2.statusCode}`)
+}
 
 const failed = results.filter((r) => !r.ok).length
 console.log(`\n${failed === 0 ? '全部通过' : `${failed} 项失败`}（共 ${results.length} 项）`)

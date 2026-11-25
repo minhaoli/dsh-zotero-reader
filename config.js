@@ -67,8 +67,6 @@ export const Config = z
     zoteroDataDir: z.string().description('Zotero 数据目录；留空则自动探测').default(''),
     dataDir: z.string().description('缓存目录；留空则在 ~/.dsh-zotero-reader').default(''),
 
-    translateConcurrency: z.number().description('翻译并发数').min(1).max(16).default(4),
-    translateChunkChars: z.number().description('翻译分段字符数').min(500).max(8000).default(2400),
     selectionProvider: z.string().description('划词翻译的 provider；留空跟随宿主模型').default(''),
     selectionModel: z.string().description('划词翻译的 model；留空跟随宿主模型').default(''),
 
@@ -103,12 +101,11 @@ export const Config = z
       .description('Embedding API key 的环境变量名（默认 SILICONFLOW_API_KEY）')
       .default('SILICONFLOW_API_KEY'),
 
-    /** 各功能的模型覆盖：`{ translate|explain|ask|docTranslate: { provider, model, reasoningEffort } }`。 */
+    /** 各功能的模型覆盖：`{ translate|explain|ask: { provider, model, reasoningEffort } }`。 */
     features: z.object({
       translate: featureSchema('划词翻译'),
       explain: featureSchema('解释'),
       ask: featureSchema('提问'),
-      docTranslate: featureSchema('整篇翻译'),
     }).description('各功能的模型覆盖；三项都留空表示跟随会话当前模型').default({}),
 
     /**

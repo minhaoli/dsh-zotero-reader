@@ -8,9 +8,6 @@
         zoteroDataDir: ''
         # 缓存目录；留空则在插件数据目录下
         dataDir: ''
-        # 翻译并发与分段
-        translateConcurrency: 4
-        translateChunkChars: 2400
         # 划词翻译用的模型；留空则跟随会话当前模型
         selectionProvider: ''
         selectionModel: ''

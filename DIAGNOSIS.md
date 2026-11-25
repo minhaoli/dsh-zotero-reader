@@ -192,7 +192,7 @@ Zotero 官方 Web API（`https://api.zotero.org`）读写端点与本地 API 是
 | 缩略图栏 | `Thumbs.tsx` | 无 | 中等价值，侧栏窄，收益有限 |
 | 全文搜索 | `PdfViewer.search()` 返回 `{page,count}` | 无 | 高价值，pdf.js 有现成 `PDFFindController` |
 | 文本视图（重排阅读） | `TextViewer.tsx` 38.8KB + `markdown.ts` | 无 | 高成本，`markdown.ts` 10.8KB 是一整套 md 渲染 |
-| 页面翻译 | `page-translation.ts` + `pdf2zh.ts` | 只有整篇 `/translate`，前端入口已移除 | 中等，可接回现有后端 |
+| 页面翻译 | `page-translation.ts` + `pdf2zh.ts` | 前后端均已删除（前端入口先移除，host 后端随后清理） | 中等，需从零实现 |
 | 论文摘要 | `paper-summary.ts` + `PaperSummary.tsx` | 有 summary 相关（20 处） | 需确认完整度 |
 | 参考文献抽取 | `references.ts` | 无 | 低，Zotero 本身能做 |
 | 图片抓取送 LLM | `CaptureToolbar.tsx` / `TextCapture.tsx` | 无 | 中等，vlm 场景有用 |
