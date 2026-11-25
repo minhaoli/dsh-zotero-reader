@@ -964,6 +964,45 @@ function llmFacade(rctx) {
   return { llm: rctx.llm, agentDefaultModel: rctx.agentDefaultModel }
 }
 
+/**
+ * 当前可用的服务商/模型目录。
+ *
+ * 只投影 `id` 和展示名：`LlmProviderInfo` / `LlmModelInfo` 本身不含 api key，
+ * 这里仍显式挑字段，避免以后上游加字段时被原样带出去。
+ * 任何一层失败（服务不可用、某个 provider 的 listModels 抛错）都降级为空目录，
+ * 前端据此退回手输入，不影响整页。
+ */
+async function modelCatalog(llm) {
+  const providers = []
+  const models = {}
+  try {
+    const listed = typeof llm?.listProviders === 'function' ? llm.listProviders() : []
+    for (const item of listed ?? []) {
+      if (!item || typeof item.id !== 'string' || !item.id) continue
+      providers.push({
+        id: item.id,
+        name: typeof item.name === 'string' && item.name ? item.name : item.id,
+      })
+    }
+  } catch {
+    return { providers: [], models: {} }
+  }
+  for (const provider of providers) {
+    try {
+      const list = typeof llm?.listModels === 'function' ? await llm.listModels(provider.id) : []
+      models[provider.id] = (list ?? [])
+        .filter((model) => model && typeof model.id === 'string' && model.id)
+        .map((model) => ({
+          id: model.id,
+          name: typeof model.name === 'string' && model.name ? model.name : model.id,
+        }))
+    } catch {
+      models[provider.id] = []
+    }
+  }
+  return { providers, models }
+}
+
 async function handleRequest(rctx, req, res, deps) {
   const parsed = new URL(req.url ?? '/', 'http://localhost')
   // prefix 路由下 req.url 通常带完整前缀；这里兼容「已被宿主剥掉」的情况，
@@ -1072,6 +1111,47 @@ async function handleRequest(rctx, req, res, deps) {
      * 明文一旦进了响应，它就会同时出现在浏览器内存、devtools 网络面板、
      * 以及任何抓包/日志里 —— 用户填的是 zotero.org 账号级凭据，泄露面太大。
      */
+    /**
+     * 服务商/模型目录（只读）。供配置页把手输框升级成可筛选的下拉；
+     * 拿不到就返回空目录，前端会退回手输入。
+     */
+    if (sub === '/models' && method === 'GET') {
+      return sendJson(res, 200, await modelCatalog(rctx.llm))
+    }
+
+    /**
+     * 单个模型的能力元数据：目前只暴露推理档位（id + 展示名 + 默认值），
+     * 供配置页的档位下拉使用。失败时回空列表而不是让页面报错。
+     */
+    if (sub === '/model-info' && method === 'GET') {
+      const provider = (url.searchParams.get('provider') ?? '').trim()
+      const model = (url.searchParams.get('model') ?? '').trim()
+      if (!provider || !model) {
+        return sendJson(res, 400, { error: 'provider 和 model 都不能为空' })
+      }
+      try {
+        const info = typeof rctx.llm?.resolveModelInfo === 'function'
+          ? await rctx.llm.resolveModelInfo(provider, model)
+          : null
+        const efforts = (info?.reasoning?.efforts ?? [])
+          .filter((effort) => effort && typeof effort.id === 'string' && effort.id)
+          .map((effort) => ({
+            id: effort.id,
+            name: typeof effort.name === 'string' && effort.name ? effort.name : effort.id,
+          }))
+        return sendJson(res, 200, {
+          efforts,
+          defaultEffort: info?.reasoning?.defaultEffort ?? null,
+        })
+      } catch (error) {
+        return sendJson(res, 200, {
+          efforts: [],
+          defaultEffort: null,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
     if (sub === '/settings' && method === 'GET') {
       const s = deps.settings
       return sendJson(res, 200, {

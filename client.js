@@ -232,6 +232,7 @@ window.__ModuleLoader__.load({
       cfgProviderPlaceholder: 'provider',
       cfgModelPlaceholder: 'model',
       cfgEffortPlaceholder: '推理档位',
+      cfgEffortModelDefault: '（模型默认）',
       cfgTranslate: '翻译',
       cfgEfforts: '推理档位回退序列',
       cfgEffortsHint: '逗号分隔，按顺序尝试；{{default}} 表示模型默认。例如 off, low, {{default}}',
@@ -386,6 +387,7 @@ window.__ModuleLoader__.load({
       cfgProviderPlaceholder: 'provider',
       cfgModelPlaceholder: 'model',
       cfgEffortPlaceholder: 'reasoning effort',
+      cfgEffortModelDefault: '(model default)',
       cfgTranslate: 'Translation',
       cfgEfforts: 'Reasoning effort fallbacks',
       cfgEffortsHint: 'Comma separated, tried in order; {{default}} means the model default. E.g. off, low, {{default}}',
@@ -2789,11 +2791,15 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState(null)
       const [draft, setDraft] = useState(null)
       const [effortsText, setEffortsText] = useState('')
+      const [catalog, setCatalog] = useState(null)
+      const [effortsByModel, setEffortsByModel] = useState({})
       const [error, setError] = useState(null)
       const [notice, setNotice] = useState(null)
       const [saving, setSaving] = useState(false)
       const [testing, setTesting] = useState(false)
       const [testResult, setTestResult] = useState(null)
+      /** 已请求过档位的 provider/model，避免输入框反复失焦时重复打请求。 */
+      const effortRequests = useRef(new Set())
 
       const adopt = useCallback((data) => {
         setState(data)
@@ -2832,6 +2838,50 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      /**
+       * 拉一次服务商/模型目录。失败时保持 catalog=null：
+       * 渲染层据此只画普通输入框，不显示错误、不阻塞整页。
+       */
+      useEffect(() => {
+        let alive = true
+        fetchJson(`${API}/models`)
+          .then((data) => {
+            if (!alive) return
+            setCatalog({
+              providers: Array.isArray(data?.providers) ? data.providers : [],
+              models: data?.models && typeof data.models === 'object' ? data.models : {},
+            })
+          })
+          .catch(() => { /* 目录拿不到就降级为手输 */ })
+        return () => { alive = false }
+      }, [])
+
+      /** 某个 provider/model 的推理档位；失败也记成空数组，前端退回手输。 */
+      const loadEfforts = useCallback(async (provider, model) => {
+        const p = String(provider ?? '').trim()
+        const m = String(model ?? '').trim()
+        if (!p || !m) return
+        const key = `${p}\u0000${m}`
+        if (effortRequests.current.has(key)) return
+        effortRequests.current.add(key)
+        try {
+          const data = await fetchJson(
+            `${API}/model-info?provider=${encodeURIComponent(p)}&model=${encodeURIComponent(m)}`,
+          )
+          setEffortsByModel((prev) => ({ ...prev, [key]: Array.isArray(data?.efforts) ? data.efforts : [] }))
+        } catch {
+          setEffortsByModel((prev) => ({ ...prev, [key]: [] }))
+        }
+      }, [])
+
+      // 目录到了之后，给已有配置的 provider/model 预取档位（失败静默）。
+      useEffect(() => {
+        if (!catalog) return
+        for (const row of Object.values(draft?.features ?? {})) {
+          if (row?.provider && row?.model) void loadEfforts(row.provider, row.model)
+        }
+      }, [catalog, draft?.features, loadEfforts])
+
       if (view === 'summary') return t('configSummary')
 
       if (!draft) {
@@ -2860,6 +2910,18 @@ window.__ModuleLoader__.load({
         control,
         hint ? h('span', { className: 'zr-cfg-hint' }, hint) : null,
       )
+
+      /** 目录只在 host 返回时才用；null / 空目录都让输入框自然退回手输。 */
+      const providers = Array.isArray(catalog?.providers) ? catalog.providers : []
+      const modelsOf = (provider) => {
+        const id = String(provider ?? '').trim()
+        const list = id && catalog?.models ? catalog.models[id] : null
+        return Array.isArray(list) ? list : []
+      }
+      const effortsOf = (provider, model) => {
+        const key = `${String(provider ?? '').trim()}\u0000${String(model ?? '').trim()}`
+        return Array.isArray(effortsByModel[key]) ? effortsByModel[key] : null
+      }
 
       /**
        * 环境变量名输入 + 状态行。
@@ -2997,27 +3059,62 @@ window.__ModuleLoader__.load({
         h('section', { className: 'zr-cfg-section' },
           h('div', { className: 'zr-cfg-title' }, t('cfgModels')),
           h('div', { className: 'zr-cfg-hint' }, t('cfgModelsHint')),
+          h('datalist', { id: 'zr-cfg-provider-options' },
+            ...providers.map((provider) => h('option', { key: provider.id, value: provider.id }, provider.name))),
           ...Object.keys(featureLabels).map((name) => h('div', { className: 'zr-cfg-feature', key: name },
             h('div', { className: 'zr-cfg-feature-name' }, featureLabels[name]),
             h('div', { className: 'zr-cfg-grid3' },
               h('input', {
                 className: 'zr-input zr-cfg-input',
                 placeholder: t('cfgProviderPlaceholder'),
+                list: 'zr-cfg-provider-options',
                 value: draft.features?.[name]?.provider ?? '',
-                onChange: (e) => setFeature(name, 'provider', e.target.value),
+                onChange: (e) => {
+                  const provider = e.target.value
+                  setFeature(name, 'provider', provider)
+                  const model = draft.features?.[name]?.model
+                  if (provider && model) void loadEfforts(provider, model)
+                },
               }),
               h('input', {
                 className: 'zr-input zr-cfg-input',
                 placeholder: t('cfgModelPlaceholder'),
+                list: `zr-cfg-model-options-${name}`,
                 value: draft.features?.[name]?.model ?? '',
                 onChange: (e) => setFeature(name, 'model', e.target.value),
+                onBlur: (e) => {
+                  const model = e.target.value.trim()
+                  const provider = draft.features?.[name]?.provider
+                  if (provider && model) void loadEfforts(provider, model)
+                },
               }),
-              h('input', {
-                className: 'zr-input zr-cfg-input',
-                placeholder: t('cfgEffortPlaceholder'),
-                value: draft.features?.[name]?.reasoningEffort ?? '',
-                onChange: (e) => setFeature(name, 'reasoningEffort', e.target.value),
-              }),
+              (() => {
+                const provider = draft.features?.[name]?.provider ?? ''
+                const model = draft.features?.[name]?.model ?? ''
+                const efforts = effortsOf(provider, model)
+                if (efforts && efforts.length > 0) {
+                  return h('select', {
+                    className: 'zr-input zr-cfg-input',
+                    value: draft.features?.[name]?.reasoningEffort ?? '',
+                    onChange: (e) => setFeature(name, 'reasoningEffort', e.target.value),
+                  },
+                  h('option', { value: '' }, t('cfgEffortModelDefault')),
+                  ...efforts.map((effort) => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id)))
+                }
+                return h('input', {
+                  className: 'zr-input zr-cfg-input',
+                  placeholder: t('cfgEffortPlaceholder'),
+                  value: draft.features?.[name]?.reasoningEffort ?? '',
+                  onChange: (e) => setFeature(name, 'reasoningEffort', e.target.value),
+                  onBlur: () => {
+                    const current = draft.features?.[name]?.model
+                    if (provider && current) void loadEfforts(provider, current)
+                  },
+                })
+              })(),
+              h('datalist', { id: `zr-cfg-model-options-${name}` },
+                ...modelsOf(draft.features?.[name]?.provider)
+                  .map((model) => h('option', { key: model.id, value: model.id }, model.name))),
             ),
           )),
         ),
