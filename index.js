@@ -188,10 +188,13 @@ function applyInner(ctx, config = {}) {
   const settings = normalizeConfig(config)
   const settingsFile = path.join(dataDir, 'settings.json')
   let legacyApplied = []
+  let legacyPlaintext = false
   try {
     const legacy = JSON.parse(fs.readFileSync(settingsFile, 'utf8'))
     if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
       legacyApplied = applyLegacySettings(settings, legacy)
+      legacyPlaintext = [legacy.mineruCloudToken, legacy.cloudApiKey]
+        .some((value) => typeof value === 'string' && value.trim())
     }
   } catch { /* 没有旧文件，或内容坏了：按 config 走 */ }
   if (legacyApplied.length > 0) {
@@ -200,6 +203,13 @@ function applyInner(ctx, config = {}) {
       + '请到 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」重新设置；'
       + '在那里保存后该文件会自动改名，不再参与读取。'
       + `（${settingsFile}）`,
+    )
+  }
+  if (legacyPlaintext || settings.legacyMineruToken || settings.legacyCloudApiKey) {
+    console.warn(
+      '[dsh-zotero-reader] 检测到旧版的明文 key（mineruCloudToken / cloudApiKey），运行时已忽略。'
+      + '请把值放进 ~/.dsh/.env（如 MINERU_API_TOKEN=… / ZOTERO_API_KEY=…），'
+      + '并在插件页把 mineruTokenEnv / cloudApiKeyEnv 指向变量名；随后删除配置里的明文字段。',
     )
   }
 
@@ -222,21 +232,35 @@ function applyInner(ctx, config = {}) {
     if (!target) {
       throw new Error('configEditor 里找不到本插件的可编辑条目（dsh-zotero-reader）')
     }
-    const merged = { ...settings, ...patch }
+    const currentRaw = target.options.config && typeof target.options.config === 'object'
+      ? structuredClone(target.options.config)
+      : {}
+    const nextConfig = { ...currentRaw, ...patch }
+    if (nextConfig.translateEfforts !== undefined) {
+      nextConfig.translateEfforts = normalizeEfforts(nextConfig.translateEfforts)
+    }
     // 表单可能只提交某个功能的一项：按功能、按字段合并，别把其它配置抹成默认值。
     if (patch.features !== undefined) {
-      merged.features = { ...settings.features }
+      nextConfig.features = normalizeFeatures(nextConfig.features)
       for (const [name, row] of Object.entries(patch.features)) {
-        merged.features[name] = { ...(settings.features[name] ?? {}), ...row }
+        nextConfig.features[name] = { ...(nextConfig.features[name] ?? {}), ...row }
       }
     }
-    const next = normalizeConfig(merged)
-    await editor.edit(target, () => ({ ...next }))
+    /**
+     * 写回前剥掉旧明文与运行时解析值。
+     *
+     * 配置里只允许出现变量名（`*Env`）；明文 key 一旦被写回 YAML，
+     * 「改成环境变量」就白做了。旧版本留下的明文字段顺手清掉。
+     */
+    for (const key of ['mineruCloudToken', 'cloudApiKey', 'mineruToken', 'embeddingApiKey', 'legacyMineruToken', 'legacyCloudApiKey']) {
+      delete nextConfig[key]
+    }
+    await editor.edit(target, () => ({ ...nextConfig }))
     // 配置已落到 profile patch，旧 json 不再需要：改名保留，避免下次启动被回退值复活。
     try {
       if (fs.existsSync(settingsFile)) fs.renameSync(settingsFile, `${settingsFile}.migrated-${Date.now()}`)
     } catch { /* 改名失败不影响配置已保存 */ }
-    return next
+    return normalizeConfig(nextConfig)
   }
 
   /* ------------------------------------------------------------ 库与文档 */
@@ -515,7 +539,29 @@ function makeHostDiag(getDataDir) {
   }
 }
 
+/** 环境变量名归一化：空串回落默认名，前后空格去掉。 */
+function normalizeEnvName(value, fallback) {
+  const name = typeof value === 'string' ? value.trim() : ''
+  return name || fallback
+}
+
+/**
+ * 从环境变量解析 secret。
+ *
+ * 安全约束：配置里只存**变量名**，值只能来自 DSH 启动时加载的 `.env` / 系统环境。
+ * 这里刻意不回退到配置里的旧明文字段 —— 否则「改成环境变量」只是换了个摆放位置。
+ */
+function resolveSecret(envName) {
+  const name = String(envName || '').trim()
+  if (!name) return ''
+  const value = process.env[name]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
 function normalizeConfig(config) {
+  const mineruTokenEnv = normalizeEnvName(config.mineruTokenEnv, 'MINERU_API_TOKEN')
+  const cloudApiKeyEnv = normalizeEnvName(config.cloudApiKeyEnv, 'ZOTERO_API_KEY')
+  const embeddingApiKeyEnv = normalizeEnvName(config.embeddingApiKeyEnv, 'SILICONFLOW_API_KEY')
   return {
     zoteroDataDir: config.zoteroDataDir ?? '',
     dataDir: config.dataDir ?? '',
@@ -525,17 +571,31 @@ function normalizeConfig(config) {
     selectionModel: config.selectionModel ?? '',
     mineruMode: ['none', 'local', 'cloud'].includes(config.mineruMode) ? config.mineruMode : 'none',
     mineruLocalUrl: config.mineruLocalUrl || 'http://127.0.0.1:8000',
-    mineruCloudToken: config.mineruCloudToken ?? '',
+    mineruTokenEnv,
     mineruAutoOnScanned: config.mineruAutoOnScanned !== false,
     /**
      * 云端 Web API（api.zotero.org）。
      *
      * 与 `zotero-api-key.json` 里的本地 key 完全无关：那是 Zotero 10+ 运行时
      * 通过 127.0.0.1:23119 发放的，云端不认（实测 403 Invalid key）。
-     * 这里存的是用户在 zotero.org/settings/keys 自己创建的 key。
+     * 这里只存环境变量名，值从 .env 读取。
      */
-    cloudApiKey: typeof config.cloudApiKey === 'string' ? config.cloudApiKey.trim() : '',
+    cloudApiKeyEnv,
     cloudUserID: typeof config.cloudUserID === 'string' ? config.cloudUserID.trim() : String(config.cloudUserID ?? '').trim(),
+    embeddingApiKeyEnv,
+    /**
+     * 解析后的 secret：**仅供内部调用**（MinerU 请求、云端 API、embedding）。
+     * 绝不写回配置、绝不出现在 HTTP 响应里；状态接口只回 Present/Length。
+     */
+    mineruToken: resolveSecret(mineruTokenEnv),
+    cloudApiKey: resolveSecret(cloudApiKeyEnv),
+    embeddingApiKey: resolveSecret(embeddingApiKeyEnv),
+    /**
+     * 旧版本的明文（仅用于启动告警，不参与运行、不写回）。
+     * 用户应把值放进 .env，并用上面的 *Env 指向它。
+     */
+    legacyMineruToken: typeof config.mineruCloudToken === 'string' ? config.mineruCloudToken.trim() : '',
+    legacyCloudApiKey: typeof config.cloudApiKey === 'string' ? config.cloudApiKey.trim() : '',
     /**
      * 各功能的模型覆盖：`{ translate|explain|ask|docTranslate: { provider, model, reasoningEffort } }`。
      * 空字符串表示跟随会话当前模型 —— 这是默认，也是用户最容易理解的行为。
@@ -607,7 +667,10 @@ function applyLegacySettings(settings, legacy) {
   const defaults = normalizeConfig({})
   const saved = normalizeConfig(legacy)
   const applied = []
+  // 旧明文 secret 永不并入运行期设置：配置只认环境变量。
+  const legacySecretKeys = new Set(['mineruCloudToken', 'cloudApiKey', 'legacyMineruToken', 'legacyCloudApiKey'])
   for (const key of Object.keys(saved)) {
+    if (legacySecretKeys.has(key)) continue
     if (JSON.stringify(settings[key]) === JSON.stringify(defaults[key])
       && JSON.stringify(saved[key]) !== JSON.stringify(defaults[key])) {
       settings[key] = saved[key]
@@ -620,8 +683,8 @@ function applyLegacySettings(settings, legacy) {
 /**
  * 给插件页表单的公开视图。
  *
- * 铁律：`mineruCloudToken` / `cloudApiKey` **只回布尔**，明文绝不出现在响应里。
- * 与 `/settings` 的旧契约保持一致，避免多一条泄露面。
+ * 铁律：secret **只回环境变量名 + 是否存在 + 长度**，既不回变量名的值，
+ * 也不回任何明文。页面据此显示「已读到 XXX（长度 N）」或「未设置」。
  */
 function publicSettingsView(settings, resolvedDataDir) {
   return {
@@ -634,9 +697,16 @@ function publicSettingsView(settings, resolvedDataDir) {
     mineruMode: settings.mineruMode,
     mineruLocalUrl: settings.mineruLocalUrl,
     mineruAutoOnScanned: settings.mineruAutoOnScanned,
-    mineruCloudTokenSet: Boolean(settings.mineruCloudToken),
-    cloudApiKeySet: Boolean(settings.cloudApiKey),
+    mineruTokenEnv: settings.mineruTokenEnv,
+    mineruTokenPresent: Boolean(settings.mineruToken),
+    mineruTokenLength: settings.mineruToken.length,
+    cloudApiKeyEnv: settings.cloudApiKeyEnv,
+    cloudApiKeyPresent: Boolean(settings.cloudApiKey),
+    cloudApiKeyLength: settings.cloudApiKey.length,
     cloudUserID: settings.cloudUserID,
+    embeddingApiKeyEnv: settings.embeddingApiKeyEnv,
+    embeddingApiKeyPresent: Boolean(settings.embeddingApiKey),
+    embeddingApiKeyLength: settings.embeddingApiKey.length,
     features: settings.features,
     translateEfforts: settings.translateEfforts,
     resolvedDataDir,
@@ -678,7 +748,10 @@ function buildConfigPatch(body) {
     throw new Error('请求体必须是对象')
   }
   const patch = {}
-  for (const key of ['zoteroDataDir', 'dataDir', 'mineruLocalUrl', 'selectionProvider', 'selectionModel', 'cloudUserID']) {
+  for (const key of [
+    'zoteroDataDir', 'dataDir', 'mineruLocalUrl', 'selectionProvider', 'selectionModel', 'cloudUserID',
+    'mineruTokenEnv', 'cloudApiKeyEnv', 'embeddingApiKeyEnv',
+  ]) {
     if (body[key] === undefined) continue
     if (typeof body[key] !== 'string') throw new Error(`${key} 必须是字符串`)
     patch[key] = body[key].trim()
@@ -699,11 +772,10 @@ function buildConfigPatch(body) {
     if (typeof body.mineruAutoOnScanned !== 'boolean') throw new Error('mineruAutoOnScanned 必须是布尔值')
     patch.mineruAutoOnScanned = body.mineruAutoOnScanned
   }
-  // 空字符串是合法输入：表示「清除这个 secret」。
-  for (const key of ['mineruCloudToken', 'cloudApiKey']) {
-    if (body[key] === undefined) continue
-    if (typeof body[key] !== 'string') throw new Error(`${key} 必须是字符串`)
-    patch[key] = body[key].trim()
+  for (const legacy of ['mineruCloudToken', 'cloudApiKey', 'embeddingApiKey']) {
+    if (body[legacy] !== undefined) {
+      throw new Error(`${legacy} 已改为环境变量：请提交 mineruTokenEnv / cloudApiKeyEnv / embeddingApiKeyEnv`)
+    }
   }
   if (body.features !== undefined) {
     const src = body.features
@@ -1014,7 +1086,7 @@ async function handleRequest(rctx, req, res, deps) {
      * 面板里改、存 json、立即生效 —— 不用去翻 YAML，也不用重载插件。
      * GET 返回可编辑字段（token 这类秘密不回显明文，只回是否已填）。
      *
-     * 铁律：`cloudApiKey` 与 `mineruCloudToken` 一样，**只回 `Set` 布尔**。
+     * 铁律：secret 只回环境变量名 / 是否存在 / 长度，值与明文都不出现。
      * 明文一旦进了响应，它就会同时出现在浏览器内存、devtools 网络面板、
      * 以及任何抓包/日志里 —— 用户填的是 zotero.org 账号级凭据，泄露面太大。
      */
@@ -1024,11 +1096,18 @@ async function handleRequest(rctx, req, res, deps) {
         mineruMode: s.mineruMode,
         mineruLocalUrl: s.mineruLocalUrl,
         mineruAutoOnScanned: s.mineruAutoOnScanned,
-        mineruCloudTokenSet: Boolean(s.mineruCloudToken),
+        // secret 只回环境变量名 / 是否存在 / 长度；值与明文都不出现
+        mineruTokenEnv: s.mineruTokenEnv,
+        mineruTokenPresent: Boolean(s.mineruToken),
+        mineruTokenLength: s.mineruToken.length,
         zoteroDataDir: s.zoteroDataDir,
-        // 云端 Web API：key 只回是否已配置
-        cloudApiKeySet: Boolean(s.cloudApiKey),
+        cloudApiKeyEnv: s.cloudApiKeyEnv,
+        cloudApiKeyPresent: Boolean(s.cloudApiKey),
+        cloudApiKeyLength: s.cloudApiKey.length,
         cloudUserID: s.cloudUserID,
+        embeddingApiKeyEnv: s.embeddingApiKeyEnv,
+        embeddingApiKeyPresent: Boolean(s.embeddingApiKey),
+        embeddingApiKeyLength: s.embeddingApiKey.length,
         // 各功能的模型覆盖；空表示跟随会话
         features: s.features,
         translateEfforts: s.translateEfforts,
@@ -1123,7 +1202,7 @@ async function handleRequest(rctx, req, res, deps) {
         }
       }
       // 云端：有 token 且能拿到接口响应即视为可通
-      if (!deps.settings.mineruCloudToken) return sendJson(res, 200, { ok: false, error: '云端模式需要先填 token' })
+      if (!deps.settings.mineruToken) return sendJson(res, 200, { ok: false, error: `云端模式需要先设置 ${deps.settings.mineruTokenEnv} 环境变量` })
       return sendJson(res, 200, { ok: true, note: 'token 已配置；实际可用性会在首次解析时验证' })
     }
 

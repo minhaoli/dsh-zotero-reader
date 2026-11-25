@@ -172,10 +172,6 @@ window.__ModuleLoader__.load({
       mineruCloud: '云端 API',
       mineruCloudDesc: '需要 mineru.net 的 token，按页计费',
       mineruLocalUrl: '本地服务地址',
-      mineruToken: '云端 token',
-      mineruTokenSet: '已保存（重新输入可覆盖）',
-      mineruTokenPlaceholder: '粘贴 mineru.net 的 API token',
-      mineruTokenHint: '在 mineru.net 用户中心 → API 管理里获取',
       mineruAuto: '扫到扫描件时自动改用 MinerU',
       testConnection: '测试连接',
       testing: '测试中…',
@@ -199,11 +195,6 @@ window.__ModuleLoader__.load({
       saveConfig: '保存配置',
       discardChanges: '放弃修改',
       configSaved: '已保存；宿主正在重载插件，稍等片刻生效。',
-      clearSecret: '清除',
-      undoClear: '取消清除',
-      secretSetPlaceholder: '已保存（留空不改）',
-      secretSetHint: '已保存；留空表示不修改，输入新值可覆盖。',
-      secretWillClear: '保存后将清除这项凭据。',
       localKeyNone: '未授权 —— 首次写入批注时 Zotero 会弹一次授权框',
       localKeyReady: '已授权（保存于 {{date}}，Zotero 实例匹配）',
       localKeyMismatch: '已保存授权（{{date}}），但与当前 Zotero 实例不匹配；首次写入时会重新请求',
@@ -218,9 +209,6 @@ window.__ModuleLoader__.load({
       cfgLocalKey: '本地授权',
       cfgCloud: 'Zotero 云端 Web API',
       cfgCloudHint: '用于云端文献列表与云端批注；与本地授权（写入批注时自动申请）是两套凭据。',
-      cfgCloudKey: '云端 API key',
-      cfgCloudKeyPlaceholder: '粘贴 zotero.org/settings/keys 创建的 key',
-      cfgCloudKeyHint: '在 zotero.org/settings/keys 创建，勾选允许读写。',
       cfgCloudUserID: '云端 userID',
       cfgCloudUserIDPlaceholder: '数字 ID（可在同一页面看到）',
       cfgCloudUserIDHint: '填了 key 后也可以由 /cloud/status 探测出来，再填到这里。',
@@ -244,6 +232,14 @@ window.__ModuleLoader__.load({
       cfgEfforts: '推理档位回退序列',
       cfgEffortsHint: '逗号分隔，按顺序尝试；{{default}} 表示模型默认。例如 off, low, {{default}}',
       effortDefaultToken: '默认',
+      cfgSecrets: 'API 凭据（环境变量名）',
+      cfgSecretsHint: '这里只填变量名，key 的值放在 ~/.dsh/.env（DSH 启动时加载）。本页不会显示、也不会保存明文。',
+      cfgMineruTokenEnv: 'MinerU token 环境变量',
+      cfgCloudKeyEnv: 'Zotero 云端 key 环境变量',
+      cfgEmbeddingKeyEnv: 'Embedding key 环境变量',
+      cfgEnvPresent: '已读到 `{{name}}`（长度 {{len}}）',
+      cfgEnvAbsent: '未设置 —— 请在 ~/.dsh/.env 里添加 `{{name}}=你的key`',
+      cfgEnvNoName: '未填写变量名，将不会读取任何 key',
     }
     const en = {
       title: 'Zotero Paper Reader',
@@ -327,10 +323,6 @@ window.__ModuleLoader__.load({
       mineruCloud: 'Cloud API',
       mineruCloudDesc: 'Requires a mineru.net token, billed per page',
       mineruLocalUrl: 'Local service URL',
-      mineruToken: 'Cloud token',
-      mineruTokenSet: 'Saved (re-enter to replace)',
-      mineruTokenPlaceholder: 'Paste your mineru.net API token',
-      mineruTokenHint: 'Get it from mineru.net → User center → API',
       mineruAuto: 'Auto-switch to MinerU for scanned PDFs',
       testConnection: 'Test connection',
       testing: 'Testing…',
@@ -354,11 +346,6 @@ window.__ModuleLoader__.load({
       saveConfig: 'Save configuration',
       discardChanges: 'Discard changes',
       configSaved: 'Saved. The host is reloading the plugin; changes apply shortly.',
-      clearSecret: 'Clear',
-      undoClear: 'Keep',
-      secretSetPlaceholder: 'Saved (leave empty to keep)',
-      secretSetHint: 'Saved; leave empty to keep, type a new value to replace.',
-      secretWillClear: 'This credential will be cleared when you save.',
       localKeyNone: 'Not authorized — Zotero asks once on the first annotation write',
       localKeyReady: 'Authorized (saved {{date}}, Zotero instance matches)',
       localKeyMismatch: 'Authorization saved {{date}}, but it does not match the current Zotero instance; it will be requested again on the first write',
@@ -373,9 +360,6 @@ window.__ModuleLoader__.load({
       cfgLocalKey: 'Local authorization',
       cfgCloud: 'Zotero cloud Web API',
       cfgCloudHint: 'Used for cloud libraries and cloud annotations; separate from the local key requested when writing annotations.',
-      cfgCloudKey: 'Cloud API key',
-      cfgCloudKeyPlaceholder: 'Paste a key created at zotero.org/settings/keys',
-      cfgCloudKeyHint: 'Create it at zotero.org/settings/keys and allow read/write.',
       cfgCloudUserID: 'Cloud userID',
       cfgCloudUserIDPlaceholder: 'Numeric ID (shown on the same page)',
       cfgCloudUserIDHint: 'The /cloud/status probe can discover it once the key is set; paste it here.',
@@ -399,6 +383,14 @@ window.__ModuleLoader__.load({
       cfgEfforts: 'Reasoning effort fallbacks',
       cfgEffortsHint: 'Comma separated, tried in order; {{default}} means the model default. E.g. off, low, {{default}}',
       effortDefaultToken: 'default',
+      cfgSecrets: 'API credentials (environment variable names)',
+      cfgSecretsHint: 'Only variable names go here; values live in ~/.dsh/.env (loaded at DSH startup). This page never displays or stores plaintext.',
+      cfgMineruTokenEnv: 'MinerU token environment variable',
+      cfgCloudKeyEnv: 'Zotero cloud key environment variable',
+      cfgEmbeddingKeyEnv: 'Embedding key environment variable',
+      cfgEnvPresent: 'Loaded `{{name}}` (length {{len}})',
+      cfgEnvAbsent: 'Not set — add `{{name}}=your-key` to ~/.dsh/.env',
+      cfgEnvNoName: 'No variable name; no key will be read',
     }
 
     /* -------------------------------------------------------- 工具函数 */
@@ -2747,15 +2739,13 @@ window.__ModuleLoader__.load({
      * configEditor 落到 profile patch，宿主随即重载插件 —— 所以文案里明确写
      * 「保存后稍等生效」，不再假装即时。
      *
-     * 秘密字段（MinerU token / 云端 key）只从后端拿到 `xxxSet` 布尔；
-     * 输入框留空 = 不修改，要清除必须点旁边的「清除」。
+     * 秘密不再有输入框：这里只填**环境变量名**，值放在 ~/.dsh/.env，
+     * 后端只回 `xxxPresent` / `xxxLength`，页面拿不到也不展示明文。
      */
     function PluginConfigPage({ t, view }) {
       const [state, setState] = useState(null)
       const [draft, setDraft] = useState(null)
       const [effortsText, setEffortsText] = useState('')
-      const [secrets, setSecrets] = useState({ mineruCloudToken: '', cloudApiKey: '' })
-      const [cleared, setCleared] = useState({ mineruCloudToken: false, cloudApiKey: false })
       const [error, setError] = useState(null)
       const [notice, setNotice] = useState(null)
       const [saving, setSaving] = useState(false)
@@ -2766,8 +2756,6 @@ window.__ModuleLoader__.load({
         setState(data)
         setDraft(data.config)
         setEffortsText(effortsToText(data.config.translateEfforts, t('effortDefaultToken')))
-        setSecrets({ mineruCloudToken: '', cloudApiKey: '' })
-        setCleared({ mineruCloudToken: false, cloudApiKey: false })
       }, [t])
 
       const load = useCallback(async () => {
@@ -2830,29 +2818,25 @@ window.__ModuleLoader__.load({
         hint ? h('span', { className: 'zr-cfg-hint' }, hint) : null,
       )
 
-      const secret = (key, label, placeholder, hint) => h('div', { className: 'zr-cfg-field' },
-        h('span', { className: 'zr-cfg-label' }, label),
-        h('div', { className: 'zr-cfg-secret' },
-          h('input', {
-            className: 'zr-input zr-cfg-input',
-            type: 'password',
-            autoComplete: 'new-password',
-            value: secrets[key],
-            placeholder: draft[`${key}Set`] ? t('secretSetPlaceholder') : placeholder,
-            onChange: (e) => setSecrets((prev) => ({ ...prev, [key]: e.target.value })),
-          }),
-          h('button', {
-            className: 'zr-btn',
-            type: 'button',
-            onClick: () => {
-              setSecrets((prev) => ({ ...prev, [key]: '' }))
-              setCleared((prev) => ({ ...prev, [key]: true }))
-            },
-          }, cleared[key] ? t('undoClear') : t('clearSecret')),
-        ),
-        h('span', { className: 'zr-cfg-hint' },
-          cleared[key] ? t('secretWillClear') : (draft[`${key}Set`] ? t('secretSetHint') : hint)),
-      )
+      /**
+       * 环境变量名输入 + 状态行。
+       *
+       * 输入的是**变量名**；后端只回 Present/Length，页面拿不到值，
+       * 所以这里不存在密码框，也不存在「清除 secret」。
+       */
+      const envField = (key, presentKey, lengthKey, label, placeholder) => {
+        const name = String(draft[key] ?? '').trim()
+        const status = !name
+          ? t('cfgEnvNoName')
+          : draft[presentKey]
+            ? t('cfgEnvPresent').replace('{{name}}', name).replace('{{len}}', String(draft[lengthKey] ?? 0))
+            : t('cfgEnvAbsent').replace('{{name}}', name)
+        return h('div', { className: 'zr-cfg-field' },
+          h('span', { className: 'zr-cfg-label' }, label),
+          text(key, placeholder),
+          h('span', { className: `zr-cfg-hint${draft[presentKey] ? ' zr-cfg-ok' : ''}` }, status),
+        )
+      }
 
       const save = async () => {
         setSaving(true)
@@ -2868,14 +2852,13 @@ window.__ModuleLoader__.load({
             selectionModel: String(draft.selectionModel ?? '').trim(),
             mineruMode: draft.mineruMode,
             mineruLocalUrl: String(draft.mineruLocalUrl ?? '').trim(),
+            mineruTokenEnv: String(draft.mineruTokenEnv ?? '').trim(),
             mineruAutoOnScanned: Boolean(draft.mineruAutoOnScanned),
+            cloudApiKeyEnv: String(draft.cloudApiKeyEnv ?? '').trim(),
             cloudUserID: String(draft.cloudUserID ?? '').trim(),
+            embeddingApiKeyEnv: String(draft.embeddingApiKeyEnv ?? '').trim(),
             features: draft.features,
             translateEfforts: textToEfforts(effortsText, t('effortDefaultToken')),
-          }
-          for (const key of ['mineruCloudToken', 'cloudApiKey']) {
-            if (secrets[key].trim()) payload[key] = secrets[key].trim()
-            else if (cleared[key]) payload[key] = ''
           }
           const data = await fetchJson(`${API}/config`, {
             method: 'POST',
@@ -2885,8 +2868,6 @@ window.__ModuleLoader__.load({
           setDraft(data.config)
           setState((prev) => ({ ...prev, config: data.config }))
           setEffortsText(effortsToText(data.config.translateEfforts, t('effortDefaultToken')))
-          setSecrets({ mineruCloudToken: '', cloudApiKey: '' })
-          setCleared({ mineruCloudToken: false, cloudApiKey: false })
           setNotice(t('configSaved'))
         } catch (e) {
           setError(e.message)
@@ -2937,7 +2918,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'zr-radio-d' }, desc),
           )),
           field(t('mineruLocalUrl'), text('mineruLocalUrl', 'http://127.0.0.1:8000')),
-          secret('mineruCloudToken', t('mineruToken'), t('mineruTokenPlaceholder'), t('mineruTokenHint')),
+          h('div', { className: 'zr-cfg-hint' }, t('cfgMineruTokenEnv') + ' → ' + (draft.mineruTokenEnv || '—')),
           h('label', { className: 'zr-check' },
             h('input', {
               type: 'checkbox',
@@ -2961,8 +2942,18 @@ window.__ModuleLoader__.load({
         h('section', { className: 'zr-cfg-section' },
           h('div', { className: 'zr-cfg-title' }, t('cfgCloud')),
           h('div', { className: 'zr-cfg-hint' }, t('cfgCloudHint')),
-          secret('cloudApiKey', t('cfgCloudKey'), t('cfgCloudKeyPlaceholder'), t('cfgCloudKeyHint')),
           field(t('cfgCloudUserID'), text('cloudUserID', t('cfgCloudUserIDPlaceholder')), t('cfgCloudUserIDHint')),
+        ),
+
+        h('section', { className: 'zr-cfg-section' },
+          h('div', { className: 'zr-cfg-title' }, t('cfgSecrets')),
+          h('div', { className: 'zr-cfg-hint' }, t('cfgSecretsHint')),
+          envField('mineruTokenEnv', 'mineruTokenPresent', 'mineruTokenLength',
+            t('cfgMineruTokenEnv'), 'MINERU_API_TOKEN'),
+          envField('cloudApiKeyEnv', 'cloudApiKeyPresent', 'cloudApiKeyLength',
+            t('cfgCloudKeyEnv'), 'ZOTERO_API_KEY'),
+          envField('embeddingApiKeyEnv', 'embeddingApiKeyPresent', 'embeddingApiKeyLength',
+            t('cfgEmbeddingKeyEnv'), 'SILICONFLOW_API_KEY'),
         ),
 
         h('section', { className: 'zr-cfg-section' },

@@ -3,15 +3,17 @@
  *
  * 配置入口已统一到 DSH 插件页（`plugins.row.config` → Host 的 configEditor）：
  *   1. GET /settings 仍保留，但只作诊断；POST /settings 必须是 501 并指向插件页
- *   2. GET /config 返回「公开视图」：secret 只回 `xxxSet` 布尔，本地授权只回
- *      `serverId` / `savedAt` / 是否匹配，绝不回任一 key 明文
- *   3. POST /config 经 configEditor 写回；非法输入 400、无编辑器 501、被上层覆盖 409
+ *   2. secret 只存**环境变量名**：接口只回 `xxxEnv` / `xxxPresent` / `xxxLength`，
+ *      值与明文都不出现；本地授权只回 `serverId` / `savedAt` / 是否匹配
+ *   3. POST /config 经 configEditor 写回；非法输入 400、无编辑器 501、被上层覆盖 409；
+ *      写回前剥掉旧明文字段，绝不把 key 落进 YAML
  *   4. 迁移：config 仍是默认值、旧 settings.json 有非默认值时用旧值补齐
- *      （用户现有 MinerU cloud + token 不能丢）；显式配置优先于旧文件
+ *      （MinerU 模式/开关不能丢）；旧明文 token 不再参与运行，只触发告警
  *   5. 通过插件页保存成功后，旧 settings.json 改名，回退不再参与后续启动
  *   6. features / translateEfforts 的归一化与「features > selection* > 跟随会话」优先级
  *
  * 全部本地：临时 dataDir + 桩 ctx / 桩 configEditor，**不联网、不依赖 Zotero 运行**。
+ * 三个测试用环境变量由本文件自己注入，跑完不需要清理（进程退出即消失）。
  *
  * 用法：node test/check-settings-contract.mjs
  */
@@ -154,16 +156,38 @@ async function configOf(config, opts = {}) {
   return { ...b, res }
 }
 
+/**
+ * secret 现在只存**环境变量名**：测试自己注入三个变量，
+ * 断言接口只回 Present/Length，绝不回值。
+ */
+const TEST_ENV_MINERU = 'ZR_TEST_MINERU_TOKEN'
+const TEST_ENV_CLOUD = 'ZR_TEST_CLOUD_KEY'
+const TEST_ENV_EMBED = 'ZR_TEST_EMBED_KEY'
 const SECRET_CLOUD_KEY = 'SECRET_CLOUD_KEY_0123456789'
 const SECRET_MINERU_TOKEN = 'mineru-secret-token-XYZ'
+const SECRET_EMBED_KEY = 'embed-secret-key-000'
 const SECRET_LOCAL_KEY = 'LOCAL_ZOTERO_KEY_DO_NOT_LEAK'
+process.env[TEST_ENV_MINERU] = SECRET_MINERU_TOKEN
+process.env[TEST_ENV_CLOUD] = SECRET_CLOUD_KEY
+process.env[TEST_ENV_EMBED] = SECRET_EMBED_KEY
+/** 指向不存在变量的配置：用来断言 Present=false / Length=0。 */
+const EMPTY_ENV = {
+  mineruTokenEnv: 'ZR_NOPE_MINERU',
+  cloudApiKeyEnv: 'ZR_NOPE_CLOUD',
+  embeddingApiKeyEnv: 'ZR_NOPE_EMBED',
+}
+/** 指向测试注入变量的配置。 */
+const ENV_CONFIG = {
+  mineruTokenEnv: TEST_ENV_MINERU,
+  cloudApiKeyEnv: TEST_ENV_CLOUD,
+  embeddingApiKeyEnv: TEST_ENV_EMBED,
+}
 
-/* ---------------------------------------- 1) GET /settings：秘密只回布尔 */
+/* ------------------------- 1) GET /settings：secret 只回变量名/存在/长度 */
 
 const A = await settingsOf({
-  cloudApiKey: SECRET_CLOUD_KEY,
+  ...ENV_CONFIG,
   cloudUserID: '  1234567  ',
-  mineruCloudToken: SECRET_MINERU_TOKEN,
   features: { translate: { provider: ' p1 ', model: ' m1 ', reasoningEffort: ' high ' } },
 })
 const g1 = A.res
@@ -171,37 +195,43 @@ const g1json = g1.json ?? {}
 const g1text = g1.text
 
 check('GET /settings → 200', g1.statusCode === 200, `status=${g1.statusCode}`)
-check('GET /settings 响应体有 cloudApiKeySet 字段', Object.keys(g1json).includes('cloudApiKeySet'))
-check('GET /settings cloudApiKeySet 为 true（已配置）', g1json.cloudApiKeySet === true,
-  String(g1json.cloudApiKeySet))
-check('GET /settings 响应体不含 cloudApiKey 明文', !g1text.includes(SECRET_CLOUD_KEY))
-check('GET /settings 响应体没有 cloudApiKey 字段（只回 Set 布尔）',
-  !Object.keys(g1json).includes('cloudApiKey'), Object.keys(g1json).join(','))
-check('GET /settings 响应体有 mineruCloudTokenSet 字段', Object.keys(g1json).includes('mineruCloudTokenSet'))
-check('GET /settings mineruCloudTokenSet 为 true', g1json.mineruCloudTokenSet === true,
-  String(g1json.mineruCloudTokenSet))
-check('GET /settings 响应体不含 mineruCloudToken 明文', !g1text.includes(SECRET_MINERU_TOKEN))
-check('GET /settings 响应体没有 mineruCloudToken 字段',
-  !Object.keys(g1json).includes('mineruCloudToken'))
+check('GET /settings 回 mineruTokenEnv 变量名', g1json.mineruTokenEnv === TEST_ENV_MINERU,
+  String(g1json.mineruTokenEnv))
+check('GET /settings mineruTokenPresent 为 true', g1json.mineruTokenPresent === true,
+  String(g1json.mineruTokenPresent))
+check('GET /settings mineruTokenLength 等于真实长度', g1json.mineruTokenLength === SECRET_MINERU_TOKEN.length,
+  String(g1json.mineruTokenLength))
+check('GET /settings 响应体不含 mineru token 的值', !g1text.includes(SECRET_MINERU_TOKEN))
+check('GET /settings 没有 mineruCloudToken 字段', !Object.keys(g1json).includes('mineruCloudToken'))
+check('GET /settings 没有 mineruCloudTokenSet 字段', !Object.keys(g1json).includes('mineruCloudTokenSet'))
+check('GET /settings 回 cloudApiKeyEnv 变量名', g1json.cloudApiKeyEnv === TEST_ENV_CLOUD)
+check('GET /settings cloudApiKeyPresent 为 true', g1json.cloudApiKeyPresent === true)
+check('GET /settings cloudApiKeyLength 等于真实长度', g1json.cloudApiKeyLength === SECRET_CLOUD_KEY.length)
+check('GET /settings 响应体不含 cloud key 的值', !g1text.includes(SECRET_CLOUD_KEY))
+check('GET /settings 没有 cloudApiKey 字段', !Object.keys(g1json).includes('cloudApiKey'))
+check('GET /settings 没有 cloudApiKeySet 字段', !Object.keys(g1json).includes('cloudApiKeySet'))
+check('GET /settings 回 embeddingApiKeyEnv', g1json.embeddingApiKeyEnv === TEST_ENV_EMBED)
+check('GET /settings embeddingApiKeyPresent 为 true', g1json.embeddingApiKeyPresent === true)
+check('GET /settings 响应体不含 embedding key 的值', !g1text.includes(SECRET_EMBED_KEY))
 check('GET /settings cloudUserID 被 trim', g1json.cloudUserID === '1234567', JSON.stringify(g1json.cloudUserID))
 check('GET /settings 返回 resolvedDataDir（只读展示）', g1json.resolvedDataDir === A.dir, String(g1json.resolvedDataDir))
 check('GET /settings 返回 zoteroDataDir（可编辑字段）', typeof g1json.zoteroDataDir === 'string')
 check('GET /settings 标注配置已托管（configManaged）', g1json.configManaged === true)
 
-const B = await settingsOf({})
-check('未配置 key 时 cloudApiKeySet 为 false', B.res.json?.cloudApiKeySet === false,
-  String(B.res.json?.cloudApiKeySet))
-check('未配置 token 时 mineruCloudTokenSet 为 false', B.res.json?.mineruCloudTokenSet === false,
-  String(B.res.json?.mineruCloudTokenSet))
+const B = await settingsOf({ ...EMPTY_ENV })
+check('环境变量不存在时 mineruTokenPresent 为 false', B.res.json?.mineruTokenPresent === false,
+  String(B.res.json?.mineruTokenPresent))
+check('环境变量不存在时 mineruTokenLength 为 0', B.res.json?.mineruTokenLength === 0,
+  String(B.res.json?.mineruTokenLength))
+check('环境变量不存在时 cloudApiKeyPresent 为 false', B.res.json?.cloudApiKeyPresent === false)
 check('未配置时 cloudUserID 为空串', B.res.json?.cloudUserID === '',
   JSON.stringify(B.res.json?.cloudUserID))
 
-/* ------------------------------------- 2) GET /config：表单公开视图（无明文） */
+/* ------------------- 2) GET /config：表单公开视图（无明文、无明文值） */
 
 const C0 = await configOf({
-  cloudApiKey: SECRET_CLOUD_KEY,
+  ...ENV_CONFIG,
   cloudUserID: '  1234567  ',
-  mineruCloudToken: SECRET_MINERU_TOKEN,
   features: { translate: { provider: ' p1 ', model: ' m1 ', reasoningEffort: ' high ' } },
 })
 const c0 = C0.res
@@ -210,12 +240,22 @@ const c0text = c0.text
 check('GET /config → 200', c0.statusCode === 200, `status=${c0.statusCode}`)
 check('GET /config 有 config 对象', c0json.config && typeof c0json.config === 'object')
 check('GET /config 标明 managedBy=cordis-patch', c0json.managedBy === 'cordis-patch', String(c0json.managedBy))
-check('GET /config 不含 cloudApiKey 明文', !c0text.includes(SECRET_CLOUD_KEY))
-check('GET /config 不含 mineruCloudToken 明文', !c0text.includes(SECRET_MINERU_TOKEN))
+check('GET /config 不含 mineru token 明文', !c0text.includes(SECRET_MINERU_TOKEN))
+check('GET /config 不含 cloud key 明文', !c0text.includes(SECRET_CLOUD_KEY))
+check('GET /config 不含 embedding key 明文', !c0text.includes(SECRET_EMBED_KEY))
 check('GET /config 不含 mineruCloudToken 字段', !Object.keys(c0json.config ?? {}).includes('mineruCloudToken'))
 check('GET /config 不含 cloudApiKey 字段', !Object.keys(c0json.config ?? {}).includes('cloudApiKey'))
-check('GET /config 回 boolean：cloudApiKeySet', c0json.config?.cloudApiKeySet === true)
-check('GET /config 回 boolean：mineruCloudTokenSet', c0json.config?.mineruCloudTokenSet === true)
+check('GET /config 回 mineruTokenEnv + Present + Length',
+  c0json.config?.mineruTokenEnv === TEST_ENV_MINERU
+  && c0json.config?.mineruTokenPresent === true
+  && c0json.config?.mineruTokenLength === SECRET_MINERU_TOKEN.length)
+check('GET /config 回 cloudApiKeyEnv + Present + Length',
+  c0json.config?.cloudApiKeyEnv === TEST_ENV_CLOUD
+  && c0json.config?.cloudApiKeyPresent === true
+  && c0json.config?.cloudApiKeyLength === SECRET_CLOUD_KEY.length)
+check('GET /config 回 embeddingApiKeyEnv + Present',
+  c0json.config?.embeddingApiKeyEnv === TEST_ENV_EMBED
+  && c0json.config?.embeddingApiKeyPresent === true)
 check('GET /config cloudUserID 被 trim', c0json.config?.cloudUserID === '1234567', JSON.stringify(c0json.config?.cloudUserID))
 check('GET /config resolvedDataDir 是本进程的 dataDir', c0json.config?.resolvedDataDir === C0.dir)
 check('GET /config features 覆盖四个键',
@@ -260,16 +300,22 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
 /* --------------------------------------- 5) POST /config：写入、合并、落盘语义 */
 
 {
-  // 运行期 config 与 profile 条目里的 config 在真实宿主里是同一份；桩里必须保持一致，
-  // 否则「未提交的 secret 要被保留」这条断言的输入本身就不成立。
-  const initial = { mineruMode: 'none', mineruCloudToken: SECRET_MINERU_TOKEN }
+  // 旧配置里可能还有明文字段：写回时应被剥掉，只留变量名。
+  const initial = {
+    mineruMode: 'none',
+    mineruTokenEnv: TEST_ENV_MINERU,
+    mineruCloudToken: 'LEGACY-PLAINTEXT-TOKEN',
+    cloudApiKey: 'LEGACY-CLOUD-PLAINTEXT',
+  }
   const editor = makeConfigEditor(initial)
   const legacy = { mineruMode: 'none' }
   const E = boot(initial, { editor, legacy })
   const p = await call('/zotero-reader/config', {
     method: 'POST',
     body: {
-      cloudApiKey: '  POSTKEY123  ',
+      mineruTokenEnv: `  ${TEST_ENV_MINERU}  `,
+      cloudApiKeyEnv: `  ${TEST_ENV_CLOUD}  `,
+      embeddingApiKeyEnv: TEST_ENV_EMBED,
       cloudUserID: ' 7654321 ',
       translateConcurrency: '6',
       translateChunkChars: '3000',
@@ -280,18 +326,31 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
     },
   })
   check('POST /config → 200', p.statusCode === 200, `status=${p.statusCode} ${p.text.slice(0, 120)}`)
-  check('POST /config 响应不含 cloudApiKey 明文', !p.text.includes('POSTKEY123'))
-  check('POST /config 响应回 cloudApiKeySet=true', p.json?.config?.cloudApiKeySet === true)
-  check('POST /config 响应回 mineruCloudTokenSet=true（保留原 token）', p.json?.config?.mineruCloudTokenSet === true)
+  check('POST /config 响应不含 mineru token 明文', !p.text.includes(SECRET_MINERU_TOKEN))
+  check('POST /config 响应不含 cloud key 明文', !p.text.includes(SECRET_CLOUD_KEY))
+  check('POST /config 响应不含旧明文字段', !p.text.includes('LEGACY-PLAINTEXT-TOKEN'))
+  check('POST /config 响应回 mineruTokenPresent=true', p.json?.config?.mineruTokenPresent === true)
+  check('POST /config 响应回 mineruTokenLength',
+    p.json?.config?.mineruTokenLength === SECRET_MINERU_TOKEN.length)
+  check('POST /config 响应回 cloudApiKeyPresent=true', p.json?.config?.cloudApiKeyPresent === true)
   check('POST /config 走过 configEditor（写入一次）', editor.state.edits.length === 1,
     `edits=${editor.state.edits.length}`)
   const written = editor.state.edits[0] ?? {}
   check('写入值：translateConcurrency 数字化为 6', written.translateConcurrency === 6, String(written.translateConcurrency))
   check('写入值：translateChunkChars 数字化为 3000', written.translateChunkChars === 3000, String(written.translateChunkChars))
-  check('写入值：cloudApiKey 已 trim', written.cloudApiKey === 'POSTKEY123', JSON.stringify(written.cloudApiKey))
+  check('写入值：mineruTokenEnv 已 trim', written.mineruTokenEnv === TEST_ENV_MINERU,
+    JSON.stringify(written.mineruTokenEnv))
+  check('写入值：cloudApiKeyEnv 已 trim', written.cloudApiKeyEnv === TEST_ENV_CLOUD,
+    JSON.stringify(written.cloudApiKeyEnv))
+  check('写入值：embeddingApiKeyEnv 已写入', written.embeddingApiKeyEnv === TEST_ENV_EMBED,
+    JSON.stringify(written.embeddingApiKeyEnv))
   check('写入值：cloudUserID 已 trim', written.cloudUserID === '7654321', JSON.stringify(written.cloudUserID))
-  check('写入值：mineruCloudToken 原样保留（未提交 secret 不清空）',
-    written.mineruCloudToken === SECRET_MINERU_TOKEN)
+  check('写入值：旧明文 mineruCloudToken 被剥掉', written.mineruCloudToken === undefined,
+    JSON.stringify(written.mineruCloudToken))
+  check('写入值：旧明文 cloudApiKey 被剥掉', written.cloudApiKey === undefined,
+    JSON.stringify(written.cloudApiKey))
+  check('写入值：不含运行时解析值 mineruToken', written.mineruToken === undefined)
+  check('写入值：不含运行时解析值 embeddingApiKey', written.embeddingApiKey === undefined)
   check('写入值：features 四键齐全', FEATURE_KEYS.every((k) => written.features?.[k]),
     Object.keys(written.features ?? {}).join(','))
   check('写入值：features.translate 生效', written.features?.translate?.provider === 'pp',
@@ -328,6 +387,9 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
     ['translateConcurrency=99', { translateConcurrency: 99 }],
     ['translateChunkChars=100', { translateChunkChars: 100 }],
     ['mineruMode=auto', { mineruMode: 'auto' }],
+    ['mineruCloudToken 明文', { mineruCloudToken: 'x' }],
+    ['cloudApiKey 明文', { cloudApiKey: 'x' }],
+    ['mineruTokenEnv=数字', { mineruTokenEnv: 5 }],
     ['空对象', {}],
   ]
   for (const [label, body] of bad) {
@@ -380,17 +442,27 @@ const LEGACY = {
 }
 
 {
-  const M = await configOf({}, { legacy: LEGACY })
+  const M = await configOf({ ...EMPTY_ENV }, { legacy: LEGACY })
   const j = M.res.json ?? {}
   check('迁移：config 默认 none + 旧 json cloud → 生效 cloud', j.config?.mineruMode === 'cloud', String(j.config?.mineruMode))
-  check('迁移：旧 json 的 token 被接住（tokenSet=true）', j.config?.mineruCloudTokenSet === true)
+  check('迁移：旧 json 的明文 token 不再生效（Present=false）', j.config?.mineruTokenPresent === false,
+    String(j.config?.mineruTokenPresent))
   check('迁移：旧 json mineruAutoOnScanned=false 覆盖默认 true', j.config?.mineruAutoOnScanned === false)
   check('迁移：旧 json 不回传 token 明文', !M.res.text.includes('sk-LEGACY-TOKEN-XYZ'))
   check('迁移：old settings.json 仍在（用户重配前不删）', fs.existsSync(M.settingsFile))
 }
 
 {
-  const N = await configOf({ mineruMode: 'local', mineruAutoOnScanned: true }, { legacy: LEGACY })
+  const M2 = await configOf({ ...ENV_CONFIG }, { legacy: LEGACY })
+  check('迁移：环境变量存在时 Present=true，且长度来自环境变量',
+    M2.res.json?.config?.mineruTokenPresent === true
+    && M2.res.json?.config?.mineruTokenLength === SECRET_MINERU_TOKEN.length)
+  check('迁移：环境变量的值不会因为旧明文存在而混入响应',
+    !M2.res.text.includes(SECRET_MINERU_TOKEN))
+}
+
+{
+  const N = await configOf({ ...EMPTY_ENV, mineruMode: 'local', mineruAutoOnScanned: true }, { legacy: LEGACY })
   check('迁移：显式 config mineruMode=local 压过旧 json cloud', N.res.json?.config?.mineruMode === 'local',
     String(N.res.json?.config?.mineruMode))
   // 注意：`mineruAutoOnScanned: true` 与 schema 默认值相同，运行时无法区分
@@ -402,9 +474,9 @@ const LEGACY = {
 }
 
 {
-  const O = await configOf({})
+  const O = await configOf({ ...EMPTY_ENV })
   check('没有旧 json 时 mineruMode 保持默认 none', O.res.json?.config?.mineruMode === 'none')
-  check('没有旧 json 时 tokenSet=false', O.res.json?.config?.mineruCloudTokenSet === false)
+  check('没有旧 json 且环境变量不存在时 Present=false', O.res.json?.config?.mineruTokenPresent === false)
 }
 
 /* --------------------------- 9) features 容错：GET /settings 的补全行为不变 */

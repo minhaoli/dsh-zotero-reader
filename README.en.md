@@ -63,15 +63,20 @@ With a link install you must install dependencies yourself once: `npm i`.
 
 ## Configuration
 
-Settings live in the plugin's `cordis.patch.yml`, and can also be changed from the ⚙ panel in the reader toolbar (applied immediately, stored in `~/.dsh-zotero-reader/settings.json`).
+Configure the plugin in the DSH sidebar under Plugins → dsh-zotero-reader → Configure. Saving writes to the current profile's `cordis.patch.yml`, and the host reloads the plugin so the change takes effect.
+
+API keys are stored as **environment variable names**; the values live in `~/.dsh/.env` (loaded when DSH starts). For example, put `MINERU_API_TOKEN=your-token` in `.env` and point `mineruTokenEnv` at it. Restart DSH after editing `.env`.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `zoteroDataDir` | auto-detected | Zotero data directory (contains `zotero.sqlite`) |
 | `mineruMode` | `none` | `none` / `local` / `cloud` |
 | `mineruLocalUrl` | `http://127.0.0.1:8000` | Local MinerU service URL |
-| `mineruCloudToken` | empty | mineru.net token |
+| `mineruTokenEnv` | `MINERU_API_TOKEN` | **Environment variable name** holding the MinerU token |
 | `mineruAutoOnScanned` | `true` | Switch to MinerU automatically for scanned PDFs |
+| `cloudApiKeyEnv` | `ZOTERO_API_KEY` | Environment variable name holding the Zotero cloud key |
+| `cloudUserID` | empty | Zotero cloud userID |
+| `embeddingApiKeyEnv` | `SILICONFLOW_API_KEY` | Environment variable name holding the embedding key |
 | `selectionProvider` / `selectionModel` | empty | Model for selection actions; empty follows the host |
 
 ### Writing annotations

@@ -63,15 +63,20 @@ npm i minhaoli/dsh-zotero-reader
 
 ## 配置
 
-配置项在插件的 `cordis.patch.yml` 里，也可以在阅读器工具栏的 ⚙ 面板里改（即时生效，存到 `~/.dsh-zotero-reader/settings.json`）。
+配置在 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」里改；保存后写入当前 profile 的 `cordis.patch.yml`，宿主会重载插件使其生效。
+
+API key **只存环境变量名**，值放在 `~/.dsh/.env`（DSH 启动时加载）。例如在 `.env` 里写 `MINERU_API_TOKEN=你的token`，再在插件页把 `mineruTokenEnv` 指向它；修改 `.env` 后需要重启 DSH 才生效。
 
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `zoteroDataDir` | 自动探测 | Zotero 数据目录（含 `zotero.sqlite`） |
 | `mineruMode` | `none` | `none` / `local` / `cloud` |
 | `mineruLocalUrl` | `http://127.0.0.1:8000` | 本地 MinerU 服务地址 |
-| `mineruCloudToken` | 空 | mineru.net 的 token |
+| `mineruTokenEnv` | `MINERU_API_TOKEN` | MinerU token 的**环境变量名** |
 | `mineruAutoOnScanned` | `true` | 扫描件自动改用 MinerU |
+| `cloudApiKeyEnv` | `ZOTERO_API_KEY` | Zotero 云端 key 的环境变量名 |
+| `cloudUserID` | 空 | Zotero 云端 userID |
+| `embeddingApiKeyEnv` | `SILICONFLOW_API_KEY` | Embedding key 的环境变量名 |
 | `selectionProvider` / `selectionModel` | 空 | 划词用的模型；留空跟随宿主 |
 
 ### 关于批注写入

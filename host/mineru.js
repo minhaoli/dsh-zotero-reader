@@ -299,6 +299,6 @@ export async function parseCloud(pdfPath, options = {}) {
 export async function parseWithMineru(pdfPath, config = {}) {
   const mode = config.mineruMode ?? 'none'
   if (mode === 'local') return parseLocal(pdfPath, { url: config.mineruLocalUrl })
-  if (mode === 'cloud') return parseCloud(pdfPath, { token: config.mineruCloudToken })
+  if (mode === 'cloud') return parseCloud(pdfPath, { token: config.mineruToken })
   throw new Error('未启用 MinerU。请在插件设置里把 MinerU 模式设为「本地」或「云端」。')
 }

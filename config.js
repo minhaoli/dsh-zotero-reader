@@ -81,24 +81,27 @@ export const Config = z
       .description('MinerU 增强模式：扫描件或公式乱码时用它重新解析')
       .default('none'),
     mineruLocalUrl: z.string().description('本地 MinerU 服务地址').default('http://127.0.0.1:8000'),
-    mineruCloudToken: z.string()
-      .description('MinerU 云端 token（mineru.net 用户中心获取）')
-      .role('secret')
-      .default(''),
+    mineruTokenEnv: z.string()
+      .description('MinerU 云端 token 的**环境变量名**（值从 DSH 启动时加载的 .env / 系统环境读取）')
+      .default('MINERU_API_TOKEN'),
     mineruAutoOnScanned: z.boolean().description('扫描件自动改用 MinerU').default(true),
 
     /**
      * Zotero 云端 Web API（api.zotero.org）。
      *
      * 与 Zotero 10+ 本地 API 的授权 key 完全无关：后者由 host/annotations.js 自动申请并
-     * 持久化在 dataDir/zotero-api-key.json，不需要用户填。这里存的是用户在
-     * zotero.org/settings/keys 自己创建的账号级 key。
+     * 持久化在 dataDir/zotero-api-key.json，不需要用户填。这里只存**环境变量名**，
+     * 值放在 ~/.dsh/.env 的 ZOTERO_API_KEY 里。
      */
-    cloudApiKey: z.string()
-      .description('Zotero 云端 Web API key（zotero.org/settings/keys 创建，需允许读写）')
-      .role('secret')
-      .default(''),
+    cloudApiKeyEnv: z.string()
+      .description('Zotero 云端 Web API key 的环境变量名（默认 ZOTERO_API_KEY）')
+      .default('ZOTERO_API_KEY'),
     cloudUserID: z.string().description('Zotero 云端 userID（数字 ID，可在同一页面看到）').default(''),
+
+    /** 向量检索用的 embedding key：同样只存变量名，值放 .env。 */
+    embeddingApiKeyEnv: z.string()
+      .description('Embedding API key 的环境变量名（默认 SILICONFLOW_API_KEY）')
+      .default('SILICONFLOW_API_KEY'),
 
     /** 各功能的模型覆盖：`{ translate|explain|ask|docTranslate: { provider, model, reasoningEffort } }`。 */
     features: z.object({
