@@ -22,7 +22,8 @@
     "README.md",
     "README.en.md",
     "CHANGELOG.md",
-    "THIRD-PARTY-NOTICES.md"
+    "THIRD-PARTY-NOTICES.md",
+    "docs/images/*.png"
   ],
   "dsh": {
     "engines": {
