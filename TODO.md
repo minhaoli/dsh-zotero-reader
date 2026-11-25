@@ -347,3 +347,100 @@ const target = lines.filter(l => l.col === tcol && l.y <= dest.top + 0.6)
 **测试锚点脆弱**：`check-pdf-links.mjs` 用源码字符串 `indexOf` 定位分支，新增同名代码就会撞。修改 `client.js` 时如果加了测试里用到的字符串，先跑测试。
 
 **`node --check` 查不出未定义变量**：`renderDestBitmap` 里 `scale`/`availW` 未定义，语法合法，被 `catch` 吞成返回 `null`。表现为「有时不显示」，无任何报错。这类问题只能靠真实运行日志发现。
+---
+
+# 待办：把 Zotero 的全部工具搬进插件（2026-11-26 用户提出）
+
+用户原话：「我们还要把 zotero 的所有工具搬迁过来，合并到插件里面」
+
+## 现状
+
+插件只有 3 个工具（`host/tools.js`）：
+
+| 工具 | 说明 |
+|---|---|
+| `search_zotero_library` | 按关键词搜本地库 |
+| `read_zotero_paper` | 读 PDF 正文（带页码） |
+| `ask_zotero_paper` | 在论文里做带页码的检索问答 |
+
+MCP `zotero` 服务器有 31 个工具要搬（`search_tools` 是元工具，不搬）。
+
+## 分层（按依赖从易到难，建议按此顺序实现）
+
+### 第 1 层：本地 SQLite 直读，无外部依赖
+
+现有 `host/zotero.js` 已经在读 `zotero.sqlite` 快照，这批最省事：
+
+- `search_items`（现有 `search_zotero_library` 可扩展成完整版：q / qmode / itemType / tag / collectionKey / since / sort / start / limit）
+- `get_item`（单条全字段 + creators/tags/collections/relations/version，含 `include_children`）
+- `list_collections`（`zotero_list_collections`）
+- `list_tags`（`zotero_list_tags`）
+- `groups`（群组库列表 —— 注意需要 `libraries` 支持，当前只查个人库）
+- `whoami`（身份 + 默认库 + 后端可用性）
+- `saved_searches`（list / create / delete）
+
+### 第 2 层：全文与语义
+
+- `fulltext`（`zotero_fulltext`：get / set / since，读写附件已抽取文本）
+- `get_fulltext`（`zotero_get_fulltext`：query 定位段落 + page_range + outline + ocr）
+- `semantic_search`（`zotero_semantic_search`）+ `index`（`zotero_index`：build/update/refresh/status/stop/pause/resume/libraries）
+  - 依赖：需要一个本地向量索引。当前 `host/fulltext.js` 已走 Zotero 的 FTS5，语义搜索要另建
+  - 优先级：低（BM25 全文搜索已可用，语义是增强）
+
+### 第 3 层：写入（依赖本地 API key）
+
+现有 `host/annotations.js` 已有 `ensureApiKey` + `updateAnnotation` + `createAnnotation`，这批可复用：
+
+- `annotate`（`zotero_annotate`：add / delete，highlight/underline/note/image）
+- `create_items`（`zotero_create_items`：批量创建/更新，含 schema 校验、自动分块 50）
+- `update_item`（`zotero_update_item`：PATCH 语义 + dry_run + 版本冲突重试）
+- `delete_items`（`zotero_delete_items`：永久删除，需 `confirm:true`，默认禁用）
+- `trash_items`（`zotero_trash_items`：回收站 + restore，比 delete 安全，优先实现这个）
+- `manage_collections`（create / rename / reparent / delete / add_items / remove_items）
+- `manage_tags`（list / add / remove）
+- `tag_audit`（按受控词表审计）
+- `merge_items`（合并重复条目，含 dry_run + 版本前置条件）
+- `attach_file` / `attachment`（附件上传/下载/info，含 `find_oa` 走 OpenAlex）
+
+### 第 4 层：云端（依赖 cloudApiKey）
+
+- `import`（by_identifier / by_url / by_file / by_pdf，含 DOI/ISBN/PMID/arXiv 解析）
+- `export`（bibtex / biblatex / ris / csljson / csv 等 15 种格式）
+- `sync`（since 增量同步）
+- 云端版的 items / annotations 读（`/cloud/*` 路由已就绪）
+
+### 第 5 层：纯计算 / 外部服务
+
+- `bibliography` / `format_bibliography`（CSL 渲染，需要 citeproc-js）
+- `styles`（CSL 样式名解析）
+- `schema`（Zotero 数据模型）
+- `evidence_table`（把检索到的证据渲染成 Markdown/CSV 表格）
+- `scholar`（OpenAlex / Crossref 引用图：lookup / references / citations / related / notices）
+- `pdf_images`（PDF 页面/图片渲染，可复用插件已有的 pdfjs）
+- `word_document`（写带 Zotero 活字段的 .docx）
+
+## 关键设计问题（动手前要先定）
+
+1. **工具名前缀**：搬过来叫 `zotero_*` 还是 `search_zotero_library` 这种？现有 3 个工具已经在用，改名会破坏已有会话的习惯。建议保留现有 3 个的名字，新增的用 `zotero_*`。
+
+2. **库的寻址**：MCP 版区分 `library_type`（user/group）+ `library_id`。插件的 SQLite 快照现在只查个人库。`groups` 和群组库操作要先确认快照里有没有群组数据。
+
+3. **语义索引放哪**：MCP 版有自己的 index 存储（sqlite）。插件要建的话放 `dataDir/cache/` 下，且要处理"换 embedding 模型要重建"。
+
+4. **能力分级暴露**：31 个工具全暴露会让工具列表爆炸，模型选择困难。建议：
+   - 高频只读（search / get / collections / tags / fulltext）默认开启
+   - 写入类默认关闭，由用户在设置里显式开启
+   - 危险操作（`delete_items` 永久删除）默认禁用
+
+5. **与现有 MCP 的关系**：搬完之后 MCP `zotero` 服务器是否还要保留？两个都开着会导致同名工具冲突、模型二选一犯难。建议搬完后在 profile 里停用 MCP。
+
+## 实施建议
+
+不要一次搬 31 个。按层推进，每层完成后让用户实测一轮：
+
+1. 先做第 1 层（本地只读 7 个）—— 无外部依赖，风险最低，覆盖日常大部分需求
+2. 再做第 3 层的 trash/update/create（写入是第二大需求）
+3. 第 2 层语义搜索优先级最低
+4. 第 4/5 层按用户实际用到的再补
+
+每层都要有对应 `test/check-*.mjs`，断言「工具已注册 + schema 正确 + 参数校验 + 错误分类」，不依赖真实 Zotero。
