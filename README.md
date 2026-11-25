@@ -43,15 +43,13 @@
 
 ## 安装
 
-在 DSH 的 profile 目录里执行：
+用 DSH 自带的插件命令安装，把 `desktop` 换成你实际使用的 profile 名：
 
 ```bash
-npm i minhaoli/dsh-zotero-reader
+dsh plugin --profile desktop add github:minhaoli/dsh-zotero-reader
 ```
 
-这会把插件和它的依赖（`pdfjs-dist`）一起装进 `node_modules`，不需要手动 clone，也不用再单独跑 `npm i`。
-
-然后把 bundle 加进 profile 的 `package.json`（依赖项 npm 已经写好了）：
+这条命令会把插件和它的依赖（`pdfjs-dist`）装进那个 profile 的 `node_modules`。它只是把参数转发给 pnpm，所以不会自动登记 bundle，还需要把包名加进同一个 profile 的 `package.json`：
 
 ```json
 {
@@ -61,7 +59,7 @@ npm i minhaoli/dsh-zotero-reader
 
 重启 DSH，右栏「开始」页会出现「Zotero 伴读」卡片。
 
-升级到新版本：重跑同一条 `npm i minhaoli/dsh-zotero-reader` 即可。
+升级到新版本：重跑同一条 `dsh plugin ...` 命令即可。
 
 ### 从本地目录开发
 

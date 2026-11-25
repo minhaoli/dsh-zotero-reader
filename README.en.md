@@ -43,15 +43,13 @@ The library browses every paper along your Zotero collection tree.
 
 ## Install
 
-From your DSH profile directory:
+Install with DSH's own plugin command, replacing `desktop` with the profile you actually use:
 
 ```bash
-npm i minhaoli/dsh-zotero-reader
+dsh plugin --profile desktop add github:minhaoli/dsh-zotero-reader
 ```
 
-This installs the plugin together with its dependency (`pdfjs-dist`); no manual clone or extra `npm i` needed.
-
-Then add the bundle to your profile `package.json` (npm has already added the dependency entry):
+This installs the plugin and its dependency (`pdfjs-dist`) into that profile's `node_modules`. The command forwards its arguments to pnpm, so it does not register the bundle for you — add the package name to the same profile's `package.json`:
 
 ```json
 {
@@ -61,7 +59,7 @@ Then add the bundle to your profile `package.json` (npm has already added the de
 
 Restart DSH. A "Zotero reader" card appears on the right sidebar's start page.
 
-To upgrade, run the same `npm i minhaoli/dsh-zotero-reader` again.
+To upgrade, run the same `dsh plugin ...` command again.
 
 ### Developing from a local directory
 
