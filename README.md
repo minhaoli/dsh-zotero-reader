@@ -4,7 +4,7 @@
 
 在 DSH 右侧栏里读 Zotero 的本地 PDF：带页码的问答、原文大纲、以及和 Zotero 互通的批注。
 
-![PDF 阅读器：顶部工具栏显示页码 4/15、缩放与配色，正文为双栏排版，含 FIGURE 1 示意图与编号公式](docs/images/reader.png)
+![PDF 阅读器：顶部工具栏显示页码 4/15、缩放与配色，正文为双栏排版，含 FIGURE 1 示意图与编号公式](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/reader.png)
 
 ## 解决什么问题
 
@@ -33,11 +33,11 @@
 
 ## 界面
 
-![文献库：顶部搜索框，下方「共 588 篇有 PDF」，再往下按 Zotero 专题分组列出各专题的文献数](docs/images/library.png)
+![文献库：顶部搜索框，下方「共 588 篇有 PDF」，再往下按 Zotero 专题分组列出各专题的文献数](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/library.png)
 
 文献库按 Zotero 专题树浏览全部文献。
 
-![「本次搜索」视图：全部文献库、Zotero PDF、本次搜索三个 tab，空状态提示「这次对话还没搜过 Zotero 文献」](docs/images/session-search.png)
+![「本次搜索」视图：全部文献库、Zotero PDF、本次搜索三个 tab，空状态提示「这次对话还没搜过 Zotero 文献」](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/session-search.png)
 
 「本次搜索」只显示这次对话里 AI 搜出来的那几篇。
 
@@ -73,9 +73,9 @@ dsh plugin --profile desktop add github:minhaoli/dsh-zotero-reader
 
 ## 配置
 
-![配置页上半：Zotero 数据目录、插件数据目录、本地授权已授权，以及 MinerU 的关闭／本地服务／云端 API 三个选项](docs/images/settings-general.png)
+![配置页上半：Zotero 数据目录、插件数据目录、本地授权已授权，以及 MinerU 的关闭／本地服务／云端 API 三个选项](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/settings-general.png)
 
-![配置页下半：Zotero 云端 userID、三个 API 凭据环境变量名均显示「已读到」，以及划词翻译已填的模型覆盖](docs/images/settings-models.png)
+![配置页下半：Zotero 云端 userID、三个 API 凭据环境变量名均显示「已读到」，以及划词翻译已填的模型覆盖](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/settings-models.png)
 
 配置在 DSH 侧栏「插件」→ dsh-zotero-reader 的组合包页里直接显示（描述与行之间）；保存后写入当前 profile 的 `cordis.patch.yml`，宿主会重载插件使其生效。
 

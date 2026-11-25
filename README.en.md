@@ -4,7 +4,7 @@
 
 Read your Zotero PDFs in the DSH right sidebar: page-accurate Q&A, a real outline, and annotations that round-trip with Zotero.
 
-![PDF reader: the toolbar shows page 4/15 with zoom and color scheme, and the body is a two-column layout with FIGURE 1 and numbered equations](docs/images/reader.png)
+![PDF reader: the toolbar shows page 4/15 with zoom and color scheme, and the body is a two-column layout with FIGURE 1 and numbered equations](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/reader.png)
 
 ## Why
 
@@ -33,11 +33,11 @@ This plugin lets the assistant read PDFs straight out of your Zotero library, ke
 
 ## Screens
 
-![Library: a search box at the top and "588 papers with PDFs", followed by the Zotero collection tree with paper counts](docs/images/library.png)
+![Library: a search box at the top and "588 papers with PDFs", followed by the Zotero collection tree with paper counts](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/library.png)
 
 The library browses every paper along your Zotero collection tree.
 
-![The "found in this conversation" view: the three tabs, with the empty state saying this conversation has not searched Zotero yet](docs/images/session-search.png)
+![The "found in this conversation" view: the three tabs, with the empty state saying this conversation has not searched Zotero yet](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/session-search.png)
 
 "Found in this conversation" shows only the papers the assistant found in this conversation.
 
@@ -73,9 +73,9 @@ With a link install you must install dependencies yourself once: `npm i`.
 
 ## Configuration
 
-![Upper half of the settings page: Zotero data directory, plugin data directory, local authorization status, and the three MinerU modes](docs/images/settings-general.png)
+![Upper half of the settings page: Zotero data directory, plugin data directory, local authorization status, and the three MinerU modes](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/settings-general.png)
 
-![Lower half of the settings page: Zotero cloud userID, three API credential environment variable names all shown as read, and the model override filled in for translation](docs/images/settings-models.png)
+![Lower half of the settings page: Zotero cloud userID, three API credential environment variable names all shown as read, and the model override filled in for translation](https://raw.githubusercontent.com/minhaoli/dsh-zotero-reader/main/docs/images/settings-models.png)
 
 The configuration appears directly on the DSH sidebar → Plugins → dsh-zotero-reader bundle page (between the description and the rows). Saving writes to the current profile's `cordis.patch.yml`, and the host reloads the plugin so the change takes effect.
 
