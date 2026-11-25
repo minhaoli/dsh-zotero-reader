@@ -77,7 +77,6 @@ API key **只存环境变量名**，值放在 `~/.dsh/.env`（DSH 启动时加�
 | `cloudApiKeyEnv` | `ZOTERO_API_KEY` | Zotero 云端 key 的环境变量名 |
 | `cloudUserID` | 空 | Zotero 云端 userID |
 | `embeddingApiKeyEnv` | `SILICONFLOW_API_KEY` | Embedding key 的环境变量名 |
-| `selectionProvider` / `selectionModel` | 空 | 划词用的模型；留空跟随宿主 |
 
 ### 关于批注写入
 

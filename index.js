@@ -564,8 +564,6 @@ function normalizeConfig(config) {
   return {
     zoteroDataDir: config.zoteroDataDir ?? '',
     dataDir: config.dataDir ?? '',
-    selectionProvider: config.selectionProvider ?? '',
-    selectionModel: config.selectionModel ?? '',
     mineruMode: ['none', 'local', 'cloud'].includes(config.mineruMode) ? config.mineruMode : 'none',
     mineruLocalUrl: config.mineruLocalUrl || 'http://127.0.0.1:8000',
     mineruTokenEnv,
@@ -687,8 +685,6 @@ function publicSettingsView(settings, resolvedDataDir) {
   return {
     zoteroDataDir: settings.zoteroDataDir,
     dataDir: settings.dataDir,
-    selectionProvider: settings.selectionProvider,
-    selectionModel: settings.selectionModel,
     mineruMode: settings.mineruMode,
     mineruLocalUrl: settings.mineruLocalUrl,
     mineruAutoOnScanned: settings.mineruAutoOnScanned,
@@ -744,7 +740,7 @@ function buildConfigPatch(body) {
   }
   const patch = {}
   for (const key of [
-    'zoteroDataDir', 'dataDir', 'mineruLocalUrl', 'selectionProvider', 'selectionModel', 'cloudUserID',
+    'zoteroDataDir', 'dataDir', 'mineruLocalUrl', 'cloudUserID',
     'mineruTokenEnv', 'cloudApiKeyEnv', 'embeddingApiKeyEnv',
   ]) {
     if (body[key] === undefined) continue
@@ -939,24 +935,21 @@ async function serveVendorAsset(res, subPath) {
 /**
  * 模型覆盖解析。
  *
- * 优先级：`features.<name>` > 旧的 `selectionProvider/selectionModel` > 跟随会话。
+ * 优先级：`features.<name>` > 跟随会话当前模型。
+ * 旧版 `selectionProvider/selectionModel` 已移除：它与 features 的「划词翻译」重复，
+ * 且旧配置里默认就是空串，删除不影响现有用户。
  *
- * 为什么保留旧字段：设置文件是用户机器上已经存在的一份 json，
- * 直接删字段会让老用户的配置静默失效。新的 features 只是多一层覆盖。
- *
- * `feature` 为空表示沿用老行为（划词翻译用 selection*）。
+ * 只有 provider 和 model 都填了才算覆盖；只填一半按「跟随会话」处理，
+ * 避免拿一个只有 provider 的半截覆盖去请求。
+ * `reasoningEffort` 为空表示用模型默认，不传这个键。
  */
 function selectionOverride(settings, feature = '') {
   const overrides = settings.features ?? {}
   const target = feature ? overrides[feature] : null
   if (target?.provider && target?.model) {
     const out = { provider: target.provider, model: target.model }
-    // 空字符串 = 跟随模型默认，不传这个键
     if (target.reasoningEffort) out.reasoningEffort = target.reasoningEffort
     return out
-  }
-  if (settings.selectionProvider && settings.selectionModel) {
-    return { provider: settings.selectionProvider, model: settings.selectionModel }
   }
   return undefined
 }

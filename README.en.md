@@ -77,7 +77,6 @@ API keys are stored as **environment variable names**; the values live in `~/.ds
 | `cloudApiKeyEnv` | `ZOTERO_API_KEY` | Environment variable name holding the Zotero cloud key |
 | `cloudUserID` | empty | Zotero cloud userID |
 | `embeddingApiKeyEnv` | `SILICONFLOW_API_KEY` | Environment variable name holding the embedding key |
-| `selectionProvider` / `selectionModel` | empty | Model for selection actions; empty follows the host |
 
 ### Writing annotations
 

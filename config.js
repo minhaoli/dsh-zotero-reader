@@ -67,9 +67,6 @@ export const Config = z
     zoteroDataDir: z.string().description('Zotero 数据目录；留空则自动探测').default(''),
     dataDir: z.string().description('缓存目录；留空则在 ~/.dsh-zotero-reader').default(''),
 
-    selectionProvider: z.string().description('划词翻译的 provider；留空跟随宿主模型').default(''),
-    selectionModel: z.string().description('划词翻译的 model；留空跟随宿主模型').default(''),
-
     mineruMode: z
       .union([
         z.const('none').description('关闭'),

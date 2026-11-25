@@ -10,7 +10,8 @@
  *   4. 迁移：config 仍是默认值、旧 settings.json 有非默认值时用旧值补齐
  *      （MinerU 模式/开关不能丢）；旧明文 token 不再参与运行，只触发告警
  *   5. 通过插件页保存成功后，旧 settings.json 改名，回退不再参与后续启动
- *   6. features / translateEfforts 的归一化与「features > selection* > 跟随会话」优先级
+ *   6. features / translateEfforts 的归一化与「features > 跟随会话」优先级
+ *      （旧 selectionProvider/selectionModel 已移除，配置里残留也应被忽略）
  *
  * 全部本地：临时 dataDir + 桩 ctx / 桩 configEditor，**不联网、不依赖 Zotero 运行**。
  * 三个测试用环境变量由本文件自己注入，跑完不需要清理（进程退出即消失）。
@@ -569,46 +570,39 @@ async function selectionRun(config, mode = 'translate') {
 
 const O1 = await selectionRun({
   features: { translate: { provider: 'feat-p', model: 'feat-m' } },
-  selectionProvider: 'old-p',
-  selectionModel: 'old-m',
 })
 check('/selection 真实调用了 llm 并返回译文',
   O1.res.statusCode === 200 && O1.res.json?.text === '译文' && O1.calls > 0,
   `status=${O1.res.statusCode} text=${JSON.stringify(O1.res.json?.text)} calls=${O1.calls}`)
-check('优先级：features.translate 压过 selectionProvider/selectionModel',
+check('features.translate 生效（provider/model 来自覆盖）',
   O1.provider === 'feat-p' && O1.model === 'feat-m', `${O1.provider}/${O1.model}`)
 
-const O2 = await selectionRun({ selectionProvider: 'old-p', selectionModel: 'old-m' })
-check('优先级：没有 features 时用 selectionProvider/selectionModel',
-  O2.provider === 'old-p' && O2.model === 'old-m', `${O2.provider}/${O2.model}`)
+const O2 = await selectionRun({})
+check('没有 features 时跟随会话当前模型',
+  O2.provider === 'session-p' && O2.model === 'session-m', `${O2.provider}/${O2.model}`)
 
-const O3 = await selectionRun({})
-check('优先级：两者都为空时跟随会话当前模型',
-  O3.provider === 'session-p' && O3.model === 'session-m', `${O3.provider}/${O3.model}`)
+// 旧字段已从 schema / normalizeConfig 移除；即使旧配置文件里还残留，也必须被忽略。
+const O2b = await selectionRun({ selectionProvider: 'old-p', selectionModel: 'old-m' })
+check('残留的 selectionProvider/selectionModel 被忽略（仍跟随会话）',
+  O2b.provider === 'session-p' && O2b.model === 'session-m', `${O2b.provider}/${O2b.model}`)
+
+const O3 = await selectionRun({
+  features: { explain: { provider: 'x-p', model: 'x-m' } },
+}, 'explain')
+check('features.explain 作用于「解释」',
+  O3.provider === 'x-p' && O3.model === 'x-m', `${O3.provider}/${O3.model}`)
+
+const O3b = await selectionRun({
+  features: { explain: { provider: 'x-p', model: 'x-m' } },
+}, 'translate')
+check('features.explain 不影响「翻译」（跟随会话）',
+  O3b.provider === 'session-p' && O3b.model === 'session-m', `${O3b.provider}/${O3b.model}`)
 
 const O4 = await selectionRun({
   features: { translate: { provider: 'feat-p' } },
-  selectionProvider: 'old-p',
-  selectionModel: 'old-m',
 })
-check('features 只给 provider 不算覆盖（回落 selection*）',
-  O4.provider === 'old-p' && O4.model === 'old-m', `${O4.provider}/${O4.model}`)
-
-const O5a = await selectionRun({
-  features: { explain: { provider: 'x-p', model: 'x-m' } },
-  selectionProvider: 'old-p',
-  selectionModel: 'old-m',
-}, 'explain')
-check('features.explain 作用于「解释」', O5a.provider === 'x-p' && O5a.model === 'x-m',
-  `${O5a.provider}/${O5a.model}`)
-
-const O5b = await selectionRun({
-  features: { explain: { provider: 'x-p', model: 'x-m' } },
-  selectionProvider: 'old-p',
-  selectionModel: 'old-m',
-}, 'translate')
-check('features.explain 不影响「翻译」（回落 selection*）',
-  O5b.provider === 'old-p' && O5b.model === 'old-m', `${O5b.provider}/${O5b.model}`)
+check('features 只给 provider 不算覆盖（跟随会话）',
+  O4.provider === 'session-p' && O4.model === 'session-m', `${O4.provider}/${O4.model}`)
 
 /* ------------------- 12) 整篇翻译后端已删除：路由不再存在（404） */
 
