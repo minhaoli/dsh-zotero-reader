@@ -701,3 +701,36 @@ DSH 启动时把 `.env` 加载进 `process.env`，插件（跑在 host 进程里
 前端入口早已移除（`translateAll` / `exportChinese` / `modeChinese` 零引用，`/translate` 字符串在 `client.js` 零命中），host 侧仍在空转：`index.js` 的 `POST /translate`（L1721）、`/translate/progress`（L1767）、缓存读取（L1803）、缓存目录（L1811），加 `host/translate.js` 的 `translateDocument`、`config.js` 的 `translateConcurrency` / `translateChunkChars`、`features.docTranslate`。
 
 保留 `POST /translate/selection` 与 `translateSelection` / `pickSelection`（划词翻译与解释），保留 `translateEfforts`。磁盘上已有的 `dataDir/translate/` 缓存不删，只是不再读写。
+
+## 2026-11-26 追加：浮窗边界与横向滚动（用户实测提出）
+
+### 缺陷 1：位图浮窗横向溢出到侧栏之外
+
+用户原话「悬浮窗会超出侧边栏的范围显示在最顶层」，澄清为「横向超出侧栏右边，盖到聊天区上」。
+
+根因：`.zr-link-tip{position:fixed;z-index:2147483000}`（`client.js:1513`），尺寸由 `computePopupSize`（`client.js:6609`）按 `pageRect.width * 0.9` 给出，兜底只参照 `window.innerWidth`。全链路没有一处参照侧栏自身宽度，所以侧栏比浮窗窄时它就压到宿主主界面上。
+
+范围限定：只修图片 / 公式 / 表格的位图浮窗。超链接的文字预览不动 —— 两者共用 `.zr-link-tip` class，需要按 data 属性或 `.zr-tip-shot` 子节点区分。
+
+### 缺陷 2：浮窗只能上下滚，需要左右滚
+
+用户原话「由于现在窗口限制无法呈现完整，所以需要在上下滑动的基础之上增加左右滑动查看的功能」，明确指浮窗里的位图，用途是放大看细节。
+
+现状 `.zr-tip-shot{overflow-y:auto;overflow-x:hidden}`（`client.js:1556`），横向锁死。
+
+已知陷阱：`overflow-x:hidden` 是 commit `3e112df` 为消掉「纵向滚动条占位挤出的 5px 横向条」加的。放开横向滚动不能让那条回来，现有对策是 canvas 入槽后按 `shot.clientWidth` 重设宽度。
+
+## 全选缺陷：排查进展（推翻一条主要假设）
+
+只读诊断结论，后续不用重查：
+
+- 宿主侧可靠排除。app.asar 里 `webContents.selectAll` / `selectAllChildren` / `setBaseAndExtent` 全为 0；11 处 `selectAll` 都是 i18n 文案与 Electron 菜单 role，只在按键或点菜单时生效；宿主代码对 `zotero` 零引用，不存在针对本插件的特化行为。
+- 插件侧可靠排除。`pagesinit` / `resume-applied` / `decoratePage` / restore-mask 均不碰选区；全文 `designMode` / `createEvent` / `KeyboardEvent` / `MouseEvent` 零命中；插件与宿主同 document，没有 iframe / shadowRoot / webview。
+- pdf.js 的 `endOfContent` 放大器假设作废。该机制只在 Chromium < 148 启用（`pdf_viewer.mjs:6377` 的 `isFirefoxOrModernChromium` 直接 return），而本机 `resources/version` = `44.7.0`，Electron 44 对应 Chromium 在 150 以上，这段代码根本不执行。
+- 「首次打开走 fit-width 所以触发缩放」这个推断也作废。自动 `page-width` 只打 `viewer:resume-scale, mode:'default'`，`via:'fit-width'` 全文仅一处 —— fit-width 按钮的 onClick，而全文 `.click()` 零命中。
+
+结论：静态上不存在能产生「首次打开就全选」的代码路径，必须运行期埋点。
+
+埋点方案（已设计，未实现）：`setDocument` 之前 arm，先快照 `sel@arm` 用于区分「装载前就有选区」还是「装载后被设」；再 monkey-patch `Selection.prototype.addRange` / `setBaseAndExtent` / `selectAllChildren`、`Range.prototype.selectNodeContents`、`document.execCommand` 五个写入 API 记录调用栈，配合 `selectstart` 的 `target` 与 `endOfContent` 几何状态。窗口 3 秒、首次捕获非折叠选区即提前结束、5 秒硬兜底，事件限流，用完还原。
+
+阻塞点：需要用户配合复现一次（打开一篇从没打开过的文章）。
