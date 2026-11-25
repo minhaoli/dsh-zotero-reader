@@ -734,3 +734,29 @@ DSH 启动时把 `.env` 加载进 `process.env`，插件（跑在 host 进程里
 埋点方案（已设计，未实现）：`setDocument` 之前 arm，先快照 `sel@arm` 用于区分「装载前就有选区」还是「装载后被设」；再 monkey-patch `Selection.prototype.addRange` / `setBaseAndExtent` / `selectAllChildren`、`Range.prototype.selectNodeContents`、`document.execCommand` 五个写入 API 记录调用栈，配合 `selectstart` 的 `target` 与 `endOfContent` 几何状态。窗口 3 秒、首次捕获非折叠选区即提前结束、5 秒硬兜底，事件限流，用完还原。
 
 阻塞点：需要用户配合复现一次（打开一篇从没打开过的文章）。
+
+## 智能体分工与在办项（2026-11-26 01:42）
+
+原则沿用 `~/.dsh/AGENTS.md`：同一块代码的后续修改、返工、迭代都交回原来那个成员，不新开从头交代上下文。
+
+一个已踩过的坑：`subagent` 的模型在创建时绑定，不能中途切换。`feature-agent` 因模型侧原因连续两次静默失败（无任何产出与报告），只能新开成员接手，不能原地换模型。所以成员一旦开始静默失败，直接换人，别反复重试。
+
+| 成员 | 负责范围 | 状态 |
+|---|---|---|
+| `config-unify` | 配置统一到 DSH 插件页、API 凭据环境变量化 | 已完成 `c5ee24e` |
+| `zhdel` | 删除「一键中文版」整篇翻译后端 | 已完成 `61dc685` |
+| `selectdiag` | 首次打开整篇文字被全选的诊断 | 只读诊断完成，运行期埋点未实现 |
+| `findui` | 阅读器内 Ctrl+F 查找 + 工具条搜索按钮 | 正在实现 |
+| `popupfix` | 位图浮窗越界、位图横向滚动 | 已中断（零落盘改动），待续 |
+
+### 浮窗两项待续（交回 `popupfix`）
+
+1. 位图浮窗横向溢出到侧栏之外，盖住聊天区。根因：`.zr-link-tip` 是 `position:fixed` 且 `z-index:2147483000`，尺寸由 `computePopupSize` 按 `pageRect.width * 0.9` 给出，兜底只参照 `window.innerWidth`，全链路没有一处参照侧栏自身宽度。
+2. 浮窗内的位图需要横竖双向滚动（用户要放大看细节）。现状 `.zr-tip-shot` 是 `overflow-y:auto;overflow-x:hidden`，横向锁死。
+
+边界与陷阱：
+
+- 只修图片 / 公式 / 表格的位图浮窗，超链接的文字预览不动 —— 两者共用 `.zr-link-tip` class，要按 data 属性或 `.zr-tip-shot` 子节点区分。
+- `overflow-x:hidden` 是 commit `3e112df` 为消掉「纵向滚动条占位挤出的 5px 横向条」加的，放开横向滚动不能让那条回来。现有对策是 canvas 入槽后按 `shot.clientWidth` 重设宽度。
+
+中断原因：与 `findui` 同时改 `client.js` 会互相覆盖，所以暂停。它没有任何落盘改动，等 `findui` 提交后按上面这份说明原样续派即可，不用重新交代背景。
