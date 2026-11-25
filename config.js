@@ -1,13 +1,17 @@
 /**
  * 配置 schema。
  *
- * 为什么需要它：不导出 `Config`，宿主的插件页就不会渲染任何设置表单
- * （`listConfigs` 里 status 是 `absent`）。MinerU 模式这类开关必须能让用户改，
- * 否则只能改 YAML —— 用户实际上就是被卡在这里。
+ * 这个导出有两个作用：
+ *   1. Host 激活插件时按它校验 profile 里的 `config`（写错会在加载期报错，而不是运行到一半才炸）；
+ *   2. 让宿主的 Config inspect 能读出字段说明。
+ *
+ * 注意它**不会**自动生成配置表单：DSH 插件页的配置页由插件自己注册 slot
+ * （本插件的浏览器半边注册了 `plugins.row.config`），读取/保存走 `/zotero-reader/config`，
+ * 保存由 Host 用 `ctx.configEditor.edit()` 写回 profile patch，改完由宿主重载插件生效。
  *
  * 为什么用动态 import + 兜底路径：本插件是 link 安装，模块解析不会向上走到
  * profile 的 node_modules，直接 `import '@deepseek-ai/schemastery'` 会
- * ERR_MODULE_NOT_FOUND（实测）。而宿主的插件页确实从这个包读 schema，
+ * ERR_MODULE_NOT_FOUND（实测）。而 Host 确实从这个包读 schema，
  * 所以按「先正常 import，再试 profile 绝对路径」两段来取。
  *
  * 取不到时导出 `undefined`：宿主显示「无配置」而不是崩溃，插件本身照常工作。
@@ -49,6 +53,15 @@ async function loadSchemaModule() {
 
 const z = await loadSchemaModule()
 
+/** 单个功能的模型覆盖：三项都留空 = 跟随会话当前模型。 */
+function featureSchema(label) {
+  return z.object({
+    provider: z.string().description(`${label}的 provider；留空跟随会话`).default(''),
+    model: z.string().description(`${label}的 model；留空跟随会话`).default(''),
+    reasoningEffort: z.string().description(`${label}的推理档位；留空用模型默认`).default(''),
+  })
+}
+
 export const Config = z
   ? z.object({
     zoteroDataDir: z.string().description('Zotero 数据目录；留空则自动探测').default(''),
@@ -73,6 +86,35 @@ export const Config = z
       .role('secret')
       .default(''),
     mineruAutoOnScanned: z.boolean().description('扫描件自动改用 MinerU').default(true),
+
+    /**
+     * Zotero 云端 Web API（api.zotero.org）。
+     *
+     * 与 Zotero 10+ 本地 API 的授权 key 完全无关：后者由 host/annotations.js 自动申请并
+     * 持久化在 dataDir/zotero-api-key.json，不需要用户填。这里存的是用户在
+     * zotero.org/settings/keys 自己创建的账号级 key。
+     */
+    cloudApiKey: z.string()
+      .description('Zotero 云端 Web API key（zotero.org/settings/keys 创建，需允许读写）')
+      .role('secret')
+      .default(''),
+    cloudUserID: z.string().description('Zotero 云端 userID（数字 ID，可在同一页面看到）').default(''),
+
+    /** 各功能的模型覆盖：`{ translate|explain|ask|docTranslate: { provider, model, reasoningEffort } }`。 */
+    features: z.object({
+      translate: featureSchema('划词翻译'),
+      explain: featureSchema('解释'),
+      ask: featureSchema('提问'),
+      docTranslate: featureSchema('整篇翻译'),
+    }).description('各功能的模型覆盖；三项都留空表示跟随会话当前模型').default({}),
+
+    /**
+     * 划词翻译的推理档位回退序列（原来硬编码在 host/translate.js）。
+     * `null` 是合法元素，表示「模型默认」，所以用 union 而不是纯 string 数组。
+     */
+    translateEfforts: z.array(z.union([z.string(), z.const(null)]))
+      .description('划词翻译的推理档位回退序列；null 表示模型默认。默认 off → low → 模型默认')
+      .default(['off', 'low', null]),
   })
   : undefined
 

@@ -43,8 +43,10 @@ export const inject = ['tools']
 
 /**
  * 配置 schema 转出。
- * 宿主只认这个导出：没有它，插件页就不渲染设置表单（listConfigs 里 status 是 absent），
- * MinerU 模式这类开关用户就没法改 —— 这正是「根本没地方给我设置」的原因。
+ *
+ * 宿主读它来**校验** profile 里这一行的 `config`（不导出时 Config inspect 里 status 是 absent）。
+ * 注意它本身不会生成表单：插件页的配置页由浏览器半边注册 `plugins.row.config` 提供，
+ * 读写走 `/zotero-reader/config`，保存由这里的 configEditor 写回 profile patch。
  * 取不到 schemastery 时它是 undefined，宿主显示「无配置」，插件功能不受影响。
  */
 export { Config } from './config.js'
@@ -172,74 +174,70 @@ function applyInner(ctx, config = {}) {
   } catch { /* 首次运行没有这个文件，属正常 */ }
 
   /**
-   * 运行期设置。
+   * 配置来源：**以宿主 config 为准**。
    *
-   * 宿主插件页里改配置要重载整个插件才生效，而 MinerU 这类开关用户是想即时切的；
-   * 而且实测宿主没把这个插件渲染成可点的设置入口。所以设置改为「面板里直接改、
-   * 存一份 json、立即生效」，YAML 里的值只作为初始默认。
+   * 配置入口已统一到 DSH 插件页（浏览器半边注册 `plugins.row.config`，
+   * 页面读写 `/zotero-reader/config`，保存由这里调 `ctx.configEditor.edit()`
+   * 写回 profile patch，宿主随即重载插件使其生效）。
+   *
+   * `settings.json` 只作为旧版本（阅读器浮层直接写 json）的**只读回退**：
+   * 某个字段在 config 里仍是默认值、而旧文件里有非默认值时，才用旧值补上。
+   * 一旦用户通过插件页保存过一次，`writeConfig` 会把旧文件改名，
+   * 回退随之失效 —— 否则「用户明确把 MinerU 改回 none」会被旧值复活。
    */
   const settings = normalizeConfig(config)
   const settingsFile = path.join(dataDir, 'settings.json')
+  let legacyApplied = []
   try {
-    const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'))
-    if (saved && typeof saved === 'object') Object.assign(settings, normalizeConfig({ ...settings, ...saved }))
-  } catch { /* 没有存过就用默认 */ }
-
-  function saveSettings(patch) {
-    const next = normalizeConfig({ ...settings, ...patch })
-    Object.assign(settings, next)
-    try {
-      fs.mkdirSync(dataDir, { recursive: true })
-      fs.writeFileSync(settingsFile, JSON.stringify(next, null, 2), 'utf8')
-    } catch (error) {
-      throw new Error(`保存设置失败：${error.message}`)
+    const legacy = JSON.parse(fs.readFileSync(settingsFile, 'utf8'))
+    if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) {
+      legacyApplied = applyLegacySettings(settings, legacy)
     }
-    return settings
+  } catch { /* 没有旧文件，或内容坏了：按 config 走 */ }
+  if (legacyApplied.length > 0) {
+    console.warn(
+      `[dsh-zotero-reader] 检测到旧的 settings.json，已作为回退值使用（${legacyApplied.join(', ')}）。`
+      + '请到 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」重新设置；'
+      + '在那里保存后该文件会自动改名，不再参与读取。'
+      + `（${settingsFile}）`,
+    )
   }
 
   /**
-   * TEMP SPIKE（验证 configEditor 能否定位并写入本插件的 bundle 行）：
-   * 只改自己的 translateConcurrency 4→5→4，日志写 config-spike.log，
-   * 阶段标记写 config-spike.phase。验证完必须整段删除。
+   * 把「插件页表单的 patch」并进当前生效设置，交给宿主 configEditor 写回。
+   *
+   * 为什么不用 `fs.writeFileSync`：配置的事实来源已是 profile 的 Cordis patch，
+   * 插件自己再存一份 json 就是第二个入口。configEditor 会校验完整配置、
+   * 串行化写入，并让宿主重载这一行。
    */
-  function runConfigEditorSpike() {
-    const logFile = path.join(dataDir, 'config-spike.log')
-    const phaseFile = path.join(dataDir, 'config-spike.phase')
-    const log = (line) => {
-      try {
-        fs.mkdirSync(dataDir, { recursive: true })
-        fs.appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`, 'utf8')
-      } catch { /* spike 日志失败不致命 */ }
+  async function writeConfig(patch) {
+    const editor = ctx.get('configEditor')
+    if (!editor || typeof editor.edit !== 'function') {
+      throw new Error('当前 Host 没有提供 configEditor，无法写回插件配置')
     }
-    try {
-      const editor = ctx.get('configEditor')
-      const ownEntry = ctx.fiber?.entry
-      log(`start editor=${editor ? 'yes' : 'no'} ownEntry=${ownEntry?.options?.id ?? 'none'} ownName=${ownEntry?.options?.name ?? ''}`)
-      if (!editor) return
-      const rows = editor.entries()
-      log(`entries(${rows.length}): ${rows.map((row) => `${row.options.id}/${row.options.name}`).join(' | ')}`)
-      const target = rows.find((row) => row.options.id === ownEntry?.options?.id)
-        ?? rows.find((row) => row.options.name === 'dsh-zotero-reader')
-      log(`target=${target?.options?.id ?? 'NOT FOUND'}`)
-      if (!target) return
-      const phase = fs.existsSync(phaseFile) ? fs.readFileSync(phaseFile, 'utf8').trim() : '1'
-      log(`phase=${phase} before=${JSON.stringify(target.options.config ?? {})}`)
-      if (phase === '1') {
-        fs.writeFileSync(phaseFile, '2', 'utf8')
-        editor.edit(target, (current) => ({ ...current, translateConcurrency: 5 }))
-          .then(() => log('edit1 resolved'))
-          .catch((error) => log(`edit1 FAILED: ${error?.stack ?? error}`))
-      } else if (phase === '2') {
-        fs.writeFileSync(phaseFile, 'done', 'utf8')
-        editor.edit(target, (current) => ({ ...current, translateConcurrency: 4 }))
-          .then(() => log('edit2 resolved'))
-          .catch((error) => log(`edit2 FAILED: ${error?.stack ?? error}`))
+    const ownId = ctx.fiber?.entry?.options?.id
+    const findTarget = () => editor.entries().find((row) => row.options.id === ownId)
+      ?? editor.entries().find((row) => row.options.name === 'dsh-zotero-reader')
+    const target = findTarget()
+    if (!target) {
+      throw new Error('configEditor 里找不到本插件的可编辑条目（dsh-zotero-reader）')
+    }
+    const merged = { ...settings, ...patch }
+    // 表单可能只提交某个功能的一项：按功能、按字段合并，别把其它配置抹成默认值。
+    if (patch.features !== undefined) {
+      merged.features = { ...settings.features }
+      for (const [name, row] of Object.entries(patch.features)) {
+        merged.features[name] = { ...(settings.features[name] ?? {}), ...row }
       }
-    } catch (error) {
-      log(`SPIKE THREW: ${error?.stack ?? error}`)
     }
+    const next = normalizeConfig(merged)
+    await editor.edit(target, () => ({ ...next }))
+    // 配置已落到 profile patch，旧 json 不再需要：改名保留，避免下次启动被回退值复活。
+    try {
+      if (fs.existsSync(settingsFile)) fs.renameSync(settingsFile, `${settingsFile}.migrated-${Date.now()}`)
+    } catch { /* 改名失败不影响配置已保存 */ }
+    return next
   }
-  setTimeout(runConfigEditorSpike, 3000)
 
   /* ------------------------------------------------------------ 库与文档 */
 
@@ -424,7 +422,7 @@ function applyInner(ctx, config = {}) {
 
   const deps = {
     findItem, documentOf, library, docs, searched, translating, settings, dataDir, cacheDir, ctx,
-    saveSettings,
+    writeConfig,
     /**
      * 网络出口。
      *
@@ -591,6 +589,148 @@ function normalizeEfforts(value) {
     if (!out.includes(effort)) out.push(effort)
   }
   return out.length > 0 ? out : [...DEFAULT_TRANSLATE_EFFORTS]
+}
+
+/**
+ * 旧 `settings.json` 的只读回退。
+ *
+ * 规则只有一条：**config 里仍是默认值、而旧文件里有非默认值**时，才用旧值补上。
+ * 这样「用户一次都没在插件页配过」的升级场景能平滑接住现有配置；
+ * 而用户在插件页显式配成默认值（例如把 MinerU 关掉）时，旧文件在保存那一步
+ * 已经被 `writeConfig` 改名，不会再把旧值复活。
+ *
+ * @param {object} settings 已归一化的运行期设置（会被就地修改）
+ * @param {object} legacy 旧 settings.json 的原始内容
+ * @returns {string[]} 实际用旧值补上的字段名
+ */
+function applyLegacySettings(settings, legacy) {
+  const defaults = normalizeConfig({})
+  const saved = normalizeConfig(legacy)
+  const applied = []
+  for (const key of Object.keys(saved)) {
+    if (JSON.stringify(settings[key]) === JSON.stringify(defaults[key])
+      && JSON.stringify(saved[key]) !== JSON.stringify(defaults[key])) {
+      settings[key] = saved[key]
+      applied.push(key)
+    }
+  }
+  return applied
+}
+
+/**
+ * 给插件页表单的公开视图。
+ *
+ * 铁律：`mineruCloudToken` / `cloudApiKey` **只回布尔**，明文绝不出现在响应里。
+ * 与 `/settings` 的旧契约保持一致，避免多一条泄露面。
+ */
+function publicSettingsView(settings, resolvedDataDir) {
+  return {
+    zoteroDataDir: settings.zoteroDataDir,
+    dataDir: settings.dataDir,
+    translateConcurrency: settings.translateConcurrency,
+    translateChunkChars: settings.translateChunkChars,
+    selectionProvider: settings.selectionProvider,
+    selectionModel: settings.selectionModel,
+    mineruMode: settings.mineruMode,
+    mineruLocalUrl: settings.mineruLocalUrl,
+    mineruAutoOnScanned: settings.mineruAutoOnScanned,
+    mineruCloudTokenSet: Boolean(settings.mineruCloudToken),
+    cloudApiKeySet: Boolean(settings.cloudApiKey),
+    cloudUserID: settings.cloudUserID,
+    features: settings.features,
+    translateEfforts: settings.translateEfforts,
+    resolvedDataDir,
+  }
+}
+
+/**
+ * 本地 Zotero 授权 key 的状态（给插件页展示「已授权 / 未授权」）。
+ *
+ * 只回 `serverId` + `savedAt` + 是否与当前 Zotero 实例匹配，**绝不回 key 明文**。
+ * 文件与路径由 host/annotations.js 的 `setApiKeyStore` 决定，这里只读同一个文件。
+ *
+ * @param {string} dataDir 插件数据目录
+ * @returns {Promise<object>} 状态投影
+ */
+async function localKeyStatus(dataDir) {
+  const file = path.join(String(dataDir ?? ''), 'zotero-api-key.json')
+  let saved = null
+  try {
+    saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch { /* 没授权过 */ }
+  let probe = null
+  try {
+    probe = await probeLocalApi()
+  } catch { /* Zotero 没运行：匹配状态置 null */ }
+  const currentServerId = probe?.serverId ?? null
+  const savedServerId = typeof saved?.serverId === 'string' ? saved.serverId : null
+  return {
+    authorized: Boolean(saved?.key),
+    serverId: savedServerId,
+    savedAt: typeof saved?.savedAt === 'string' ? saved.savedAt : null,
+    currentServerId,
+    matches: savedServerId && currentServerId ? savedServerId === currentServerId : null,
+  }
+}
+
+function buildConfigPatch(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error('请求体必须是对象')
+  }
+  const patch = {}
+  for (const key of ['zoteroDataDir', 'dataDir', 'mineruLocalUrl', 'selectionProvider', 'selectionModel', 'cloudUserID']) {
+    if (body[key] === undefined) continue
+    if (typeof body[key] !== 'string') throw new Error(`${key} 必须是字符串`)
+    patch[key] = body[key].trim()
+  }
+  for (const [key, min, max] of [['translateConcurrency', 1, 16], ['translateChunkChars', 500, 8000]]) {
+    if (body[key] === undefined) continue
+    const n = Number(body[key])
+    if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${key} 必须是 ${min}–${max} 之间的数字`)
+    patch[key] = Math.round(n)
+  }
+  if (body.mineruMode !== undefined) {
+    if (!['none', 'local', 'cloud'].includes(body.mineruMode)) {
+      throw new Error('mineruMode 只能是 none / local / cloud')
+    }
+    patch.mineruMode = body.mineruMode
+  }
+  if (body.mineruAutoOnScanned !== undefined) {
+    if (typeof body.mineruAutoOnScanned !== 'boolean') throw new Error('mineruAutoOnScanned 必须是布尔值')
+    patch.mineruAutoOnScanned = body.mineruAutoOnScanned
+  }
+  // 空字符串是合法输入：表示「清除这个 secret」。
+  for (const key of ['mineruCloudToken', 'cloudApiKey']) {
+    if (body[key] === undefined) continue
+    if (typeof body[key] !== 'string') throw new Error(`${key} 必须是字符串`)
+    patch[key] = body[key].trim()
+  }
+  if (body.features !== undefined) {
+    const src = body.features
+    if (!src || typeof src !== 'object' || Array.isArray(src)) throw new Error('features 必须是对象')
+    const features = {}
+    for (const name of FEATURE_KEYS) {
+      const one = src[name]
+      if (one === undefined) continue
+      if (!one || typeof one !== 'object' || Array.isArray(one)) throw new Error(`features.${name} 必须是对象`)
+      const row = {}
+      for (const field of ['provider', 'model', 'reasoningEffort']) {
+        if (one[field] === undefined) continue
+        if (typeof one[field] !== 'string') throw new Error(`features.${name}.${field} 必须是字符串`)
+        row[field] = one[field].trim()
+      }
+      features[name] = row
+    }
+    patch.features = features
+  }
+  if (body.translateEfforts !== undefined) {
+    if (!Array.isArray(body.translateEfforts)) {
+      throw new Error('translateEfforts 必须是数组（元素为档位名，允许 null）')
+    }
+    patch.translateEfforts = body.translateEfforts
+  }
+  if (Object.keys(patch).length === 0) throw new Error('没有可保存的字段')
+  return patch
 }
 
 function clampInt(value, min, max, fallback) {
@@ -894,57 +1034,60 @@ async function handleRequest(rctx, req, res, deps) {
         translateEfforts: s.translateEfforts,
         // 只读展示，便于排查
         resolvedDataDir: deps.dataDir,
+        // 配置入口已统一到 DSH 插件页；本接口只用于诊断，写入口已停用（POST → 501）
+        configManaged: true,
+        deprecated: '写入口已迁移到 DSH 插件页（侧栏「插件」→ dsh-zotero-reader →「配置」）',
       })
     }
 
-    if (sub === '/settings' && method === 'POST') {
-      const body = await readJsonBody(req)
-      const patch = {}
-      if (typeof body.mineruMode === 'string') {
-        if (!['none', 'local', 'cloud'].includes(body.mineruMode)) {
-          return sendJson(res, 400, { error: 'mineruMode 只能是 none / local / cloud' })
-        }
-        patch.mineruMode = body.mineruMode
-      }
-      if (typeof body.mineruLocalUrl === 'string') patch.mineruLocalUrl = body.mineruLocalUrl.trim()
-      if (typeof body.mineruAutoOnScanned === 'boolean') patch.mineruAutoOnScanned = body.mineruAutoOnScanned
-      if (typeof body.mineruCloudToken === 'string') patch.mineruCloudToken = body.mineruCloudToken.trim()
-      if (typeof body.zoteroDataDir === 'string') patch.zoteroDataDir = body.zoteroDataDir.trim()
-
-      /**
-       * 云端 key：空字符串是**合法输入**，表示「清除」。
-       * 不校验 24 位格式 —— 用户可能先填 userID 再填 key，格式校验留给 /cloud/config
-       * 和 /cloud/status 去给出可操作提示，这里拦下来只会让人不知道为什么存不上。
-       */
-      if (typeof body.cloudApiKey === 'string') patch.cloudApiKey = body.cloudApiKey.trim()
-      if (typeof body.cloudUserID === 'string') patch.cloudUserID = body.cloudUserID.trim()
-      if (body.features !== undefined) {
-        if (!body.features || typeof body.features !== 'object' || Array.isArray(body.features)) {
-          return sendJson(res, 400, { error: 'features 必须是对象' })
-        }
-        patch.features = body.features
-      }
-      if (body.translateEfforts !== undefined) {
-        if (!Array.isArray(body.translateEfforts)) {
-          return sendJson(res, 400, { error: 'translateEfforts 必须是数组（元素为档位名，允许 null）' })
-        }
-        patch.translateEfforts = body.translateEfforts
-      }
-
-      const saved = deps.saveSettings(patch)
-      // 库路径变了要作废缓存，否则还按老路径读
-      if ('zoteroDataDir' in patch) deps.invalidateLibrary()
+    /**
+     * 插件页配置表单的数据面。
+     *
+     * 浏览器半边在侧栏「插件」里注册了 `plugins.row.config` 页面，读写这两个路由；
+     * 页面不再碰 settings.json。保存链路：
+     *   POST /config → 校验 → `ctx.configEditor.edit()` → 改 profile patch → 宿主重载本插件。
+     */
+    if (sub === '/config' && method === 'GET') {
       return sendJson(res, 200, {
-        ok: true,
-        mineruMode: saved.mineruMode,
-        mineruLocalUrl: saved.mineruLocalUrl,
-        mineruAutoOnScanned: saved.mineruAutoOnScanned,
-        mineruCloudTokenSet: Boolean(saved.mineruCloudToken),
-        zoteroDataDir: saved.zoteroDataDir,
-        cloudApiKeySet: Boolean(saved.cloudApiKey),
-        cloudUserID: saved.cloudUserID,
-        features: saved.features,
-        translateEfforts: saved.translateEfforts,
+        config: publicSettingsView(deps.settings, deps.dataDir),
+        localKey: await localKeyStatus(deps.dataDir),
+        managedBy: 'cordis-patch',
+      })
+    }
+
+    if (sub === '/config' && method === 'POST') {
+      let patch
+      try {
+        patch = buildConfigPatch(await readJsonBody(req))
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      }
+      try {
+        const next = await deps.writeConfig(patch)
+        return sendJson(res, 200, {
+          ok: true,
+          config: publicSettingsView(next, deps.dataDir),
+          note: '已写入 profile 配置，宿主正在重载插件',
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const status = /没有提供 configEditor/.test(message) ? 501 : (/overridden/i.test(message) ? 409 : 400)
+        return sendJson(res, status, { error: message })
+      }
+    }
+
+    /**
+     * 旧写入口停用。
+     *
+     * `POST /settings` 原来是「面板里改、存 json、立即生效」；现在配置事实来源只有
+     * profile patch 一处，再留一个写 json 的入口会让两份配置互相覆盖。
+     * GET 仍保留，仅作诊断（秘密字段只回布尔）。
+     */
+    if (sub === '/settings' && method === 'POST') {
+      return sendJson(res, 501, {
+        error: '配置已迁移到 DSH 插件页：请在侧栏「插件」→ dsh-zotero-reader →「配置」里修改。'
+          + '保存后宿主会重载插件使其生效；阅读器里的设置浮层已移除。',
+        migratedTo: 'plugins.row.config',
       })
     }
 
@@ -1356,14 +1499,12 @@ async function handleRequest(rctx, req, res, deps) {
       try {
         const info = await probeCloudKey(apiKey, { fetchImpl: deps.fetchImpl })
         /**
-         * 用 /keys/current 返回的 userID 回填设置。
+         * 用 /keys/current 返回的 userID 回填**响应**。
          *
-         * 为什么自动回填：userID 是一串数字，用户基本抄不对，而它又能从 key
-         * 直接问出来。写回失败不影响本次结果 —— 下次还会再问一次。
+         * 不再自动写盘：配置事实来源已统一到 profile patch，由一个 HTTP 探测
+         * 顺手改配置会触发插件重载，把这次请求本身掐断。插件页表单里有 userID 字段，
+         * 用户点保存即可。
          */
-        if (info.userID && String(info.userID) !== String(deps.settings.cloudUserID ?? '')) {
-          try { deps.saveSettings({ cloudUserID: String(info.userID) }) } catch { /* 存不上就只在响应里给 */ }
-        }
         return sendJson(res, 200, {
           ok: true,
           userID: info.userID,
@@ -1375,20 +1516,15 @@ async function handleRequest(rctx, req, res, deps) {
       }
     }
 
-    /** 保存云端 key + userID。key 走密码框，写进去就不再回明文。 */
+    /**
+     * 旧写入口停用：云端 key 已进插件页表单（POST /config）。
+     *
+     * 保留一条明确的 501，比静默 404 更容易让人知道去哪儿改。
+     */
     if (sub === '/cloud/config' && method === 'POST') {
-      const body = await readJsonBody(req)
-      const patch = {}
-      if (typeof body.apiKey === 'string') patch.cloudApiKey = body.apiKey.trim()
-      if (typeof body.userID === 'string') patch.cloudUserID = body.userID.trim()
-      if (Object.keys(patch).length === 0) {
-        return sendJson(res, 400, { error: '没有可保存的字段（apiKey / userID）' })
-      }
-      const saved = deps.saveSettings(patch)
-      return sendJson(res, 200, {
-        ok: true,
-        cloudApiKeySet: Boolean(saved.cloudApiKey),
-        cloudUserID: saved.cloudUserID,
+      return sendJson(res, 501, {
+        error: '云端 key / userID 已迁移到 DSH 插件页：侧栏「插件」→ dsh-zotero-reader →「配置」。',
+        migratedTo: 'plugins.row.config',
       })
     }
 
