@@ -538,3 +538,55 @@ MCP `zotero` 服务器有 31 个工具要搬（`search_tools` 是元工具，不
 `scholar` `evidence_table` `tag_audit`(已计入写入) `note`(无)
 
 > 注：上面分类有交叉，实际以 MCP 服务器当前暴露的为准；`search_tools` 是元工具不搬。
+## 重要发现：现有 Zoteus 索引可直接复用（2026-11-26 实测）
+
+用户问「我现在 zotero 的 embedded 的存储在哪里」——查清了，**和插件路径无关**，在 Zoteus 自己的数据目录。
+
+### 实际位置
+
+```
+C:\Users\30759\AppData\Roaming\zoteus\search-index.sqlite    27.16 MB   ← 真数据
+C:\Users\30759\AppData\Roaming\zoteus\search-index.json      47 B       ← 8 月的空壳，忽略
+C:\Users\30759\AppData\Roaming\zoteus\local-api-key.json               ← Zotero 本地 key
+C:\Users\30759\AppData\Roaming\zoteus\pdf-images\                      ← PDF 渲染缓存
+```
+
+注意：`zotero_index action:"libraries"` 报的 path 是那个空 json，实际数据在 sqlite —— 后端是 sqlite（`ZOTEUS_INDEX_BACKEND`），json 是旧格式残留。
+
+### 索引内容与结构
+
+```
+meta: embedderId=openai:BAAI/bge-m3, codeDim=1024, schemaVersion=2,
+      library=user, libraryBackend=local, libraryVersion=1305,
+      itemsTotal=666, fulltextVersion=31442
+
+passages      4572 行  pid, id, item_key, title, text, source, vector(BLOB 4096B = 1024×float32)
+passages_fts 4572 行  FTS5 全文索引（BM25）
+vector_codes 4572 行  pid, code(BLOB)  ← 量化码，两阶段向量检索
+items         545 行   item_key, title
+accent_variants 170    folded, term, df
+meta           18 行   key, value
+```
+
+### 为什么可以复用
+
+用户的 embedding 选型（硅基流动 bge-m3）与现有索引的 embedder（`BAAI/bge-m3`）**是同一个模型**，向量空间一致。所以：
+
+- **不需要重建 4572 个向量**（省掉全部 embedding 调用）
+- 只读访问即可，不怕损坏原文件
+- MCP 卸载后文件仍在 `%APPDATA%\zoteus\`，继续可用
+
+### 实现要点
+
+1. `semanticIndexPath` 配置项默认值，本机填 `C:\Users\30759\AppData\Roaming\zoteus\search-index.sqlite`
+2. 打开时用 `readOnly: true`，绝不写
+3. 校验 `meta.embedderId` 与当前配置的 `embeddingModel` 是否兼容（都应是 `BAAI/bge-m3`），不匹配时**不报错**，提示「现有索引由 <embedderId> 建立，与当前模型不同，语义检索将退回 BM25」
+4. 校验 `meta.codeDim`（1024）与模型输出维度一致
+5. 查询流程：query → `/v1/embeddings` → 1024 维 → 与 `passages.vector` 做余弦 → top-K
+6. 与 FTS5（`passages_fts`）做 RRF 融合，和 Zoteus 的做法一致
+7. 若用户想自建索引（换位置/换模型），仍要支持全量 build，写入自己的 sqlite；两种模式共存，用配置区分
+
+### 待确认
+
+- Zoteus 用的 embedding API key 存在哪（环境变量 / DSH 配置 / Zoteus 自己的配置文件），新插件要独立配置，不复用它的 key
+- `source` 字段全为 null，含义未知（可能是 note/annotation 来源标记，当前未启用）
