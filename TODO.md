@@ -1,5 +1,40 @@
 # 待办
 
+## 当前状态快照（2026-11-26 01:30）
+
+上一轮与用户逐项确认后的口径。历史流水账保留在下面，本节是需要先看的结论。
+
+### 需要用户操作
+
+- 重启 DSH。host 侧改动（配置页、凭据环境变量化、云端 Web API、全文搜索）都要重启才生效；`client.js` 的改动刷新页面即可。两者混在一起，很容易把「进程跑的还是三天前的代码」误判成「功能没做」。
+- 重启后打开侧栏「插件」→ dsh-zotero-reader →「配置」，确认能打开，并保存一次 —— 保存后旧的 `settings.json` 会自动改名归档，不再作为回退值参与。
+
+### 用户已确认不用做
+
+| 项 | 口径 |
+|---|---|
+| pdf.js worker 起不来 | 现在 PDF 已经很顺畅，不再追 |
+| 表格浮窗观感（整页缩到 630 宽后表体偏小） | 没问题 |
+| `check-pdf-links.mjs` 锚点脆弱 | 没问题 |
+| `ResizeObserver loop` 噪声 | 没问题 |
+| 参考文献定位只在单篇双栏 PDF 上验证 | 没问题 |
+| 批注错位埋点缺 `pageEl.clientWidth/clientHeight` | 没问题 |
+
+### 还没开工
+
+1. Embedding + 语义检索。用户点名要，设置页还要「推荐」用硅基流动 bge-m3（见文末需求补丁）。索引可复用 `%APPDATA%\zoteus\search-index.sqlite` 里 4572 条向量，embedder 同为 `BAAI/bge-m3`、1024 维。
+2. 四色主题（亮 / 暗 / 暖 / 跟随系统）。`client.js` 里 `data-theme` 仍零命中。
+3. 推送 GitHub。11 个提交压在本地，上次三次都是 `Connection was reset` 类失败，待确认 VPN。
+4. 31 个 Zotero MCP 工具搬迁。用户说工具先不管，只留清单。
+
+### 在办
+
+- 首次打开文章整篇文字被全选（关掉重开就正常）。
+- 一键中文版后端删除。
+
+---
+
+
 2026-11-14 记下的四项，顺序按用户原话。每项附上已经查到的代码落点和证据，免得下次从头摸。
 
 ## 1. 阅读模式主题：亮色 / 暗色 / 暖色 / 跟随系统
@@ -631,3 +666,38 @@ DSH 启动时把 `.env` 加载进 `process.env`，插件（跑在 host 进程里
 - 日志（`client-log.jsonl`、`exec-debug.log`）里不得出现 key 明文，诊断只记变量名和长度
 - `.env` 的读取只在 host 侧，不下发到浏览器
 - 如果变量名指向的变量不存在，功能降级而不是崩溃：MinerU 报「未配置 token」、云端 API 报「未配置 key」、embedding 退回纯 BM25
+
+## 2026-11-26 凌晨：本轮变更
+
+### 已完成：凭据全部走环境变量（`c5ee24e`）
+
+- `config.js` 三个字段改为存变量名：`mineruTokenEnv`（默认 `MINERU_API_TOKEN`）、`cloudApiKeyEnv`（默认 `ZOTERO_API_KEY`）、`embeddingApiKeyEnv`（默认 `SILICONFLOW_API_KEY`）。`.role('secret')` 全部移除。
+- `index.js:554` 的 `resolveSecret` 在运行时解析；`normalizeConfig` 只存变量名，解析值不写回、不进任何 HTTP 响应。
+- 三个旧明文字段（`mineruCloudToken` / `cloudApiKey` / `embeddingApiKey`）在 `applyLegacySettings` 被显式跳过，`writeConfig` 写回前 `delete`，因此再保存也不会把 key 写进 profile YAML。
+- 配置页不再有密码框，改为「环境变量名」输入 + 状态行「已读到 `XXX`（长度 N）」/「未设置 —— 请在 ~/.dsh/.env 里添加」。
+- `.env` 迁移：追加 `MINERU_API_TOKEN`（51 字符），文件 983 → 1053 字节（正好 +70 = 键名 + 值 + 换行），原内容零改动，备份 `.env.bak-20261125170604`。`settings.json` 的 `mineruCloudToken` 清空为空串、键保留（不删键，避免旧代码读到 `undefined`）。
+- 守卫：35/35 `check-*.mjs` 通过（`check-settings-contract` 129 项）、`node --check` 四文件、`harness-render` exit 0 且 effect 期无异常、仓库与提交内容 `sk-` 明文零命中、CRLF 未破（client.js 11721/0、index.js 1817/0，config.js 与 host 保持 LF）。
+
+### 需求补丁：语义检索设置页要「推荐」硅基流动 bge-m3
+
+用户原话：「这里是可以在设置页面推荐使用这个」。
+
+不是只要能配置，还要有引导：默认值就是 `BAAI/bge-m3` + `https://api.siliconflow.cn/v1`，字段旁标注免费，并提供一键填入推荐配置的入口；换模型或换维度时提示必须重建索引，不能静默返回错结果。
+
+### 新缺陷：首次打开文章整篇文字被全选
+
+用户描述：整篇 PDF 文字铺满蓝色选区，像按了 Ctrl+A；关掉重开同一篇就正常，只有首次打开才有。
+
+已排除的方向，下次别重查：
+
+- 插件自身不产生选区。`client.js` 里 `selectAll` / `createRange` / `addRange` / `selectNodeContents` / `execCommand` / `.select()` 全部零命中，唯一的 `window.getSelection()` 在 L9207 的 mouseup 链里，只读不写。
+- 没有 `::selection` 自定义样式，没有 `focus()` / `autoFocus` / `contentEditable` / `tabIndex` 写入。
+- 不是遮罩误判。`viewer:restore-mask` 的遮罩是半透明层，用户明确区分了「蓝色选区」与「半透明色块」。
+
+「首次才有、重开就好」指向一次性初始化路径（首次没有 `resumePage`，走 `pagesinit` 的 refresh + `scrollPageIntoView`），需要在首次打开后的短窗口内监听 `selectionchange`，抓 anchor/focus 指向的元素与最近的 pointer/key 事件。
+
+### 待做：删除一键中文版后端
+
+前端入口早已移除（`translateAll` / `exportChinese` / `modeChinese` 零引用，`/translate` 字符串在 `client.js` 零命中），host 侧仍在空转：`index.js` 的 `POST /translate`（L1721）、`/translate/progress`（L1767）、缓存读取（L1803）、缓存目录（L1811），加 `host/translate.js` 的 `translateDocument`、`config.js` 的 `translateConcurrency` / `translateChunkChars`、`features.docTranslate`。
+
+保留 `POST /translate/selection` 与 `translateSelection` / `pickSelection`（划词翻译与解释），保留 `translateEfforts`。磁盘上已有的 `dataDir/translate/` 缓存不删，只是不再读写。
