@@ -444,3 +444,97 @@ MCP `zotero` 服务器有 31 个工具要搬（`search_tools` 是元工具，不
 4. 第 4/5 层按用户实际用到的再补
 
 每层都要有对应 `test/check-*.mjs`，断言「工具已注册 + schema 正确 + 参数校验 + 错误分类」，不依赖真实 Zotero。
+## 用户已确认的决策（2026-11-26）
+
+上面「关键设计问题」里的几条，用户已拍板。**后续实现以本节为准，与上节冲突时以本节为优先。**
+
+### 1. 工具名：现有 3 个也消灭，统一命名
+
+用户原话：「现在已有的 3 个工具也可以消灭掉，和其它的合并。」
+
+所以不保留 `search_zotero_library` / `read_zotero_paper` / `ask_zotero_paper` 这三个名字，全部并入统一命名体系（建议 `zotero_*`）。迁移时要同步改：`host/tools.js`、README、以及任何调用了旧工具名的地方。
+
+### 2. MCP 搬完后卸载
+
+用户原话：「搞定之后我会卸载 mcp 的。」
+
+所以不需要处理「两边都开着」的冲突——用户会卸载 MCP `zotero` 服务器。插件这边只管把工具做全。
+
+### 3. 群组库：先不管
+
+用户原话：「群组库我不理解，先不管他。」
+
+`groups` 以及所有带 `library_type` / `library_id` 的群组库寻址**跳过**，只做个人库。等用户后续需要再说。
+
+### 4. 语义索引：位置可选 + 这台电脑先定默认
+
+用户原话：「语义索引位置要求可选择。然后我这台电脑就默认配置对应位置了。」
+
+- 设置页要有「语义索引位置」输入框（默认 `dataDir/semantic-index`，可改成任意路径）
+- 这台电脑的默认值就用插件数据目录下的位置：
+  `C:\Users\30759\.dsh-zotero-reader\semantic-index`
+- 换位置后旧索引怎么办：提示「已存在的索引在旧路径，需要重建」而不是静默丢失
+
+### 5. Embedding 必须做，用硅基流动 bge-m3
+
+用户原话：「zotero embedded 的功能应该也要，api 可以建议用硅基流动的 bge-m3，是免费模型。反正也要在设置页可以配置就是了」
+
+这就是 MCP 版的 `zotero_semantic_search` + `zotero_index` 能力，插件要自己实现。
+
+**配置项**（都进设置页，走 config.js schema）：
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `embeddingProvider` | `siliconflow` | 目前只支持这一家，留接口 |
+| `embeddingApiKey` | 空 | 密码框，只回 `Set` 布尔 |
+| `embeddingModel` | `BAAI/bge-m3` | 硅基流动的免费 embedding 模型 |
+| `embeddingBaseUrl` | `https://api.siliconflow.cn/v1` | 可改（兼容 OpenAI 协议的自建服务） |
+| `embeddingBatchSize` | 32 | 批量 embedding 的条数 |
+| `semanticIndexDir` | `dataDir/semantic-index` | 索引落盘位置，可配置 |
+| `semanticIndexFulltext` | `false` | 是否把 PDF 正文也纳入索引（索引体积会涨很多） |
+
+**技术要点**：
+- 硅基流动 API 兼容 OpenAI 协议：`POST /v1/embeddings`，body `{model, input: [...]}`，返回 `{data: [{embedding: [...]}]}`
+- bge-m3 输出 1024 维；批量请求注意单次 input 总量上限
+- 索引存储：SQLite（向量存 BLOB + 元数据），或先用 JSON + 内存暴力检索，规模大了再换
+- 检索：召回 top-K 后可与现有 BM25（`host/fulltext.js` 走的 FTS5）做 RRF 融合，这也是 MCP 版的做法
+- 换模型/换维度要强制重建索引：把模型名和维度写进索引元数据，不匹配就拒绝查询并提示重建
+- 免费模型有速率限制，要处理 429 退避
+
+## 实施优先级（用户明确「工具先不管」）
+
+用户原话：「工具先不管咯，列个 list 放到 todo 里面。也不知道什么时候才会真的内置进来hhhh」
+
+所以**当前不实现**，只留清单。等用户主动提起再做。
+
+真要开工时的建议顺序（不变）：
+1. 第 1 层本地只读（无外部依赖，风险最低）
+2. Embedding + 语义检索（用户明确点名要）
+3. 第 3 层写入
+4. 其余按需
+
+## 完整工具清单（供日后核对）
+
+已搬/已有 3 个（将被合并改名）：
+- `search_zotero_library` → `zotero_search_items`
+- `read_zotero_paper` → `zotero_get_fulltext`（部分）
+- `ask_zotero_paper` → 保留为插件特色能力（带页码问答），不在 MCP 版里
+
+待搬 31 个，按 MCP 服务器现有工具名：
+
+只读查询类（9）
+`search_items` `get_item` `list_collections` `list_tags` `groups`(跳过) `whoami` `saved_searches` `sync` `schema`
+
+全文与语义（5）
+`fulltext` `get_fulltext` `semantic_search` `index` `pdf_images`
+
+写入类（10）
+`annotate` `create_items` `update_item` `delete_items` `trash_items` `merge_items` `manage_collections` `manage_tags` `tag_audit` `attach_file`/`attachment`
+
+导入导出与格式（6）
+`import` `export` `bibliography` `format_bibliography` `styles` `word_document`
+
+外部服务（4）
+`scholar` `evidence_table` `tag_audit`(已计入写入) `note`(无)
+
+> 注：上面分类有交叉，实际以 MCP 服务器当前暴露的为准；`search_tools` 是元工具不搬。
