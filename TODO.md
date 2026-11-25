@@ -746,8 +746,8 @@ DSH 启动时把 `.env` 加载进 `process.env`，插件（跑在 host 进程里
 | `config-unify` | 配置统一到 DSH 插件页、API 凭据环境变量化 | 已完成 `c5ee24e` |
 | `zhdel` | 删除「一键中文版」整篇翻译后端 | 已完成 `61dc685` |
 | `selectdiag` | 首次打开整篇文字被全选的诊断 | 只读诊断完成，运行期埋点未实现 |
-| `findui` | 阅读器内 Ctrl+F 查找 + 工具条搜索按钮 | 正在实现 |
-| `popupfix` | 位图浮窗越界、位图横向滚动 | 已中断（零落盘改动），待续 |
+| `findui` | 阅读器内 Ctrl+F 查找 + 工具条搜索按钮 | 已完成 `addf2ea` |
+| `popupfix` | 位图浮窗越界、位图横向滚动 | 在办（第二轮，续 `popupfix`） |
 
 ### 浮窗两项待续（交回 `popupfix`）
 
