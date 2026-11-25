@@ -265,6 +265,18 @@ export function resolveAttachmentPath(dataDir, attachKey, attPath) {
 }
 
 /**
+ * 打开一份 zotero.sqlite 快照（只读）。
+ *
+ * 为什么单独导出：全文搜索要拿「附件 itemID → 父条目 key/标题」的映射，
+ * 而那个映射只在 zotero.sqlite 里。让 fulltext.js 自己再写一遍复制/打开逻辑
+ * 会造成两套指纹规则，早晚不一致。这里把同一套快照能力交出去，调用方负责 close。
+ */
+export async function openZoteroSnapshot(dataDir, cacheDir) {
+  const snapshot = await snapshotDatabase(dataDir, cacheDir)
+  return openSqlite(snapshot, { readOnly: true })
+}
+
+/**
  * 读取整库文献索引。返回带绝对 PDF 路径的条目数组。
  * 每次调用都重新快照，保证拿到 Zotero 里刚改过的内容；调用方负责缓存。
  */

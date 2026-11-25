@@ -36,6 +36,7 @@ import {
   listCloudAnnotations, createCloudAnnotation,
   toErrorPayload, ERROR_CODES, CloudApiError,
 } from './host/zotero-cloud.js'
+import { searchFulltext, enrichWithPages } from './host/fulltext.js'
 
 export const name = 'dsh-zotero-reader'
 export const inject = ['tools']
@@ -1242,6 +1243,50 @@ async function handleRequest(rctx, req, res, deps) {
     }
 
     /* --------------------------------------------------- 云端 Web API */
+
+    /**
+     * 全文搜索：在已收藏 PDF 的正文里找关键词。
+     *
+     * 数据来自 Zotero 自己的全文索引（独立 fulltext.sqlite，FTS5），
+     * 不重新解析 PDF —— 那要几百毫秒一篇，整库跑完是分钟级。
+     *
+     * 索引不可用（用户从没在 Zotero 里打开过 PDF，或版本过旧）时回
+     * `indexed:false` 而不是报错：这是正常状态，不是故障。
+     */
+    if (sub === '/search/fulltext' && method === 'GET') {
+      const q = (url.searchParams.get('q') ?? '').trim()
+      if (!q) return sendJson(res, 400, { error: '缺少查询词 q' })
+      const limit = clampInt(url.searchParams.get('limit'), 1, 100, 50)
+      try {
+        const lib = await deps.library()
+        const out = await searchFulltext({
+          dataDir: lib.dataDir,
+          cacheDir: deps.cacheDir,
+          query: q,
+          limit,
+        })
+        // 页码要读 ft-cache（文件 IO），只在有结果时才补
+        const results = out.results.length > 0
+          ? await enrichWithPages(lib.dataDir, out.results, q)
+          : []
+        return sendJson(res, 200, {
+          ok: true,
+          indexed: out.indexed,
+          query: q,
+          total: results.length,
+          results,
+          ...(out.reason ? { reason: out.reason } : {}),
+        })
+      } catch (error) {
+        return sendJson(res, 200, {
+          ok: false,
+          indexed: false,
+          query: q,
+          results: [],
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
 
     /**
      * 云端连通性 / key 校验。
