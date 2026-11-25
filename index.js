@@ -45,7 +45,7 @@ export const inject = ['tools']
  * 配置 schema 转出。
  *
  * 宿主读它来**校验** profile 里这一行的 `config`（不导出时 Config inspect 里 status 是 absent）。
- * 注意它本身不会生成表单：插件页的配置页由浏览器半边注册 `plugins.row.config` 提供，
+ * 注意它本身不会生成表单：插件页的配置页由浏览器半边注册 `plugins.bundle.config` 提供，
  * 读写走 `/zotero-reader/config`，保存由这里的 configEditor 写回 profile patch。
  * 取不到 schemastery 时它是 undefined，宿主显示「无配置」，插件功能不受影响。
  */
@@ -175,7 +175,7 @@ function applyInner(ctx, config = {}) {
   /**
    * 配置来源：**以宿主 config 为准**。
    *
-   * 配置入口已统一到 DSH 插件页（浏览器半边注册 `plugins.row.config`，
+   * 配置入口已统一到 DSH 插件页（浏览器半边注册 `plugins.bundle.config`，
    * 页面读写 `/zotero-reader/config`，保存由这里调 `ctx.configEditor.edit()`
    * 写回 profile patch，宿主随即重载插件使其生效）。
    *
@@ -199,7 +199,7 @@ function applyInner(ctx, config = {}) {
   if (legacyApplied.length > 0) {
     console.warn(
       `[dsh-zotero-reader] 检测到旧的 settings.json，已作为回退值使用（${legacyApplied.join(', ')}）。`
-      + '请到 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」重新设置；'
+      + '请到 DSH 侧栏「插件」→ dsh-zotero-reader 的组合包页重新设置；'
       + '在那里保存后该文件会自动改名，不再参与读取。'
       + `（${settingsFile}）`,
     )
@@ -1177,14 +1177,14 @@ async function handleRequest(rctx, req, res, deps) {
         resolvedDataDir: deps.dataDir,
         // 配置入口已统一到 DSH 插件页；本接口只用于诊断，写入口已停用（POST → 501）
         configManaged: true,
-        deprecated: '写入口已迁移到 DSH 插件页（侧栏「插件」→ dsh-zotero-reader →「配置」）',
+        deprecated: '写入口已迁移到 DSH 插件页（侧栏「插件」→ dsh-zotero-reader 组合包页）',
       })
     }
 
     /**
      * 插件页配置表单的数据面。
      *
-     * 浏览器半边在侧栏「插件」里注册了 `plugins.row.config` 页面，读写这两个路由；
+     * 浏览器半边在侧栏「插件」的组合包详情页注册了 `plugins.bundle.config`，读写这两个路由；
      * 页面不再碰 settings.json。保存链路：
      *   POST /config → 校验 → `ctx.configEditor.edit()` → 改 profile patch → 宿主重载本插件。
      */
@@ -1226,9 +1226,9 @@ async function handleRequest(rctx, req, res, deps) {
      */
     if (sub === '/settings' && method === 'POST') {
       return sendJson(res, 501, {
-        error: '配置已迁移到 DSH 插件页：请在侧栏「插件」→ dsh-zotero-reader →「配置」里修改。'
+        error: '配置已迁移到 DSH 插件页：请在侧栏「插件」→ dsh-zotero-reader 组合包页里修改。'
           + '保存后宿主会重载插件使其生效；阅读器里的设置浮层已移除。',
-        migratedTo: 'plugins.row.config',
+        migratedTo: 'plugins.bundle.config',
       })
     }
 
@@ -1664,8 +1664,8 @@ async function handleRequest(rctx, req, res, deps) {
      */
     if (sub === '/cloud/config' && method === 'POST') {
       return sendJson(res, 501, {
-        error: '云端 key / userID 已迁移到 DSH 插件页：侧栏「插件」→ dsh-zotero-reader →「配置」。',
-        migratedTo: 'plugins.row.config',
+        error: '云端 key / userID 已迁移到 DSH 插件页：侧栏「插件」→ dsh-zotero-reader 组合包页。',
+        migratedTo: 'plugins.bundle.config',
       })
     }
 

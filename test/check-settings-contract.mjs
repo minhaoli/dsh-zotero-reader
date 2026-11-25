@@ -1,7 +1,7 @@
 /**
  * 设置契约测试：GET /settings、POST /settings（已停用）、GET/POST /zotero-reader/config。
  *
- * 配置入口已统一到 DSH 插件页（`plugins.row.config` → Host 的 configEditor）：
+ * 配置入口已统一到 DSH 插件页（`plugins.bundle.config` → Host 的 configEditor）：
  *   1. GET /settings 仍保留，但只作诊断；POST /settings 必须是 501 并指向插件页
  *   2. secret 只存**环境变量名**：接口只回 `xxxEnv` / `xxxPresent` / `xxxLength`，
  *      值与明文都不出现；本地授权只回 `serverId` / `savedAt` / 是否匹配
@@ -294,7 +294,7 @@ check('GET /config 默认 translateEfforts 与 host 常量一致',
   const p = await call('/zotero-reader/settings', { method: 'POST', body: { mineruMode: 'cloud' } })
   check('POST /settings → 501（写入口已迁移）', p.statusCode === 501, `status=${p.statusCode}`)
   check('POST /settings 提示里去插件页', /插件页|Plugins/.test(p.json?.error ?? ''), p.text.slice(0, 120))
-  check('POST /settings 标注 migratedTo=plugins.row.config', p.json?.migratedTo === 'plugins.row.config')
+  check('POST /settings 标注 migratedTo=plugins.bundle.config', p.json?.migratedTo === 'plugins.bundle.config')
   check('POST /settings 不再写 settings.json', !fs.existsSync(D.settingsFile))
 }
 

@@ -63,7 +63,7 @@ With a link install you must install dependencies yourself once: `npm i`.
 
 ## Configuration
 
-Configure the plugin in the DSH sidebar under Plugins → dsh-zotero-reader → Configure. Saving writes to the current profile's `cordis.patch.yml`, and the host reloads the plugin so the change takes effect.
+The configuration appears directly on the DSH sidebar → Plugins → dsh-zotero-reader bundle page (between the description and the rows). Saving writes to the current profile's `cordis.patch.yml`, and the host reloads the plugin so the change takes effect.
 
 API keys are stored as **environment variable names**; the values live in `~/.dsh/.env` (loaded when DSH starts). For example, put `MINERU_API_TOKEN=your-token` in `.env` and point `mineruTokenEnv` at it. Restart DSH after editing `.env`.
 

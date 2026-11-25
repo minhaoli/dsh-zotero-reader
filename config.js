@@ -6,7 +6,7 @@
  *   2. 让宿主的 Config inspect 能读出字段说明。
  *
  * 注意它**不会**自动生成配置表单：DSH 插件页的配置页由插件自己注册 slot
- * （本插件的浏览器半边注册了 `plugins.row.config`），读取/保存走 `/zotero-reader/config`，
+ * （本插件的浏览器半边注册了 `plugins.bundle.config`），读取/保存走 `/zotero-reader/config`，
  * 保存由 Host 用 `ctx.configEditor.edit()` 写回 profile patch，改完由宿主重载插件生效。
  *
  * 为什么用动态 import + 兜底路径：本插件是 link 安装，模块解析不会向上走到

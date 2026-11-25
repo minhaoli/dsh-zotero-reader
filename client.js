@@ -192,7 +192,7 @@ window.__ModuleLoader__.load({
       saving: '保存中…',
       dataDirLabel: '数据目录',
       refresh: '刷新',
-      configHint: '在 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」里设置 MinerU 与 Zotero 路径',
+      configHint: '在 DSH 侧栏「插件」→ dsh-zotero-reader 的组合包页里直接配置（描述下方）',
       searchNoResult: '没有匹配的文献',
       translatingFailed: '翻译失败',
       selectionFailed: '翻译失败',
@@ -347,7 +347,7 @@ window.__ModuleLoader__.load({
       saving: 'Saving…',
       dataDirLabel: 'Data directory',
       refresh: 'Refresh',
-      configHint: 'Configure MinerU and the Zotero path in DSH sidebar → Plugins → dsh-zotero-reader → Configure',
+      configHint: 'Configure it on the DSH sidebar → Plugins → dsh-zotero-reader bundle page (below the description)',
       searchNoResult: 'No matching papers',
       translatingFailed: 'Translation failed',
       selectionFailed: 'Translation failed',
@@ -2778,7 +2778,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 配置页（注册进侧栏「插件」的 `plugins.row.config`）。
+     * 配置页（注册进侧栏「插件」的组合包详情页：`plugins.bundle.config`）。
      *
      * 数据面只有两个：`GET /config` 读、`POST /config` 写。保存由 Host 用
      * configEditor 落到 profile patch，宿主随即重载插件 —— 所以文案里明确写
@@ -11525,7 +11525,7 @@ const placeBox = (el, l, t, wd, ht) => {
           info?.outline?.length
             ? h('button', { className: 'zr-btn', 'data-on': outlineOpen ? '1' : '0', onClick: () => setOutlineOpen((v) => !v), title: t('outline') }, '☰')
             : null,
-          // 设置入口已统一到 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」，阅读器里不再放齿轮
+          // 设置入口已统一到 DSH 侧栏「插件」→ dsh-zotero-reader 组合包页，阅读器里不再放齿轮
           // 批注列表：显示这篇文献在 Zotero 里的所有高亮/备注
           h('button', {
             className: 'zr-btn',
@@ -12489,17 +12489,19 @@ const placeBox = (el, l, t, wd, ht) => {
           }, (props) => h(TabTitle, { ...props, bound }))))
 
           /**
-           * 插件页配置页：侧栏「插件」→ dsh-zotero-reader →「配置」。
+           * 组合包配置页：侧栏「插件」→ dsh-zotero-reader 的详情页。
            *
-           * 槽位由 ui-plugin-manager 声明；key 必须是 `<包名>#<行 id>`，
-           * 行 id 与 bundle 的 cordis.patch.yml 里那句 `id: zotero-reader` 一致。
-           * 值仍以 host 的 Config（config.js）为准，保存走 Host 的 configEditor。
+           * 用 `plugins.bundle.config`（key = 包名）而不是 `plugins.row.config`：
+           * 前者直接渲染在组合包页面的「描述与行之间」，用户不用再点行尾的「配置」
+           * 进二级页，进页面就能看到全部配置。
+           * 按 DSH 文档，该槽只渲染 `page` 视图；组件仍保留 summary 分支以兼容。
+           * 值以 host 的 Config（config.js）为准，保存走 Host 的 configEditor。
            */
-          ctx.effect(() => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
-            name: 'plugins.row.config',
-            key: 'dsh-zotero-reader#zotero-reader',
+          ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+            name: 'plugins.bundle.config',
+            key: 'dsh-zotero-reader',
             locale: NS,
-          }, PluginConfigPage)), 'zotero-reader: plugin config page')
+          }, PluginConfigPage)), 'zotero-reader: bundle config page')
 
         })
 

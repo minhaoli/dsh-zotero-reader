@@ -63,7 +63,7 @@ npm i minhaoli/dsh-zotero-reader
 
 ## 配置
 
-配置在 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」里改；保存后写入当前 profile 的 `cordis.patch.yml`，宿主会重载插件使其生效。
+配置在 DSH 侧栏「插件」→ dsh-zotero-reader 的组合包页里直接显示（描述与行之间）；保存后写入当前 profile 的 `cordis.patch.yml`，宿主会重载插件使其生效。
 
 API key **只存环境变量名**，值放在 `~/.dsh/.env`（DSH 启动时加载）。例如在 `.env` 里写 `MINERU_API_TOKEN=你的token`，再在插件页把 `mineruTokenEnv` 指向它；修改 `.env` 后需要重启 DSH 才生效。
 

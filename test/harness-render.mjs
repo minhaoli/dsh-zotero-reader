@@ -144,7 +144,7 @@ const fakeCtx = {
     inject: (name, cb) => cb(),
     register: (spec, component) => {
       if (spec.name === 'sidebar.right.pane.tab' && spec.key === 'zotero-reader') registeredComponent = component
-      if (spec.name === 'plugins.row.config' && spec.key === 'dsh-zotero-reader#zotero-reader') registeredConfigPage = component
+      if (spec.name === 'plugins.bundle.config' && spec.key === 'dsh-zotero-reader') registeredConfigPage = component
       return () => {}
     },
   },
@@ -228,12 +228,12 @@ if (effectErrors.length === 0) {
   }
 }
 
-/* ---------------------------------- 3. 插件页配置页（plugins.row.config） */
+/* ---------------------------------- 3. 组合包配置页（plugins.bundle.config） */
 
-console.log('\n=== 3. 插件页配置页（plugins.row.config）===')
+console.log('\n=== 3. 组合包配置页（plugins.bundle.config）===')
 if (!registeredConfigPage) {
   process.exitCode = 1
-  console.log('  FAIL: 没有注册 plugins.row.config（key 应为 dsh-zotero-reader#zotero-reader）')
+  console.log('  FAIL: 没有注册 plugins.bundle.config（key 应为 dsh-zotero-reader）')
 } else {
   const t = (key) => key
   try {
