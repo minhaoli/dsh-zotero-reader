@@ -4192,6 +4192,58 @@ window.__ModuleLoader__.load({
               if (!t) return false
               return REF_CONT_RE.test(t)
             }
+            /**
+             * **分栏的判据：列的起始 x 位置，不是页宽中点。**
+             *
+             * 原实现按「行中点落在页宽哪一半」分栏，实测只差 0.0749pt 就判反：
+             * 目标行 x0=49.416 / x1=545.994，中点 297.7049，
+             * 页宽中点 595.26/2 = 297.6300 —— 于是左栏的整行被算成右栏、
+             * 被 scoped 整行剔除，best 落到 `References`，再跳到下一条目
+             * （1983 那篇显示成 2004 那篇）。
+             *
+             * 列起点没有这个问题：左栏文字**从 49 起排**，右栏**从 305 起排**，
+             * 判据是「这一行从哪一列起排」，与行有多宽无关。
+             *
+             * 取法：按 x 计数降序贪心接受，与已接受起点相差 < 24pt 视为同一列
+             * （双栏论文里右栏正文常左移到 319、缩进 20pt，仍属同一列）。
+             * 实测 page14 → [49, 305]，page3 → [49, 305]。
+             * 不足两列时返回空数组，调用方退回全页（单栏文档不硬分行）。
+             */
+            const COL_START_MIN_GAP = 24
+            const colStartsOf = (items) => {
+              const hist = new Map()
+              for (const it of items) {
+                const k = Math.round(it.x)
+                hist.set(k, (hist.get(k) || 0) + 1)
+              }
+              const ranked = [...hist.entries()].sort((a, b) => b[1] - a[1])
+              const minCount = Math.max(3, Math.round(items.length * 0.03))
+              const starts = []
+              for (const [x, n] of ranked) {
+                if (n < minCount) continue
+                if (starts.some((s) => Math.abs(s - x) < COL_START_MIN_GAP)) continue
+                starts.push(x)
+              }
+              if (starts.length < 2) return []
+              return starts.sort((a, b) => a - b)
+            }
+            /**
+             * x 落在第几列的起点上（`starts` 已升序）。
+             *
+             * **必须带 2pt 容差。** 列起点是按 `Math.round(x)` 统计出来的（305），
+             * 而右栏 item 的实际 x 常是 304.75 —— 严格比较会判进左栏，
+             * 于是右栏整行又被拼回左栏条目里（实测 page14 的
+             * `arXiv [preprint]`、`Psychol. Rev . 82, 407–428.` 等十多行都中招）。
+             * 容差取 2pt：远小于列间距（≥24pt），又足够吸收取整与排版抖动。
+             */
+            const COL_START_TOLERANCE = 2
+            const colIndexAt = (starts, x) => {
+              let k = 0
+              for (let i = 0; i < starts.length; i += 1) {
+                if (starts[i] - COL_START_TOLERANCE <= x) k = i
+              }
+              return k
+            }
 
             /**
              * 文本层缓存：pageNo → { lines, width, height }。
@@ -4224,20 +4276,28 @@ window.__ModuleLoader__.load({
                 items.push({ s: it.str, x, y, w: it.width ?? 0 })
               }
               const lines = []
+              /** 列起点（升序）：空数组表示单栏，调用方退回全页 */
+              let colStarts = []
               if (items.length > 0) {
                 /**
                  * 聚行：同一基线（±4pt 容差）的 item 拼成一行。
                  * 容差取 4pt 是因为上下标差 2–3pt，再大就会把相邻行并掉。
                  *
-                 * **同一基线上还要按 x 大间隙再拆一次。**
-                 * 双栏论文里左右栏常在同一条基线上（实测 page14：
-                 * `x0=49..546` 被拼成一行，左栏是参考文献条目、
-                 * 右栏是完全不相干的另一条）。不拆的话：
+                 * **同一基线上还要拆栏。** 双栏论文里左右栏常在同一条基线上
+                 * （实测 page14：一层基线里 y=301.13 同时出现左栏
+                 * `Anderson, J. R. (1983). ...` x=49 与右栏
+                 * `BehnamGhader, P., ...` x=304.75）。不拆的话：
                  *   · 参考文献条目会被右栏文字割裂成两半
                  *   · 条目边界判定会误把右栏内容当成同一行
-                 * 间隙阈值取 100pt：字间距远小于它，
-                 * 而双栏之间的栏间距（本库约 14~60pt）也能被它识别。
+                 *
+                 * 拆法有**两道**，都必须有：
+                 *   ① 按**列起点**分组（colStartsOf）。这是真正拆开左右栏的那道：
+                 *      左右栏之间的间隙实测只有 **14.2pt**，任何 gap 阈值都拆不开；
+                 *      但「这一行从 49 起排」还是「从 305 起排」一测就准。
+                 *   ② 同列内再按 x 间隙切分（gap > 100）：同一栏里的标题、图注、
+                 *      右侧页码/DOI 之间可能有很大的空洞，不切会拼成怪行。
                  */
+                colStarts = colStartsOf(items)
                 const byBaseline = new Map()
                 for (const it of items) {
                   const key = Math.round(it.y / 4)
@@ -4247,28 +4307,49 @@ window.__ModuleLoader__.load({
                 for (const group of byBaseline.values()) {
                   group.sort((a, b) => a.x - b.x)
                   /**
-                   * 按 x 间隙切分成若干段，每段单独成行。
+                   * ① 先按列起点分组：每一列各自成段，跨栏不再拼接。
+                   * columns 已按 x 升序，所以每个 group 内部仍是左到右。
                    */
-                  const segments = []
-                  let seg = [group[0]]
-                  for (let gi = 1; gi < group.length; gi += 1) {
-                    const prev = seg[seg.length - 1]
-                    const gap = group[gi].x - (prev.x + (prev.w || 0))
-                    if (gap > 100) { segments.push(seg); seg = [] }
-                    seg.push(group[gi])
+                  const columns = []
+                  if (colStarts.length >= 2) {
+                    for (const it of group) {
+                      const col = colIndexAt(colStarts, it.x)
+                      if (!columns[col]) columns[col] = []
+                      columns[col].push(it)
+                    }
+                  } else {
+                    columns[0] = group
                   }
-                  segments.push(seg)
-                  for (const parts of segments) {
-                    const text = parts.map((v) => v.s).join(' ').replace(/\s+/g, ' ').trim()
-                    if (!text) continue
-                    lines.push({
-                      y: parts[0].y,
-                      x0: Math.min(...parts.map((v) => v.x)),
-                      x1: Math.max(...parts.map((v) => v.x + (v.w || 0))),
-                      text,
-                    })
+                  /**
+                   * ② 列内再按 x 大间隙切分成若干段，每段单独成行。
+                   */
+                  for (let colIdx = 0; colIdx < columns.length; colIdx += 1) {
+                    const colItems = columns[colIdx]
+                    if (!colItems || colItems.length === 0) continue
+                    const segments = []
+                    let seg = [colItems[0]]
+                    for (let gi = 1; gi < colItems.length; gi += 1) {
+                      const prev = seg[seg.length - 1]
+                      const gap = colItems[gi].x - (prev.x + (prev.w || 0))
+                      if (gap > 100) { segments.push(seg); seg = [] }
+                      seg.push(colItems[gi])
+                    }
+                    segments.push(seg)
+                    for (const parts of segments) {
+                      const text = parts.map((v) => v.s).join(' ').replace(/\s+/g, ' ').trim()
+                      if (!text) continue
+                      lines.push({
+                        y: parts[0].y,
+                        x0: Math.min(...parts.map((v) => v.x)),
+                        x1: Math.max(...parts.map((v) => v.x + (v.w || 0))),
+                        text,
+                        /** 列序号：colStarts 的下标；未分栏时恒为 0 */
+                        col: colStarts.length >= 2 ? colIdx : 0,
+                      })
+                    }
                   }
                 }
+
                 // 排版顺序：PDF 原点在左下，所以 y 递减才是从上到下
                 lines.sort((a, b) => b.y - a.y)
               }
@@ -4276,7 +4357,7 @@ window.__ModuleLoader__.load({
                * 空页也缓存：扫描页永远没有文本层，
                * 不缓存就会每次悬停都白跑一遍 getTextContent。
                */
-              const result = { lines, width: viewport.width, height: viewport.height }
+              const result = { lines, width: viewport.width, height: viewport.height, colStarts }
               textLinesCache.set(pageNo, result)
               return result
             }
@@ -4298,17 +4379,78 @@ window.__ModuleLoader__.load({
                 if (destY === null) return null
 
                 /**
-                 * 分栏：按行区间中点落在页宽哪一半判断。
-                 * 该栏行数占比太低时（单栏文档，或 destX 落在栏间空白）
-                 * 退回全页 —— 宁可多给一点，也别因为分栏判断错而一个字取不到。
+                 * **分栏：按「列起点」判，不按页宽中点判。**
+                 *
+                 * 旧实现用行中点落在页宽哪一半，实测只差 0.0749pt 就判反：
+                 * 目标行 x0=49.416 / x1=545.994（左栏文字，但整行跨到右栏边缘），
+                 * 中点 297.7049 > 页宽中点 297.6300 → 被算成右栏 → 整行剔除，
+                 * `best` 落到 `References`，于是 `cite.anderson1983` 显示 2004 那篇。
+                 *
+                 * 所以两件事一起做：
+                 *   · 列由 `col` 字段（聚行时算好的列序号）给出，不再重算中点；
+                 *   · 目标列取**距 destX 最近的列起点**，而不是「destX 落在哪一半」。
+                 * 拿不到列起点（单栏文档）时退回全页。
                  */
+                const colStarts = packed?.colStarts ?? []
+                const hasCols = colStarts.length >= 2 && lines.some((l) => typeof l.col === 'number')
+                /**
+                 * 每一列的文字横向覆盖范围 —— 用来兜住「destX 落在栏中间」的情形。
+                 * 只看列起点的话，destX=215.5（左栏里的 DOI 文字）距 49 有 166pt、
+                 * 距 305 只有 90pt，会被判进右栏；按「哪个列的范围盖住了它」才对。
+                 *
+                 * **范围必须夹在列带宽内。** 版面里有跨栏的整宽行（页眉、横排标题），
+                 * 它的 x1 会把左栏范围一路撑到页边，于是「被哪一列盖住」永远命中左栏，
+                 * 兜底判据就失效了。双栏的带宽边界正是页宽中点：实测左右栏正文
+                 * 分别是 49–291 与 305–546，中点 297.63 恰好落在栏间空白（14.2pt）里。
+                 */
+                const mid = packed.width / 2
+                const colBandEdge = (i) => (colStarts.length === 2
+                  ? mid
+                  : (colStarts[i] + colStarts[i + 1]) / 2)
+                const colExtent = colStarts.map(() => ({ lo: Infinity, hi: -Infinity }))
+                if (hasCols) {
+                  for (const l of lines) {
+                    const c = l.col ?? 0
+                    const e = colExtent[c]
+                    if (!e) continue
+                    const lo = c === 0 ? l.x0 : Math.max(l.x0, colBandEdge(c - 1))
+                    const hi = c === colStarts.length - 1 ? l.x1 : Math.min(l.x1, colBandEdge(c))
+                    if (lo < e.lo) e.lo = lo
+                    if (hi > e.hi) e.hi = hi
+                  }
+                }
                 let scoped = lines
-                if (destX !== null && packed.width > 0) {
-                  const mid = packed.width / 2
-                  const side = destX < mid ? 'L' : 'R'
-                  const sameSide = lines.filter((l) => ((l.x0 + l.x1) / 2 < mid ? 'L' : 'R') === side)
+                if (hasCols) {
+                  let tcol = 0
+                  if (destX !== null) {
+                    /**
+                     * 先判「落在哪一列的范围内」，多个列都盖住时取列起点更近的；
+                     * 都不盖住（destX 在版面留白里）再退回最近列起点。
+                     */
+                    const covering = []
+                    for (let i = 0; i < colExtent.length; i += 1) {
+                      const e = colExtent[i]
+                      if (e.lo <= destX && destX <= e.hi) covering.push(i)
+                    }
+                    const pool = covering.length > 0 ? covering : colStarts.map((_, i) => i)
+                    let bestDx = Infinity
+                    for (const i of pool) {
+                      const d = Math.abs(colStarts[i] - destX)
+                      if (d < bestDx) { bestDx = d; tcol = i }
+                    }
+                  }
+                  const sameSide = lines.filter((l) => (l.col ?? 0) === tcol)
+                  // 该栏行数占比太低（目标列判错）时退回全页，宁可多给也别一个字取不到
                   if (sameSide.length >= Math.max(2, lines.length * 0.15)) scoped = sameSide
                 }
+                /**
+                 * 目标列（诊断用）：scoped 取自某一列时记列起点，否则 null。
+                 * 只有 scoped 真被收窄成单列时才有意义。
+                 */
+                const scopedCol = scoped !== lines
+                  ? (scoped.length > 0 ? (scoped[0].col ?? 0) : null)
+                  : null
+                const targetColStart = scopedCol === null ? null : colStarts[scopedCol]
 
                 // 打分：竖向距离为主；destX 落到该行横向区间之外的偏移按 0.5 计惩罚
                 let best = 0
@@ -4326,6 +4468,38 @@ window.__ModuleLoader__.load({
                   const score = dy + dx * 0.5
                   if (score < bestScore) { bestScore = score; best = i }
                 }
+                /**
+                 * **目标行另算：同列内 `y <= dest.top` 里 y 最大的那一行。**
+                 *
+                 * 为什么不用上面的 score 直接定：
+                 *   · `dy` 是对称的，`References` 标题在 dest.top 上方 10.4pt
+                 *     与正下方 10.4pt 处的一行得分相同，纯距离无法区分「标题」
+                 *     与「目标条目」；
+                 *   · `dest.top` 是行框**顶边**，基线一定在它**下方**
+                 *     （实测 top-baseline 中位数 3.96pt，条目稳定 3.4~4.3pt）。
+                 *
+                 * 所以序关系本身就是判据：基线在 top 上方的行不可能是目标行，
+                 * 不需要任何 magic 阈值。容差 0.6pt 用来吸收坐标舍入。
+                 * 不变式（可断言）：`0 < dest.top - baseline <= 该行字号`。
+                 */
+                let targetIdx = -1
+                if (scopedCol !== null) {
+                  for (let i = 0; i < scoped.length; i += 1) {
+                    const l = scoped[i]
+                    if (l.col !== scopedCol && typeof l.col === 'number') continue
+                    if (l.y > destY + 0.6) continue
+                    if (targetIdx < 0 || l.y > scoped[targetIdx].y) targetIdx = i
+                  }
+                }
+                const pickIdx = targetIdx >= 0 ? targetIdx : best
+                const targetBaseline = pickIdx >= 0 ? scoped[pickIdx].y : null
+                const topMinusBaseline = destY === null || targetBaseline === null
+                  ? null
+                  : destY - targetBaseline
+                /** 打分选出的行，只留作诊断对照；取值一律用 pickIdx */
+                const scoreBest = best
+                if (pickIdx >= 0) best = pickIdx
+
                 /**
                  * **按「参考文献条目边界」取值，不按字数。**
                  *
@@ -4510,6 +4684,17 @@ window.__ModuleLoader__.load({
                     entryIsBest: startIdx === best,
                     usedFallback,
                     lineCount: pickedLines,
+                    /** 分栏诊断：列起点、目标列、目标行基线、top 与基线的差 */
+                    colStarts,
+                    targetCol: targetColStart,
+                    targetBaseline,
+                    topMinusBaseline,
+                    /** 打分选中的行（仅对照用；targetIndex 是实际取值行） */
+                    scoreIndex: scoreBest,
+                    scoreText: (scoped[scoreBest]?.text || '').slice(0, 60),
+                    targetIndex: pickIdx,
+                    targetText: (scoped[pickIdx]?.text || '').slice(0, 60),
+                    targetIsScore: pickIdx === scoreBest,
                     ctxBefore,
                     ctxAfter,
                   })
