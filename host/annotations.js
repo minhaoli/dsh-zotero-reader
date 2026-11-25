@@ -560,7 +560,7 @@ export async function updateAnnotationColor(annotationKey, color) {
  *   tags    → tags: [{tag}, ...]
  *
  * @param {string} annotationKey
- * @param {{color?:string, comment?:string, tags?:string[]|{tag:string}[]}} patch
+ * @param {{color?:string, comment?:string, tags?:string[]|{tag:string}[], type?:'highlight'|'underline'}} patch
  * @returns {{ok:true, patch:object}|{ok:false, reason:string, needAuth?:boolean}}
  */
 export async function updateAnnotation(annotationKey, patch = {}) {
@@ -586,6 +586,29 @@ export async function updateAnnotation(annotationKey, patch = {}) {
     body.annotationComment = String(patch.comment)
   }
 
+  /**
+   * 改批注类型：highlight ↔ underline 互转。
+   *
+   * **可写性实测过**（2026-11-26，Zotero 本地 API）：
+   *   highlight → underline  PATCH 204，读回 annotationType=underline
+   *   underline → highlight  PATCH 204，读回 annotationType=highlight
+   * 所以旧注释里「读不到 annotationType 的写权限」这个顾虑是错的，
+   * 之前没做这个功能只是因为没验证。
+   *
+   * 只允许 highlight / underline 两个值：
+   *   · note / text / image / ink 与二者形态差太远，互换没有语义
+   *     （ink 是涂鸦、image 是截图、note 是没有选中文字的独立批注）
+   *   · 放进白名单会让前端误以为任意类型可转
+   * 两者都带 annotationPosition.rects，所以互换不需要改坐标。
+   */
+  if (patch.type !== undefined && patch.type !== null && patch.type !== '') {
+    const wanted = String(patch.type).trim().toLowerCase()
+    if (wanted !== 'highlight' && wanted !== 'underline') {
+      return { ok: false, reason: `批注类型只能在 highlight / underline 之间转换，收到：${wanted.slice(0, 30)}` }
+    }
+    body.annotationType = wanted
+  }
+
   if (patch.tags !== undefined && patch.tags !== null) {
     /**
      * 标签归一成 `[{tag:'x'}]`。
@@ -608,7 +631,7 @@ export async function updateAnnotation(annotationKey, patch = {}) {
   }
 
   if (Object.keys(body).length === 0) {
-    return { ok: false, reason: '没有要修改的字段（color / comment / tags 至少给一个）' }
+    return { ok: false, reason: '没有要修改的字段（color / comment / tags / type 至少给一个）' }
   }
 
   const probe = await probeLocalApi()

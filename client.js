@@ -154,6 +154,11 @@ window.__ModuleLoader__.load({
       annotDeleting: '删除中…',
       annotMoreHint: '从 Zotero 删除这条批注',
       annotRecolorFailed: '改色失败',
+      annotConvertFailed: '转换失败',
+      annotToUnderline: '转为下划线',
+      annotToUnderlineHint: '把这条高亮改成下划线（写回 Zotero）',
+      annotToHighlight: '转为高亮',
+      annotToHighlightHint: '把这条下划线改成高亮（写回 Zotero）',
       highlightSelection: '高亮',
       underlineSelection: '下划线',
       noteSelection: '便签',
@@ -253,6 +258,11 @@ window.__ModuleLoader__.load({
       annotDeleting: 'Deleting…',
       annotMoreHint: 'Delete this annotation from Zotero',
       annotRecolorFailed: 'Failed to change color',
+      annotConvertFailed: 'Failed to convert',
+      annotToUnderline: 'Convert to underline',
+      annotToUnderlineHint: 'Turn this highlight into an underline (written back to Zotero)',
+      annotToHighlight: 'Convert to highlight',
+      annotToHighlightHint: 'Turn this underline into a highlight (written back to Zotero)',
       highlightSelection: 'Highlight',
       underlineSelection: 'Underline',
       noteSelection: 'Note',
@@ -9666,22 +9676,62 @@ const placeBox = (el, l, t, wd, ht) => {
       }
 
       /**
+       * 高亮 ↔ 下划线互转。
+       *
+       * 走同一条 PATCH，只是 body 换成 `type`。后端已实测可写
+       * （highlight → underline → highlight 双向 204）。
+       *
+       * 与 recolorAnnotation 的区别只在语义：颜色是「同一形态换个色」，
+       * 这里是「换形态」。但流程完全一致 —— 成功后**不弹提示**（静默生效，
+       * 与改色/删除一致），失败才弹，因为形态变了用户一眼就能看见，
+       * 而失败时如果不弹，用户会以为点了没反应。
+       */
+      const convertAnnotationType = useCallback(async (annotKey, pageNo, nextType) => {
+        const key = String(annotKey ?? '')
+        const target = String(nextType ?? '').toLowerCase()
+        if (!key || (target !== 'highlight' && target !== 'underline')) return
+        if (annotRecoloring) return
+
+        setAnnotRecoloring(key)
+        try {
+          await fetchJson(`${API}/annotations`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ annotKey: key, type: target }),
+          })
+          // 与改色一致：不本地糊弄，重新拉 Zotero 的真实值再重画
+          await loadAnnotationsFromZotero()
+          const page = Number(pageNo)
+          if (Number.isFinite(page) && page > 0) decoratePage(page)
+          paintSelectRef.current?.(annotSelectedRef.current)
+        } catch (e) {
+          setPop({ x: 24, y: 24, loading: false, title: t('annotConvertFailed'), text: String(e?.message ?? e) })
+        } finally {
+          setAnnotRecoloring(null)
+        }
+      }, [annotRecoloring, loadAnnotationsFromZotero, decoratePage])
+
+      /**
        * 三点菜单（点击卡片右上角 ⋯ 后弹出）。
        *
        * 锚点是卡片右上角，不是鼠标：菜单贴着卡片右侧展开，空间不够就翻到卡片
        * 左上内侧。结构照 Zotero 截图 —— 分隔线把「颜色」和「删除」分开。
        *
-       * 刻意**没有**照搬截图里的这些项：添加至笔记、编辑页码、转换为高亮。
-       * 它们需要宿主侧的本事（写笔记 / 改 annotationPosition.pageLabel /
-       * 读 annotationType 的写权限），当前后端不支持，做成点了没反应的按钮
-       * 就是假功能，所以不做 —— 见交付说明里的「没做的部分」。
+       * 刻意**没有**照搬截图里的这些项：添加至笔记、编辑页码。
+       * 它们需要宿主侧的本事（写笔记 / 改 annotationPosition.pageLabel），
+       * 当前后端不支持，做成点了没反应的按钮就是假功能，所以不做。
+       *
+       * 「转换为高亮」当初也被划进这一类，理由是「读不到 annotationType
+       * 的写权限」。2026-11-26 实测证明那个顾虑是错的 —— 本地 API 的
+       * PATCH 可以改 annotationType（highlight ↔ underline 双向 204），
+       * 所以这一项已经实现，见上面的 convertAnnotationType。
        */
       const renderAnnotMenu = () => {
         const menu = annotMenu
         if (!menu) return null
         const busy = annotDeleting === menu.key
         const MW = 186 // 与 CSS .zr-annot-menu 的 min-width 对齐，用于贴边翻转
-        const MH = 330 // 八个颜色 + 分隔线 + 删除项的估算高度
+        const MH = 372 // 八个颜色 + 分隔线 + 形态转换项 + 分隔线 + 删除项的估算高度
         const card = annotPanel
         const CW = 300
         let left
@@ -9706,6 +9756,37 @@ const placeBox = (el, l, t, wd, ht) => {
           onContextMenu: (e) => e.preventDefault(),
         },
         renderAnnotColorItem(menu.key, menu.pageNo, () => setAnnotMenu(null)),
+        h('div', { className: 'zr-menu-sep' }),
+        /**
+         * 形态互换：高亮 ↔ 下划线。
+         *
+         * 只对这两种形态显示 —— 其它类型（note / text / image / ink）
+         * 与二者形态差太远，互换没有语义，后端也只放行这两个值。
+         *
+         * 按钮文案写「目标形态」而不是「当前形态」：用户看到的是
+         * 「转为下划线」= 点下去会变成下划线，而不是「当前是下划线」。
+         */
+        (() => {
+          const cur = String(
+            annotationsRef.current.find((a) => a.key === menu.key)?.type ?? 'highlight',
+          ).toLowerCase()
+          if (cur !== 'highlight' && cur !== 'underline') return null
+          const toUnderline = cur === 'highlight'
+          return h('div', null,
+            h('button', {
+              className: 'zr-annot-menu-conv',
+              disabled: busy,
+              title: toUnderline ? t('annotToUnderlineHint') : t('annotToHighlightHint'),
+              onClick: (event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                const target = menu
+                setAnnotMenu(null)
+                convertAnnotationType(target.key, target.pageNo, toUnderline ? 'underline' : 'highlight')
+              },
+            }, toUnderline ? t('annotToUnderline') : t('annotToHighlight')),
+          )
+        })(),
         h('div', { className: 'zr-menu-sep' }),
         h('button', {
           className: 'zr-annot-menu-del',

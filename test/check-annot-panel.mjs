@@ -50,7 +50,26 @@ check('调色板 8 色',
   (src.match(/#(?:ffd400|ff6666|5fb236|2ea8e5|a28ae5|e56eee|f19837|aaaaaa)/g) || []).length >= 8)
 check('当前颜色打勾', /✓|check/.test(src))
 
-/* ---------- 4. 无假功能 ---------- */
+/* ---------- 4. 高亮 ↔ 下划线互转 ---------- */
+
+/**
+ * 后端写 `annotationType` 可写性是实测过的（2026-11-26，本地 API
+ * PATCH highlight → underline → highlight 双向 204）。这条链路有三段，
+ * 任何一段断了功能都会静默失效，所以三段都钉住。
+ */
+check('前端有转换函数 convertAnnotationType', /convertAnnotationType/.test(src))
+check('转换走 PATCH /annotations 且带 type',
+  /convertAnnotationType[\s\S]{0,900}type:\s*target/.test(src))
+check('转换后重新拉 Zotero 真实值再重画',
+  /convertAnnotationType[\s\S]{0,1200}loadAnnotationsFromZotero/.test(src))
+check('转换失败才弹提示（成功后静默）',
+  /annotConvertFailed/.test(src))
+check('菜单里有「转为下划线」/「转为高亮」两项',
+  /annotToUnderline/.test(src) && /annotToHighlight/.test(src))
+check('转换项只对 highlight / underline 显示',
+  /cur !== 'highlight' && cur !== 'underline'/.test(src))
+
+/* ---------- 5. 无假功能 ---------- */
 check('没有「已保存」类成功提示',
   !/annotSaved/.test(src) || !/setPop\([^)]*annotSaved/.test(src))
 

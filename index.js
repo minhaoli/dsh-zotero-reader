@@ -197,6 +197,50 @@ function applyInner(ctx, config = {}) {
     return settings
   }
 
+  /**
+   * TEMP SPIKE（验证 configEditor 能否定位并写入本插件的 bundle 行）：
+   * 只改自己的 translateConcurrency 4→5→4，日志写 config-spike.log，
+   * 阶段标记写 config-spike.phase。验证完必须整段删除。
+   */
+  function runConfigEditorSpike() {
+    const logFile = path.join(dataDir, 'config-spike.log')
+    const phaseFile = path.join(dataDir, 'config-spike.phase')
+    const log = (line) => {
+      try {
+        fs.mkdirSync(dataDir, { recursive: true })
+        fs.appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`, 'utf8')
+      } catch { /* spike 日志失败不致命 */ }
+    }
+    try {
+      const editor = ctx.get('configEditor')
+      const ownEntry = ctx.fiber?.entry
+      log(`start editor=${editor ? 'yes' : 'no'} ownEntry=${ownEntry?.options?.id ?? 'none'} ownName=${ownEntry?.options?.name ?? ''}`)
+      if (!editor) return
+      const rows = editor.entries()
+      log(`entries(${rows.length}): ${rows.map((row) => `${row.options.id}/${row.options.name}`).join(' | ')}`)
+      const target = rows.find((row) => row.options.id === ownEntry?.options?.id)
+        ?? rows.find((row) => row.options.name === 'dsh-zotero-reader')
+      log(`target=${target?.options?.id ?? 'NOT FOUND'}`)
+      if (!target) return
+      const phase = fs.existsSync(phaseFile) ? fs.readFileSync(phaseFile, 'utf8').trim() : '1'
+      log(`phase=${phase} before=${JSON.stringify(target.options.config ?? {})}`)
+      if (phase === '1') {
+        fs.writeFileSync(phaseFile, '2', 'utf8')
+        editor.edit(target, (current) => ({ ...current, translateConcurrency: 5 }))
+          .then(() => log('edit1 resolved'))
+          .catch((error) => log(`edit1 FAILED: ${error?.stack ?? error}`))
+      } else if (phase === '2') {
+        fs.writeFileSync(phaseFile, 'done', 'utf8')
+        editor.edit(target, (current) => ({ ...current, translateConcurrency: 4 }))
+          .then(() => log('edit2 resolved'))
+          .catch((error) => log(`edit2 FAILED: ${error?.stack ?? error}`))
+      }
+    } catch (error) {
+      log(`SPIKE THREW: ${error?.stack ?? error}`)
+    }
+  }
+  setTimeout(runConfigEditorSpike, 3000)
+
   /* ------------------------------------------------------------ 库与文档 */
 
   let inflightLibrary = null
@@ -1231,6 +1275,7 @@ async function handleRequest(rctx, req, res, deps) {
         color: body.color,
         comment: body.comment,
         tags: body.tags,
+        type: body.type,
       })
       if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
       return sendJson(res, 200, { ok: true, patch: result.patch })
