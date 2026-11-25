@@ -590,3 +590,44 @@ meta           18 行   key, value
 
 - Zoteus 用的 embedding API key 存在哪（环境变量 / DSH 配置 / Zoteus 自己的配置文件），新插件要独立配置，不复用它的 key
 - `source` 字段全为 null，含义未知（可能是 note/annotation 来源标记，当前未启用）
+## 凭据存储：一律走环境变量，配置文件只存变量名（2026-11-26 用户要求）
+
+用户原话：「注意我这个插件所有 api 也要是弄成环境变量的方式存储，避免明文哦」
+
+### 现有凭据分布（实测）
+
+| 凭据 | 当前存放 | 状态 |
+|---|---|---|
+| `SILICONFLOW_API_KEY` | `C:\Users\30759\.dsh\.env`（51 字符） | 已存在，Zoteus 的 embedding 在用 |
+| `ZOTERO_API_KEY` | `C:\Users\30759\.dsh\.env`（24 字符） | 已存在，zotero.org 云端用 |
+| `mineruCloudToken` | `~/.dsh-zotero-reader/settings.json` **明文** | 要迁移 |
+| Zotero 本地授权 key | `~/.dsh-zotero-reader/zotero-api-key.json` | 运行时申请的一次性 key，不是用户填的，可保留 |
+
+DSH 启动时把 `.env` 加载进 `process.env`，插件（跑在 host 进程里）可以直接读。证据：`cordis.patch.yml` 的 `mcp-zotero` 段里写 `OPENAI_API_KEY: !!js process.env.SILICONFLOW_API_KEY`，且语义搜索实测可用（`embedderActive: true`）。
+
+### 设计
+
+`config.js` 里**存变量名，不存值**：
+
+| 配置字段 | 默认值 | 说明 |
+|---|---|---|
+| `mineruTokenEnv` | `MINERU_API_TOKEN` | 指向环境变量名 |
+| `cloudApiKeyEnv` | `ZOTERO_API_KEY` | 默认复用已有变量 |
+| `embeddingApiKeyEnv` | `SILICONFLOW_API_KEY` | 默认复用已有变量 |
+
+运行时 `process.env[settings.mineruTokenEnv]` 取值。变量名本身不是秘密，可以明文存在 `cordis.patch.yml` 里，`.role('secret')` 的用法随之取消。
+
+### 具体改动
+
+1. `config.js`：把 `mineruCloudToken` / `cloudApiKey` / `embeddingApiKey` 三个 `secret` 字段换成对应的 `*Env` 字段（纯字符串，变量名）
+2. `index.js` 的 `normalizeConfig`：新增 `resolveSecret(envName)` 辅助，读不到时返回空串并记一条诊断（不要抛错，插件照常起动）
+3. 插件页表单：不显示密码框，改成「环境变量名」输入框 + 状态行「已读到（长度 N）/ 未设置，请在 `.env` 里添加 `XXX=...`」
+4. `settings.json` 里已有的 `mineruCloudToken` 明文：迁移时**写进 `.env`**（若变量已存在则跳过），然后把 settings.json 里的该字段清空并提示已迁移
+5. 文档（README）说明凭据一律放 `.env`，给出样例变量名
+
+### 安全要点
+
+- 任何 HTTP 响应都不得回传 key 值，只回「已读到 / 未读到」
+- 日志（`client-log.jsonl`、`exec-debug.log`）里不得出现 key 明文，诊断只记变量名和长度
+- `.env` 的读取只在 host 侧，不下发到浏览器
+- 如果变量名指向的变量不存在，功能降级而不是崩溃：MinerU 报「未配置 token」、云端 API 报「未配置 key」、embedding 退回纯 BM25
