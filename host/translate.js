@@ -129,13 +129,13 @@ const SYSTEM_PROMPT = [
 ].join('\n')
 
 /** 单次 LLM 调用，返回纯文本。 */
-async function translateOnce(ctx, text, target, signal) {
+async function translateOnce(ctx, text, target, signal, efforts) {
   const selection = pickSelection(ctx, target)
   if (!selection.provider || !selection.model) {
     throw new Error('没有可用的模型：宿主未配置默认模型，且插件设置里未指定翻译模型。')
   }
   // 文档翻译按段并发，每段都做回退链代价太高，只用首选档位
-  const reasoningEffort = TRANSLATE_EFFORTS[0]
+  const reasoningEffort = normalizeEfforts(efforts)[0]
   let out = ''
   const stream = ctx.llm.stream({
     provider: selection.provider,
@@ -160,8 +160,31 @@ async function translateOnce(ctx, text, target, signal) {
  *
  * 为什么是序列而不是单个值：档位只是省时间的优化，不该成为整条链路的前提。
  * 模型/provider 仍跟随当前会话的默认选择（用户要求「其他的和当前模型一致」）。
+ *
+ * 现在这只是一个**默认值**：用户可以在插件设置里用 `translateEfforts` 覆盖它
+ * （某些 provider 只认 high/medium，硬编码的序列会在前两档白跑两次超时）。
  */
-const TRANSLATE_EFFORTS = ['off', 'low', null]
+export const DEFAULT_TRANSLATE_EFFORTS = ['off', 'low', null]
+const TRANSLATE_EFFORTS = DEFAULT_TRANSLATE_EFFORTS
+
+/**
+ * 归一化调用方传进来的档位序列。
+ *
+ * `null` 是合法档位（= 不传该参数，用模型默认），所以不能用 truthy 过滤。
+ * 传了空/非法就退回默认序列 —— 空序列会让回退链一次都不跑，直接报「失败」。
+ */
+export function normalizeEfforts(value) {
+  if (!Array.isArray(value) || value.length === 0) return [...DEFAULT_TRANSLATE_EFFORTS]
+  const out = []
+  for (const item of value) {
+    if (item === null) { if (!out.includes(null)) out.push(null); continue }
+    if (typeof item !== 'string') continue
+    const effort = item.trim()
+    if (!effort) continue
+    if (!out.includes(effort)) out.push(effort)
+  }
+  return out.length > 0 ? out : [...DEFAULT_TRANSLATE_EFFORTS]
+}
 
 export function pickSelection(ctx, override) {
   const fallback = () => {
@@ -247,7 +270,7 @@ export async function translateDocument(ctx, doc, options = {}) {
 
   await pool(flat, concurrency, async (item) => {
     const { masked, slots } = maskMath(item.text)
-    const translated = await translateOnce(ctx, masked, options.target ?? 'zh-CN', options.signal)
+    const translated = await translateOnce(ctx, masked, options.target ?? 'zh-CN', options.signal, options.efforts)
     const restored = unmaskMath(translated, slots)
     collected[item.jobIndex][item.partIndex] = restored
     return restored
@@ -331,8 +354,13 @@ export async function translateSelection(ctx, text, options = {}) {
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
   }
   const diag = options.onDiag
+  /**
+   * 档位序列可由调用方覆盖（设置里的 `translateEfforts`），不传就用默认。
+   * 这样用户遇到「这个 provider 不认 off」时能自己改，而不用改代码。
+   */
+  const efforts = normalizeEfforts(options.efforts)
   let lastError = null
-  for (const effort of TRANSLATE_EFFORTS) {
+  for (const effort of efforts) {
     const label = effort ?? 'default'
     try {
       diag?.({ event: 'selection:attempt', effort: label, model: selection.model })

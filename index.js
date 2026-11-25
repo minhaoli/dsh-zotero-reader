@@ -31,6 +31,11 @@ import {
   readAnnotations, createAnnotation, deleteAnnotation, updateAnnotation,
   probeLocalApi, HIGHLIGHT_COLORS, setApiKeyStore,
 } from './host/annotations.js'
+import {
+  probeCloudKey, listCloudItems, getCloudItem, getCloudFile,
+  listCloudAnnotations, createCloudAnnotation,
+  toErrorPayload, ERROR_CODES, CloudApiError,
+} from './host/zotero-cloud.js'
 
 export const name = 'dsh-zotero-reader'
 export const inject = ['tools']
@@ -376,6 +381,13 @@ function applyInner(ctx, config = {}) {
     findItem, documentOf, library, docs, searched, translating, settings, dataDir, cacheDir, ctx,
     saveSettings,
     /**
+     * 网络出口。
+     *
+     * 默认用全局 fetch；测试可以塞桩函数进来，于是「请求构造 / 错误分类 / 限流退避」
+     * 这些逻辑都能在**不联网**的前提下验证 —— 否则测试红绿会取决于用户 VPN 状态。
+     */
+    fetchImpl: config.__fetchImpl,
+    /**
      * 把 searched 落盘的能力也交给 deps。
      *
      * handleRequest 是**模块顶层函数**，不在 applyInner 的闭包里 ——
@@ -472,7 +484,68 @@ function normalizeConfig(config) {
     mineruLocalUrl: config.mineruLocalUrl || 'http://127.0.0.1:8000',
     mineruCloudToken: config.mineruCloudToken ?? '',
     mineruAutoOnScanned: config.mineruAutoOnScanned !== false,
+    /**
+     * 云端 Web API（api.zotero.org）。
+     *
+     * 与 `zotero-api-key.json` 里的本地 key 完全无关：那是 Zotero 10+ 运行时
+     * 通过 127.0.0.1:23119 发放的，云端不认（实测 403 Invalid key）。
+     * 这里存的是用户在 zotero.org/settings/keys 自己创建的 key。
+     */
+    cloudApiKey: typeof config.cloudApiKey === 'string' ? config.cloudApiKey.trim() : '',
+    cloudUserID: typeof config.cloudUserID === 'string' ? config.cloudUserID.trim() : String(config.cloudUserID ?? '').trim(),
+    /**
+     * 各功能的模型覆盖：`{ translate|explain|ask|docTranslate: { provider, model, reasoningEffort } }`。
+     * 空字符串表示跟随会话当前模型 —— 这是默认，也是用户最容易理解的行为。
+     */
+    features: normalizeFeatures(config.features),
+    /**
+     * 划词翻译的推理档位回退序列。原来是 host/translate.js 里的硬编码常量，
+     * 现在放到设置里，用户可以在某些模型不支持某档位时自己调整。
+     */
+    translateEfforts: normalizeEfforts(config.translateEfforts),
   }
+}
+
+/** 功能键：新增功能时只改这里，前后端契约一起变。 */
+export const FEATURE_KEYS = ['translate', 'explain', 'ask', 'docTranslate']
+/** 默认推理档位回退序列（与 host/translate.js 原硬编码一致）。 */
+export const DEFAULT_TRANSLATE_EFFORTS = ['off', 'low', null]
+
+/** 归一化单功能的模型覆盖。全空表示跟随会话。 */
+function normalizeFeature(value) {
+  if (!value || typeof value !== 'object') return { provider: '', model: '', reasoningEffort: '' }
+  return {
+    provider: typeof value.provider === 'string' ? value.provider.trim() : '',
+    model: typeof value.model === 'string' ? value.model.trim() : '',
+    // 空字符串 = 跟随；否则是档位名（off/low/medium/high…）
+    reasoningEffort: typeof value.reasoningEffort === 'string' ? value.reasoningEffort.trim() : '',
+  }
+}
+
+function normalizeFeatures(value) {
+  const out = {}
+  const src = value && typeof value === 'object' ? value : {}
+  for (const key of FEATURE_KEYS) out[key] = normalizeFeature(src[key])
+  return out
+}
+
+/**
+ * 归一化推理档位序列。
+ *
+ * `null` 是合法档位（表示「模型默认」），所以不能用 truthy 过滤 —— 那会把 null 丢掉，
+ * 而 null 恰好是序列里的最后一档兜底。
+ */
+function normalizeEfforts(value) {
+  if (!Array.isArray(value)) return [...DEFAULT_TRANSLATE_EFFORTS]
+  const out = []
+  for (const item of value) {
+    if (item === null) { if (!out.includes(null)) out.push(null); continue }
+    if (typeof item !== 'string') continue
+    const effort = item.trim()
+    if (!effort) continue
+    if (!out.includes(effort)) out.push(effort)
+  }
+  return out.length > 0 ? out : [...DEFAULT_TRANSLATE_EFFORTS]
 }
 
 function clampInt(value, min, max, fallback) {
@@ -483,6 +556,35 @@ function clampInt(value, min, max, fallback) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
   return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+/**
+ * 云端条目摘要：只给列表需要的字段。
+ *
+ * 云端原始条目带 `data` 里几十个字段（含 abstractNote 全文、relations 等），
+ * 一个 100 条的列表能到几 MB，而前端列表只用得上标题/作者/年份。
+ * 同样遵守「不要留 undefined 值字段」这条约定（宿主无损 JSON 校验）。
+ */
+function summarizeCloudItem(row) {
+  const data = row?.data ?? {}
+  const creators = Array.isArray(data.creators) ? data.creators : []
+  const out = {
+    key: row?.key ?? '',
+    version: row?.version ?? 0,
+    itemType: data.itemType ?? '',
+    title: data.title ?? '(无标题)',
+    date: data.date ?? '',
+    year: (String(data.date ?? '').match(/\d{4}/) ?? [''])[0],
+    publication: data.publicationTitle ?? data.bookTitle ?? data.proceedingsTitle ?? '',
+    doi: data.DOI ?? '',
+    url: data.url ?? '',
+    creators: creators
+      .slice(0, 6)
+      .map((c) => (c?.name ? String(c.name) : [c?.firstName, c?.lastName].filter(Boolean).join(' ')))
+      .filter(Boolean),
+    tags: (Array.isArray(data.tags) ? data.tags : []).map((t) => t?.tag ?? t).filter(Boolean).slice(0, 8),
+  }
+  return out
 }
 
 /**
@@ -588,10 +690,29 @@ async function serveVendorAsset(res, subPath) {
   res.end(data)
 }
 
-function selectionOverride(settings) {
-  return settings.selectionProvider && settings.selectionModel
-    ? { provider: settings.selectionProvider, model: settings.selectionModel }
-    : undefined
+/**
+ * 模型覆盖解析。
+ *
+ * 优先级：`features.<name>` > 旧的 `selectionProvider/selectionModel` > 跟随会话。
+ *
+ * 为什么保留旧字段：设置文件是用户机器上已经存在的一份 json，
+ * 直接删字段会让老用户的配置静默失效。新的 features 只是多一层覆盖。
+ *
+ * `feature` 为空表示沿用老行为（划词翻译用 selection*）。
+ */
+function selectionOverride(settings, feature = '') {
+  const overrides = settings.features ?? {}
+  const target = feature ? overrides[feature] : null
+  if (target?.provider && target?.model) {
+    const out = { provider: target.provider, model: target.model }
+    // 空字符串 = 跟随模型默认，不传这个键
+    if (target.reasoningEffort) out.reasoningEffort = target.reasoningEffort
+    return out
+  }
+  if (settings.selectionProvider && settings.selectionModel) {
+    return { provider: settings.selectionProvider, model: settings.selectionModel }
+  }
+  return undefined
 }
 
 /**
@@ -707,6 +828,10 @@ async function handleRequest(rctx, req, res, deps) {
      * 设置读写。
      * 面板里改、存 json、立即生效 —— 不用去翻 YAML，也不用重载插件。
      * GET 返回可编辑字段（token 这类秘密不回显明文，只回是否已填）。
+     *
+     * 铁律：`cloudApiKey` 与 `mineruCloudToken` 一样，**只回 `Set` 布尔**。
+     * 明文一旦进了响应，它就会同时出现在浏览器内存、devtools 网络面板、
+     * 以及任何抓包/日志里 —— 用户填的是 zotero.org 账号级凭据，泄露面太大。
      */
     if (sub === '/settings' && method === 'GET') {
       const s = deps.settings
@@ -716,6 +841,12 @@ async function handleRequest(rctx, req, res, deps) {
         mineruAutoOnScanned: s.mineruAutoOnScanned,
         mineruCloudTokenSet: Boolean(s.mineruCloudToken),
         zoteroDataDir: s.zoteroDataDir,
+        // 云端 Web API：key 只回是否已配置
+        cloudApiKeySet: Boolean(s.cloudApiKey),
+        cloudUserID: s.cloudUserID,
+        // 各功能的模型覆盖；空表示跟随会话
+        features: s.features,
+        translateEfforts: s.translateEfforts,
         // 只读展示，便于排查
         resolvedDataDir: deps.dataDir,
       })
@@ -735,6 +866,26 @@ async function handleRequest(rctx, req, res, deps) {
       if (typeof body.mineruCloudToken === 'string') patch.mineruCloudToken = body.mineruCloudToken.trim()
       if (typeof body.zoteroDataDir === 'string') patch.zoteroDataDir = body.zoteroDataDir.trim()
 
+      /**
+       * 云端 key：空字符串是**合法输入**，表示「清除」。
+       * 不校验 24 位格式 —— 用户可能先填 userID 再填 key，格式校验留给 /cloud/config
+       * 和 /cloud/status 去给出可操作提示，这里拦下来只会让人不知道为什么存不上。
+       */
+      if (typeof body.cloudApiKey === 'string') patch.cloudApiKey = body.cloudApiKey.trim()
+      if (typeof body.cloudUserID === 'string') patch.cloudUserID = body.cloudUserID.trim()
+      if (body.features !== undefined) {
+        if (!body.features || typeof body.features !== 'object' || Array.isArray(body.features)) {
+          return sendJson(res, 400, { error: 'features 必须是对象' })
+        }
+        patch.features = body.features
+      }
+      if (body.translateEfforts !== undefined) {
+        if (!Array.isArray(body.translateEfforts)) {
+          return sendJson(res, 400, { error: 'translateEfforts 必须是数组（元素为档位名，允许 null）' })
+        }
+        patch.translateEfforts = body.translateEfforts
+      }
+
       const saved = deps.saveSettings(patch)
       // 库路径变了要作废缓存，否则还按老路径读
       if ('zoteroDataDir' in patch) deps.invalidateLibrary()
@@ -745,6 +896,10 @@ async function handleRequest(rctx, req, res, deps) {
         mineruAutoOnScanned: saved.mineruAutoOnScanned,
         mineruCloudTokenSet: Boolean(saved.mineruCloudToken),
         zoteroDataDir: saved.zoteroDataDir,
+        cloudApiKeySet: Boolean(saved.cloudApiKey),
+        cloudUserID: saved.cloudUserID,
+        features: saved.features,
+        translateEfforts: saved.translateEfforts,
       })
     }
 
@@ -1086,6 +1241,168 @@ async function handleRequest(rctx, req, res, deps) {
       return sendJson(res, 200, probe)
     }
 
+    /* --------------------------------------------------- 云端 Web API */
+
+    /**
+     * 云端连通性 / key 校验。
+     *
+     * 三种失败要能区分开，否则用户不知道该改什么：
+     *   · 没填 key          → code=no_key
+     *   · key 无效          → code=invalid_key（注意云端对这个回 403 纯文本，不是 401）
+     *   · 连不上（VPN 没开）→ code=network / timeout
+     * 一律回 200 + `{ ok:false, code, error }`：这是「诊断」接口，
+     * 用 4xx/5xx 会让前端把可解释的状态当成崩溃。
+     */
+    if (sub === '/cloud/status' && method === 'GET') {
+      const apiKey = deps.settings.cloudApiKey
+      if (!apiKey) {
+        return sendJson(res, 200, {
+          ok: false,
+          code: ERROR_CODES.NO_KEY,
+          error: '还没有配置云端 API key。请在 zotero.org/settings/keys 创建一个，勾选允许读写。',
+          userID: deps.settings.cloudUserID || '',
+        })
+      }
+      try {
+        const info = await probeCloudKey(apiKey, { fetchImpl: deps.fetchImpl })
+        /**
+         * 用 /keys/current 返回的 userID 回填设置。
+         *
+         * 为什么自动回填：userID 是一串数字，用户基本抄不对，而它又能从 key
+         * 直接问出来。写回失败不影响本次结果 —— 下次还会再问一次。
+         */
+        if (info.userID && String(info.userID) !== String(deps.settings.cloudUserID ?? '')) {
+          try { deps.saveSettings({ cloudUserID: String(info.userID) }) } catch { /* 存不上就只在响应里给 */ }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          userID: info.userID,
+          username: info.username,
+          canWrite: info.canWrite,
+        })
+      } catch (error) {
+        return sendJson(res, 200, { ...toErrorPayload(error), userID: deps.settings.cloudUserID || '' })
+      }
+    }
+
+    /** 保存云端 key + userID。key 走密码框，写进去就不再回明文。 */
+    if (sub === '/cloud/config' && method === 'POST') {
+      const body = await readJsonBody(req)
+      const patch = {}
+      if (typeof body.apiKey === 'string') patch.cloudApiKey = body.apiKey.trim()
+      if (typeof body.userID === 'string') patch.cloudUserID = body.userID.trim()
+      if (Object.keys(patch).length === 0) {
+        return sendJson(res, 400, { error: '没有可保存的字段（apiKey / userID）' })
+      }
+      const saved = deps.saveSettings(patch)
+      return sendJson(res, 200, {
+        ok: true,
+        cloudApiKeySet: Boolean(saved.cloudApiKey),
+        cloudUserID: saved.cloudUserID,
+      })
+    }
+
+    /** 列云端文献（分页）。总数取 Total-Results，拿不到就是 null 而不是 0。 */
+    if (sub === '/cloud/items' && method === 'GET') {
+      const limit = clampInt(url.searchParams.get('limit'), 1, 100, 25)
+      const start = clampInt(url.searchParams.get('start'), 0, 1_000_000, 0)
+      try {
+        const out = await listCloudItems({
+          apiKey: deps.settings.cloudApiKey,
+          userID: deps.settings.cloudUserID,
+          limit,
+          start,
+          itemType: url.searchParams.get('itemType') || undefined,
+          fetchImpl: deps.fetchImpl,
+        })
+        return sendJson(res, 200, {
+          ok: true,
+          items: out.items.map(summarizeCloudItem),
+          total: out.total,
+          start: out.start,
+          limit: out.limit,
+        })
+      } catch (error) {
+        return sendJson(res, 200, toErrorPayload(error))
+      }
+    }
+
+    /** 读某条目的云端批注。 */
+    if (sub === '/cloud/annotations' && method === 'GET') {
+      const itemKey = (url.searchParams.get('itemKey') ?? '').trim()
+      if (!itemKey) return sendJson(res, 400, { error: '缺少 itemKey' })
+      try {
+        const out = await listCloudAnnotations({
+          apiKey: deps.settings.cloudApiKey,
+          userID: deps.settings.cloudUserID,
+          itemKey,
+          fetchImpl: deps.fetchImpl,
+        })
+        return sendJson(res, 200, { ok: true, annotations: out.annotations, total: out.total })
+      } catch (error) {
+        return sendJson(res, 200, toErrorPayload(error))
+      }
+    }
+
+    /** 写云端批注。版本冲突（412）要原样回给前端，它才知道该刷新。 */
+    if (sub === '/cloud/annotations' && method === 'POST') {
+      const body = await readJsonBody(req)
+      try {
+        const out = await createCloudAnnotation({
+          apiKey: deps.settings.cloudApiKey,
+          userID: deps.settings.cloudUserID,
+          fields: {
+            parentItem: body.parentItem ?? body.itemKey,
+            text: body.text,
+            comment: body.comment,
+            color: body.color,
+            pageLabel: body.pageLabel,
+            sortIndex: body.sortIndex,
+            position: body.position,
+            tags: body.tags,
+            annotationType: body.annotationType,
+          },
+          fetchImpl: deps.fetchImpl,
+        })
+        return sendJson(res, 200, { ok: true, key: out.key, version: out.version })
+      } catch (error) {
+        // 参数错用 400（是调用方的问题），其它按诊断结果回 200
+        if (error instanceof CloudApiError && error.code === ERROR_CODES.BAD_REQUEST) {
+          return sendJson(res, 400, toErrorPayload(error))
+        }
+        return sendJson(res, 200, toErrorPayload(error))
+      }
+    }
+
+    /**
+     * 云端 PDF 字节流。
+     *
+     * 与 `/pdf` 的区别：那条读本地 storage，这条读云端已同步的副本。
+     * 云端没有（404）时给出明确原因 —— Zotero 只允许下载已同步的附件，
+     * 这是它的设计，不是我们的 bug。
+     */
+    if (sub === '/cloud/pdf' && method === 'GET') {
+      const itemKey = (url.searchParams.get('key') ?? '').trim()
+      if (!itemKey) return sendJson(res, 400, { error: '缺少 key' })
+      try {
+        const file = await getCloudFile({
+          apiKey: deps.settings.cloudApiKey,
+          userID: deps.settings.cloudUserID,
+          itemKey,
+          fetchImpl: deps.fetchImpl,
+        })
+        res.writeHead(200, {
+          'Content-Type': file.contentType || 'application/pdf',
+          'Content-Length': String(file.bytes),
+          'Cache-Control': 'no-store',
+        })
+        res.end(file.buffer)
+        return
+      } catch (error) {
+        return sendJson(res, 200, toErrorPayload(error))
+      }
+    }
+
     // 单页文本（划词兜底、提问定位用）
     if (sub === '/page') {
       const item = await deps.findItem(url.searchParams.get('key') ?? '')
@@ -1119,7 +1436,8 @@ async function handleRequest(rctx, req, res, deps) {
         const result = await translateDocument(llmFacade(rctx), doc, {
           chunkChars: deps.settings.translateChunkChars,
           concurrency: deps.settings.translateConcurrency,
-          override: selectionOverride(deps.settings),
+          override: selectionOverride(deps.settings, 'docTranslate'),
+          efforts: deps.settings.translateEfforts,
           onPage: () => { job.done += 1 },
         })
         await writeCache(deps.dataDir, `${item.itemKey}.zh.json`, {
@@ -1157,7 +1475,9 @@ async function handleRequest(rctx, req, res, deps) {
       }
       const out = await translateSelection(llmFacade(rctx), text, {
         mode: body.mode === 'explain' ? 'explain' : 'translate',
-        override: selectionOverride(deps.settings),
+        override: selectionOverride(deps.settings, body.mode === 'explain' ? 'explain' : 'translate'),
+        // 档位序列来自设置（默认 off→low→模型默认）
+        efforts: deps.settings.translateEfforts,
         // 推理档位回退、空结果、超时都要留痕：这些失败在前端都只剩一片空白
         onDiag: deps.reportHostDiag,
       })
