@@ -128,6 +128,7 @@ const plugin = mod.factory((name) => {
 /* ------------------------------------------------- 假 ctx + 捕获组件 */
 
 let registeredComponent = null
+let registeredConfigPage = null
 const fakeCtx = {
   effect: (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} },
   inject: (deps, cb) => cb({
@@ -143,6 +144,7 @@ const fakeCtx = {
     inject: (name, cb) => cb(),
     register: (spec, component) => {
       if (spec.name === 'sidebar.right.pane.tab' && spec.key === 'zotero-reader') registeredComponent = component
+      if (spec.name === 'plugins.row.config' && spec.key === 'dsh-zotero-reader#zotero-reader') registeredConfigPage = component
       return () => {}
     },
   },
@@ -223,5 +225,28 @@ if (effectErrors.length === 0) {
   for (const err of effectErrors) {
     console.log('  THREW in', err.where, ':', err.message)
     if (err.stack) console.log(err.stack.split('\n').slice(1, 6).map((l) => '    ' + l.trim()).join('\n'))
+  }
+}
+
+/* ---------------------------------- 3. 插件页配置页（plugins.row.config） */
+
+console.log('\n=== 3. 插件页配置页（plugins.row.config）===')
+if (!registeredConfigPage) {
+  process.exitCode = 1
+  console.log('  FAIL: 没有注册 plugins.row.config（key 应为 dsh-zotero-reader#zotero-reader）')
+} else {
+  const t = (key) => key
+  try {
+    const summary = registeredConfigPage({ t, view: 'summary' })
+    console.log('  summary 返回类型:', typeof summary)
+    if (typeof summary !== 'string' || summary.length === 0) throw new Error('summary 不是非空字符串')
+    const page = registeredConfigPage({ t, view: 'page' })
+    console.log('  page 返回类型:', page?.type?.name ?? typeof page?.type)
+    if (!page) throw new Error('page 没有返回节点')
+    console.log('  OK')
+  } catch (error) {
+    process.exitCode = 1
+    console.log('  THREW:', error.message)
+    console.log(error.stack.split('\n').slice(0, 8).join('\n'))
   }
 }

@@ -184,7 +184,7 @@ window.__ModuleLoader__.load({
       saving: '保存中…',
       dataDirLabel: '数据目录',
       refresh: '刷新',
-      configHint: '在设置里配置 MinerU 或 Zotero 路径',
+      configHint: '在 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」里设置 MinerU 与 Zotero 路径',
       searchNoResult: '没有匹配的文献',
       translatingFailed: '翻译失败',
       selectionFailed: '翻译失败',
@@ -193,6 +193,57 @@ window.__ModuleLoader__.load({
       papersDesc: '汇总这次打开过的每一篇，点一下切换过去',
       papersEmpty: '还没有打开任何 PDF。到「Zotero」栏里点一篇，它就会出现在这里。',
       closePaper: '关闭这篇',
+      /* ---------------- 插件页配置（配置入口统一到侧栏「插件」） ---------------- */
+      configSummary: 'Zotero 伴读：MinerU、Zotero 路径、云端 key 与模型覆盖',
+      configIntro: '这些值保存在当前 profile 的 Cordis 配置里；保存后宿主会重载插件使其生效。',
+      saveConfig: '保存配置',
+      discardChanges: '放弃修改',
+      configSaved: '已保存；宿主正在重载插件，稍等片刻生效。',
+      clearSecret: '清除',
+      undoClear: '取消清除',
+      secretSetPlaceholder: '已保存（留空不改）',
+      secretSetHint: '已保存；留空表示不修改，输入新值可覆盖。',
+      secretWillClear: '保存后将清除这项凭据。',
+      localKeyNone: '未授权 —— 首次写入批注时 Zotero 会弹一次授权框',
+      localKeyReady: '已授权（保存于 {{date}}，Zotero 实例匹配）',
+      localKeyMismatch: '已保存授权（{{date}}），但与当前 Zotero 实例不匹配；首次写入时会重新请求',
+      localKeyUnknown: '已授权（保存于 {{date}}）；当前没探测到 Zotero，实例是否匹配未知',
+      cfgZotero: 'Zotero',
+      cfgZoteroDataDir: 'Zotero 数据目录',
+      cfgZoteroDataDirPlaceholder: '留空自动探测',
+      cfgZoteroDataDirHint: '指向包含 zotero.sqlite 的目录；留空按常见位置自动找。',
+      cfgDataDir: '插件数据目录',
+      cfgDataDirHint: '缓存与本地授权 key 的存放位置；留空用 ~/.dsh-zotero-reader。',
+      cfgResolvedDataDir: '当前实际使用',
+      cfgLocalKey: '本地授权',
+      cfgCloud: 'Zotero 云端 Web API',
+      cfgCloudHint: '用于云端文献列表与云端批注；与本地授权（写入批注时自动申请）是两套凭据。',
+      cfgCloudKey: '云端 API key',
+      cfgCloudKeyPlaceholder: '粘贴 zotero.org/settings/keys 创建的 key',
+      cfgCloudKeyHint: '在 zotero.org/settings/keys 创建，勾选允许读写。',
+      cfgCloudUserID: '云端 userID',
+      cfgCloudUserIDPlaceholder: '数字 ID（可在同一页面看到）',
+      cfgCloudUserIDHint: '填了 key 后也可以由 /cloud/status 探测出来，再填到这里。',
+      cfgModels: '模型覆盖',
+      cfgModelsHint: '三项都留空表示跟随会话当前模型；只覆盖填写的项。',
+      cfgSelectionProvider: '划词翻译 provider（旧字段）',
+      cfgSelectionModel: '划词翻译 model（旧字段）',
+      cfgSelectionHint: '兼容旧配置；新配置优先用上面的「划词翻译」覆盖。',
+      featureTranslate: '划词翻译',
+      featureExplain: '解释',
+      featureAsk: '提问',
+      featureDocTranslate: '整篇翻译',
+      cfgProviderPlaceholder: 'provider',
+      cfgModelPlaceholder: 'model',
+      cfgEffortPlaceholder: '推理档位',
+      cfgTranslate: '翻译',
+      cfgConcurrency: '并发数',
+      cfgConcurrencyHint: '1–16；同时翻译的分段数。',
+      cfgChunkChars: '分段字符数',
+      cfgChunkCharsHint: '500–8000；越大请求越少、单次越慢。',
+      cfgEfforts: '推理档位回退序列',
+      cfgEffortsHint: '逗号分隔，按顺序尝试；{{default}} 表示模型默认。例如 off, low, {{default}}',
+      effortDefaultToken: '默认',
     }
     const en = {
       title: 'Zotero Paper Reader',
@@ -288,7 +339,7 @@ window.__ModuleLoader__.load({
       saving: 'Saving…',
       dataDirLabel: 'Data directory',
       refresh: 'Refresh',
-      configHint: 'Configure MinerU or the Zotero path in settings',
+      configHint: 'Configure MinerU and the Zotero path in DSH sidebar → Plugins → dsh-zotero-reader → Configure',
       searchNoResult: 'No matching papers',
       translatingFailed: 'Translation failed',
       selectionFailed: 'Translation failed',
@@ -297,6 +348,57 @@ window.__ModuleLoader__.load({
       papersDesc: 'Every paper opened in this session; click one to switch to it',
       papersEmpty: 'No PDF opened yet. Pick one in the Zotero tab and it shows up here.',
       closePaper: 'Close this paper',
+      /* ------------------- Plugin-page configuration ------------------- */
+      configSummary: 'Zotero Paper Reader: MinerU, Zotero paths, cloud API key and model overrides',
+      configIntro: 'These values live in the current profile Cordis config; the host reloads the plugin after you save.',
+      saveConfig: 'Save configuration',
+      discardChanges: 'Discard changes',
+      configSaved: 'Saved. The host is reloading the plugin; changes apply shortly.',
+      clearSecret: 'Clear',
+      undoClear: 'Keep',
+      secretSetPlaceholder: 'Saved (leave empty to keep)',
+      secretSetHint: 'Saved; leave empty to keep, type a new value to replace.',
+      secretWillClear: 'This credential will be cleared when you save.',
+      localKeyNone: 'Not authorized — Zotero asks once on the first annotation write',
+      localKeyReady: 'Authorized (saved {{date}}, Zotero instance matches)',
+      localKeyMismatch: 'Authorization saved {{date}}, but it does not match the current Zotero instance; it will be requested again on the first write',
+      localKeyUnknown: 'Authorized (saved {{date}}); Zotero is not reachable right now, so the instance match is unknown',
+      cfgZotero: 'Zotero',
+      cfgZoteroDataDir: 'Zotero data directory',
+      cfgZoteroDataDirPlaceholder: 'Leave empty to auto-detect',
+      cfgZoteroDataDirHint: 'Directory containing zotero.sqlite; leave empty to search the usual locations.',
+      cfgDataDir: 'Plugin data directory',
+      cfgDataDirHint: 'Where caches and the local authorization key live; leave empty for ~/.dsh-zotero-reader.',
+      cfgResolvedDataDir: 'In use',
+      cfgLocalKey: 'Local authorization',
+      cfgCloud: 'Zotero cloud Web API',
+      cfgCloudHint: 'Used for cloud libraries and cloud annotations; separate from the local key requested when writing annotations.',
+      cfgCloudKey: 'Cloud API key',
+      cfgCloudKeyPlaceholder: 'Paste a key created at zotero.org/settings/keys',
+      cfgCloudKeyHint: 'Create it at zotero.org/settings/keys and allow read/write.',
+      cfgCloudUserID: 'Cloud userID',
+      cfgCloudUserIDPlaceholder: 'Numeric ID (shown on the same page)',
+      cfgCloudUserIDHint: 'The /cloud/status probe can discover it once the key is set; paste it here.',
+      cfgModels: 'Model overrides',
+      cfgModelsHint: 'Leave all three empty to follow the session model; only filled entries override.',
+      cfgSelectionProvider: 'Selection provider (legacy)',
+      cfgSelectionModel: 'Selection model (legacy)',
+      cfgSelectionHint: 'Kept for older configs; the “Translation” override above wins.',
+      featureTranslate: 'Selection translation',
+      featureExplain: 'Explain',
+      featureAsk: 'Ask',
+      featureDocTranslate: 'Document translation',
+      cfgProviderPlaceholder: 'provider',
+      cfgModelPlaceholder: 'model',
+      cfgEffortPlaceholder: 'reasoning effort',
+      cfgTranslate: 'Translation',
+      cfgConcurrency: 'Concurrency',
+      cfgConcurrencyHint: '1–16; how many chunks translate at once.',
+      cfgChunkChars: 'Chunk characters',
+      cfgChunkCharsHint: '500–8000; larger means fewer requests and slower single calls.',
+      cfgEfforts: 'Reasoning effort fallbacks',
+      cfgEffortsHint: 'Comma separated, tried in order; {{default}} means the model default. E.g. off, low, {{default}}',
+      effortDefaultToken: 'default',
     }
 
     /* -------------------------------------------------------- 工具函数 */
@@ -1346,6 +1448,27 @@ window.__ModuleLoader__.load({
       .zr-field{display:flex;flex-direction:column;gap:4px}
       .zr-settings-row{display:flex;gap:6px}
       .zr-check{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--dsh-text-secondary,#b6b6b6)}
+      /* 插件页配置表单：常驻文档流，不浮动（渲染在侧栏「插件」详情页里） */
+      .zr-cfg{display:flex;flex-direction:column;gap:12px;padding:4px 2px 10px;font-size:12px;color:var(--dsh-text-primary,#e6e6e6)}
+      .zr-cfg-intro{font-size:11.5px;line-height:1.6;color:var(--dsh-text-tertiary,#8a9096)}
+      .zr-cfg-section{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsh-border,#3a3a3a);border-radius:8px;padding:10px 12px}
+      .zr-cfg-title{font-size:12px;font-weight:600;color:var(--dsh-text-primary,#e6e6e6)}
+      .zr-cfg-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+      .zr-cfg-label{font-size:12px;font-weight:500;color:var(--dsh-text-secondary,#b6b6b6)}
+      .zr-cfg-hint{font-size:11px;line-height:1.6;color:var(--dsh-text-tertiary,#8a9096)}
+      .zr-cfg-input{border:1px solid var(--dsh-border,#3a3a3a);border-radius:6px;padding:5px 8px;font-size:12px;
+        background:var(--dsh-bg-input,transparent);color:inherit;min-width:0}
+      .zr-cfg-secret{display:flex;gap:6px;align-items:center;min-width:0}
+      .zr-cfg-secret .zr-cfg-input{flex:1 1 auto}
+      .zr-cfg-status{font-size:11.5px;line-height:1.6;color:var(--dsh-text-secondary,#b6b6b6)}
+      .zr-cfg-ok{color:#5fb236}
+      .zr-cfg-warn{color:#f19837}
+      .zr-cfg-feature{display:flex;flex-direction:column;gap:4px}
+      .zr-cfg-feature-name{font-size:11.5px;color:var(--dsh-text-secondary,#b6b6b6)}
+      .zr-cfg-grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+      .zr-cfg-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-top:2px}
+      .zr-cfg-primary{background:var(--dsh-accent,#3d6af2);border-color:var(--dsh-accent,#3d6af2);color:#fff}
+      .zr-cfg-primary:disabled{opacity:.6}
       .zr-empty{padding:28px 22px;color:var(--dsh-text-secondary,#9aa0a6);font-size:12.5px;line-height:1.8;text-align:center}
       .zr-spin{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:zr-spin .8s linear infinite;vertical-align:-2px}
       @keyframes zr-spin{to{transform:rotate(360deg)}}
@@ -2589,54 +2712,88 @@ window.__ModuleLoader__.load({
       { value: '#f19837', label: '橙' },
     ]
 
-    /* ---------------------------------------------------------- 设置面板 */
+    /* ------------------------------------------------ 插件页配置表单 */
+
+    /** 推理档位序列 → 文本；`null` 用本地化的「默认」表示。 */
+    function effortsToText(list, nullToken) {
+      return (Array.isArray(list) ? list : [])
+        .map((item) => (item === null ? nullToken : String(item)))
+        .join(', ')
+    }
+
+    /** 文本 → 推理档位序列；`默认` / `default` / `null` 都还原成 null。 */
+    function textToEfforts(value, nullToken) {
+      const nullTokens = [String(nullToken).toLowerCase(), 'default', 'null', '默认']
+      return String(value ?? '')
+        .split(/[,，]/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => (nullTokens.includes(item.toLowerCase()) ? null : item))
+    }
+
+    /** 本地授权 key 的一句话状态：只描述「有没有、什么时候存的、实例是否匹配」。 */
+    function localKeyLine(t, localKey) {
+      if (!localKey?.authorized) return t('localKeyNone')
+      const date = localKey.savedAt ? String(localKey.savedAt).slice(0, 10) : '—'
+      if (localKey.matches === true) return t('localKeyReady').replace('{{date}}', date)
+      if (localKey.matches === false) return t('localKeyMismatch').replace('{{date}}', date)
+      return t('localKeyUnknown').replace('{{date}}', date)
+    }
 
     /**
-     * 设置面板。
+     * 配置页（注册进侧栏「插件」的 `plugins.row.config`）。
      *
-     * 为什么做在这里而不是「宿主插件页」：实测宿主并没有把这个插件的配置渲染成
-     * 可点的入口，用户只能看到「未启用 MinerU，请去设置里改」，却找不到设置 —
-     * 那句话等于死胡同。所以设置直接放在阅读器里：改完立刻存、立刻生效。
+     * 数据面只有两个：`GET /config` 读、`POST /config` 写。保存由 Host 用
+     * configEditor 落到 profile patch，宿主随即重载插件 —— 所以文案里明确写
+     * 「保存后稍等生效」，不再假装即时。
+     *
+     * 秘密字段（MinerU token / 云端 key）只从后端拿到 `xxxSet` 布尔；
+     * 输入框留空 = 不修改，要清除必须点旁边的「清除」。
      */
-    function SettingsPanel({ t, onClose }) {
-      const [form, setForm] = useState(null)
+    function PluginConfigPage({ t, view }) {
+      const [state, setState] = useState(null)
+      const [draft, setDraft] = useState(null)
+      const [effortsText, setEffortsText] = useState('')
+      const [secrets, setSecrets] = useState({ mineruCloudToken: '', cloudApiKey: '' })
+      const [cleared, setCleared] = useState({ mineruCloudToken: false, cloudApiKey: false })
       const [error, setError] = useState(null)
+      const [notice, setNotice] = useState(null)
       const [saving, setSaving] = useState(false)
       const [testing, setTesting] = useState(false)
       const [testResult, setTestResult] = useState(null)
-      const [tokenDraft, setTokenDraft] = useState('')
+
+      const adopt = useCallback((data) => {
+        setState(data)
+        setDraft(data.config)
+        setEffortsText(effortsToText(data.config.translateEfforts, t('effortDefaultToken')))
+        setSecrets({ mineruCloudToken: '', cloudApiKey: '' })
+        setCleared({ mineruCloudToken: false, cloudApiKey: false })
+      }, [t])
+
+      const load = useCallback(async () => {
+        setError(null)
+        setNotice(null)
+        try {
+          adopt(await fetchJson(`${API}/config`))
+        } catch (e) {
+          setError(e.message)
+        }
+      }, [adopt])
 
       useEffect(() => {
         let alive = true
-        fetchJson(`${API}/settings`)
-          .then((data) => { if (alive) setForm(data) })
+        fetchJson(`${API}/config`)
+          .then((data) => { if (alive) adopt(data) })
           .catch((e) => { if (alive) setError(e.message) })
         return () => { alive = false }
-      }, [])
+        // 只加载一次：adopt 里用到的 t 由宿主提供，不能作为依赖（否则语言函数换引用就重复请求）
+      }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-      const save = useCallback(async (patch) => {
-        setSaving(true)
-        setError(null)
-        try {
-          const data = await fetchJson(`${API}/settings`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(patch),
-          })
-          setForm((prev) => ({ ...prev, ...data }))
-        } catch (e) {
-          setError(e.message)
-        } finally {
-          setSaving(false)
-        }
-      }, [])
-
-      const test = useCallback(async () => {
+      const testMineru = useCallback(async () => {
         setTesting(true)
         setTestResult(null)
         try {
-          const data = await fetchJson(`${API}/settings/test-mineru`, { method: 'POST' })
-          setTestResult(data)
+          setTestResult(await fetchJson(`${API}/settings/test-mineru`, { method: 'POST' }))
         } catch (e) {
           setTestResult({ ok: false, error: e.message })
         } finally {
@@ -2644,10 +2801,98 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      if (!form) {
-        return h('div', { className: 'zr-settings' },
-          h('div', { className: 'zr-settings-head' }, h('span', null, t('settings')), h('button', { className: 'zr-btn', onClick: onClose }, '×')),
+      if (view === 'summary') return t('configSummary')
+
+      if (!draft) {
+        return h('div', { className: 'zr-cfg' },
           error ? h('div', { className: 'zr-err' }, error) : h('div', { className: 'zr-note' }, t('loading')))
+      }
+
+      const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }))
+      const setFeature = (name, field, value) => setDraft((prev) => ({
+        ...prev,
+        features: {
+          ...(prev.features ?? {}),
+          [name]: { ...(prev.features?.[name] ?? {}), [field]: value },
+        },
+      }))
+
+      const text = (key, placeholder) => h('input', {
+        className: 'zr-input zr-cfg-input',
+        value: draft[key] ?? '',
+        placeholder,
+        onChange: (e) => set(key, e.target.value),
+      })
+
+      const field = (label, control, hint) => h('label', { className: 'zr-cfg-field' },
+        h('span', { className: 'zr-cfg-label' }, label),
+        control,
+        hint ? h('span', { className: 'zr-cfg-hint' }, hint) : null,
+      )
+
+      const secret = (key, label, placeholder, hint) => h('div', { className: 'zr-cfg-field' },
+        h('span', { className: 'zr-cfg-label' }, label),
+        h('div', { className: 'zr-cfg-secret' },
+          h('input', {
+            className: 'zr-input zr-cfg-input',
+            type: 'password',
+            autoComplete: 'new-password',
+            value: secrets[key],
+            placeholder: draft[`${key}Set`] ? t('secretSetPlaceholder') : placeholder,
+            onChange: (e) => setSecrets((prev) => ({ ...prev, [key]: e.target.value })),
+          }),
+          h('button', {
+            className: 'zr-btn',
+            type: 'button',
+            onClick: () => {
+              setSecrets((prev) => ({ ...prev, [key]: '' }))
+              setCleared((prev) => ({ ...prev, [key]: true }))
+            },
+          }, cleared[key] ? t('undoClear') : t('clearSecret')),
+        ),
+        h('span', { className: 'zr-cfg-hint' },
+          cleared[key] ? t('secretWillClear') : (draft[`${key}Set`] ? t('secretSetHint') : hint)),
+      )
+
+      const save = async () => {
+        setSaving(true)
+        setError(null)
+        setNotice(null)
+        try {
+          const payload = {
+            zoteroDataDir: String(draft.zoteroDataDir ?? '').trim(),
+            dataDir: String(draft.dataDir ?? '').trim(),
+            translateConcurrency: Number(draft.translateConcurrency),
+            translateChunkChars: Number(draft.translateChunkChars),
+            selectionProvider: String(draft.selectionProvider ?? '').trim(),
+            selectionModel: String(draft.selectionModel ?? '').trim(),
+            mineruMode: draft.mineruMode,
+            mineruLocalUrl: String(draft.mineruLocalUrl ?? '').trim(),
+            mineruAutoOnScanned: Boolean(draft.mineruAutoOnScanned),
+            cloudUserID: String(draft.cloudUserID ?? '').trim(),
+            features: draft.features,
+            translateEfforts: textToEfforts(effortsText, t('effortDefaultToken')),
+          }
+          for (const key of ['mineruCloudToken', 'cloudApiKey']) {
+            if (secrets[key].trim()) payload[key] = secrets[key].trim()
+            else if (cleared[key]) payload[key] = ''
+          }
+          const data = await fetchJson(`${API}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          })
+          setDraft(data.config)
+          setState((prev) => ({ ...prev, config: data.config }))
+          setEffortsText(effortsToText(data.config.translateEfforts, t('effortDefaultToken')))
+          setSecrets({ mineruCloudToken: '', cloudApiKey: '' })
+          setCleared({ mineruCloudToken: false, cloudApiKey: false })
+          setNotice(t('configSaved'))
+        } catch (e) {
+          setError(e.message)
+        } finally {
+          setSaving(false)
+        }
       }
 
       const modes = [
@@ -2655,91 +2900,134 @@ window.__ModuleLoader__.load({
         ['local', t('mineruLocal'), t('mineruLocalDesc')],
         ['cloud', t('mineruCloud'), t('mineruCloudDesc')],
       ]
+      const featureLabels = {
+        translate: t('featureTranslate'),
+        explain: t('featureExplain'),
+        ask: t('featureAsk'),
+        docTranslate: t('featureDocTranslate'),
+      }
 
-      return h('div', { className: 'zr-settings' },
-        h('div', { className: 'zr-settings-head' },
-          h('span', null, t('settings')),
-          h('button', { className: 'zr-btn', onClick: onClose }, '×'),
+      return h('div', { className: 'zr-cfg' },
+        h('div', { className: 'zr-cfg-intro' }, t('configIntro')),
+
+        h('section', { className: 'zr-cfg-section' },
+          h('div', { className: 'zr-cfg-title' }, t('cfgZotero')),
+          field(t('cfgZoteroDataDir'), text('zoteroDataDir', t('cfgZoteroDataDirPlaceholder')), t('cfgZoteroDataDirHint')),
+          field(t('cfgDataDir'), text('dataDir'),
+            `${t('cfgDataDirHint')}${state?.config?.resolvedDataDir ? ` · ${t('cfgResolvedDataDir')}：${state.config.resolvedDataDir}` : ''}`),
+          h('div', { className: `zr-cfg-status${state?.localKey?.authorized ? ' zr-cfg-ok' : ''}` },
+            `${t('cfgLocalKey')}：${localKeyLine(t, state?.localKey)}`),
         ),
-        h('div', { className: 'zr-settings-body' },
-          h('div', { className: 'zr-field-label' }, t('mineruTitle')),
-          h('div', { className: 'zr-field-hint' }, t('mineruHint')),
 
+        h('section', { className: 'zr-cfg-section' },
+          h('div', { className: 'zr-cfg-title' }, t('mineruTitle')),
+          h('div', { className: 'zr-cfg-hint' }, t('mineruHint')),
           ...modes.map(([value, label, desc]) => h('label', {
             key: value,
             className: 'zr-radio',
-            'data-on': form.mineruMode === value ? '1' : '0',
+            'data-on': draft.mineruMode === value ? '1' : '0',
           },
           h('input', {
             type: 'radio',
             name: 'mineruMode',
-            checked: form.mineruMode === value,
-            onChange: () => save({ mineruMode: value }),
+            checked: draft.mineruMode === value,
+            onChange: () => set('mineruMode', value),
           }),
           h('span', { className: 'zr-radio-t' }, label),
           h('span', { className: 'zr-radio-d' }, desc),
           )),
-
-          form.mineruMode === 'local'
-            ? h('div', { className: 'zr-field' },
-              h('div', { className: 'zr-field-label' }, t('mineruLocalUrl')),
-              h('input', {
-                className: 'zr-input',
-                defaultValue: form.mineruLocalUrl,
-                onBlur: (e) => {
-                  const v = e.target.value.trim()
-                  if (v && v !== form.mineruLocalUrl) save({ mineruLocalUrl: v })
-                },
-              }),
-            )
-            : null,
-
-          form.mineruMode === 'cloud'
-            ? h('div', { className: 'zr-field' },
-              h('div', { className: 'zr-field-label' }, t('mineruToken')),
-              h('input', {
-                className: 'zr-input',
-                type: 'password',
-                placeholder: form.mineruCloudTokenSet ? t('mineruTokenSet') : t('mineruTokenPlaceholder'),
-                value: tokenDraft,
-                onChange: (e) => setTokenDraft(e.target.value),
-                onBlur: () => {
-                  if (tokenDraft.trim()) { save({ mineruCloudToken: tokenDraft.trim() }); setTokenDraft('') }
-                },
-              }),
-              h('div', { className: 'zr-field-hint' }, t('mineruTokenHint')),
-            )
-            : null,
-
-          form.mineruMode !== 'none'
-            ? h('div', { className: 'zr-settings-row' },
-              h('button', { className: 'zr-btn', disabled: testing, onClick: test },
-                testing ? t('testing') : t('testConnection')),
-            )
-            : null,
-
+          field(t('mineruLocalUrl'), text('mineruLocalUrl', 'http://127.0.0.1:8000')),
+          secret('mineruCloudToken', t('mineruToken'), t('mineruTokenPlaceholder'), t('mineruTokenHint')),
+          h('label', { className: 'zr-check' },
+            h('input', {
+              type: 'checkbox',
+              checked: Boolean(draft.mineruAutoOnScanned),
+              onChange: (e) => set('mineruAutoOnScanned', e.target.checked),
+            }),
+            h('span', null, t('mineruAuto')),
+          ),
+          h('div', { className: 'zr-settings-row' },
+            h('button', { className: 'zr-btn', type: 'button', disabled: testing, onClick: testMineru },
+              testing ? t('testing') : t('testConnection')),
+          ),
           testResult
             ? h('div', { className: testResult.ok ? 'zr-note' : 'zr-err' },
               testResult.ok
                 ? `${t('testOk')}${testResult.target ? ` · ${testResult.target}` : ''}${testResult.note ? ` · ${testResult.note}` : ''}`
                 : `${t('testFail')}${testResult.error ? `：${testResult.error}` : ''}`)
             : null,
-
-          h('label', { className: 'zr-check' },
-            h('input', {
-              type: 'checkbox',
-              checked: Boolean(form.mineruAutoOnScanned),
-              onChange: (e) => save({ mineruAutoOnScanned: e.target.checked }),
-            }),
-            h('span', null, t('mineruAuto')),
-          ),
-
-          h('div', { className: 'zr-field-hint' },
-            `${t('dataDirLabel')}：${form.resolvedDataDir ?? '—'}`),
-
-          error ? h('div', { className: 'zr-err' }, error) : null,
-          saving ? h('div', { className: 'zr-note' }, t('saving')) : null,
         ),
+
+        h('section', { className: 'zr-cfg-section' },
+          h('div', { className: 'zr-cfg-title' }, t('cfgCloud')),
+          h('div', { className: 'zr-cfg-hint' }, t('cfgCloudHint')),
+          secret('cloudApiKey', t('cfgCloudKey'), t('cfgCloudKeyPlaceholder'), t('cfgCloudKeyHint')),
+          field(t('cfgCloudUserID'), text('cloudUserID', t('cfgCloudUserIDPlaceholder')), t('cfgCloudUserIDHint')),
+        ),
+
+        h('section', { className: 'zr-cfg-section' },
+          h('div', { className: 'zr-cfg-title' }, t('cfgModels')),
+          h('div', { className: 'zr-cfg-hint' }, t('cfgModelsHint')),
+          ...Object.keys(featureLabels).map((name) => h('div', { className: 'zr-cfg-feature', key: name },
+            h('div', { className: 'zr-cfg-feature-name' }, featureLabels[name]),
+            h('div', { className: 'zr-cfg-grid3' },
+              h('input', {
+                className: 'zr-input zr-cfg-input',
+                placeholder: t('cfgProviderPlaceholder'),
+                value: draft.features?.[name]?.provider ?? '',
+                onChange: (e) => setFeature(name, 'provider', e.target.value),
+              }),
+              h('input', {
+                className: 'zr-input zr-cfg-input',
+                placeholder: t('cfgModelPlaceholder'),
+                value: draft.features?.[name]?.model ?? '',
+                onChange: (e) => setFeature(name, 'model', e.target.value),
+              }),
+              h('input', {
+                className: 'zr-input zr-cfg-input',
+                placeholder: t('cfgEffortPlaceholder'),
+                value: draft.features?.[name]?.reasoningEffort ?? '',
+                onChange: (e) => setFeature(name, 'reasoningEffort', e.target.value),
+              }),
+            ),
+          )),
+          field(t('cfgSelectionProvider'), text('selectionProvider', t('cfgProviderPlaceholder'))),
+          field(t('cfgSelectionModel'), text('selectionModel', t('cfgModelPlaceholder')), t('cfgSelectionHint')),
+        ),
+
+        h('section', { className: 'zr-cfg-section' },
+          h('div', { className: 'zr-cfg-title' }, t('cfgTranslate')),
+          field(t('cfgConcurrency'), h('input', {
+            className: 'zr-input zr-cfg-input',
+            type: 'number',
+            min: 1,
+            max: 16,
+            value: draft.translateConcurrency,
+            onChange: (e) => set('translateConcurrency', e.target.value),
+          }), t('cfgConcurrencyHint')),
+          field(t('cfgChunkChars'), h('input', {
+            className: 'zr-input zr-cfg-input',
+            type: 'number',
+            min: 500,
+            max: 8000,
+            value: draft.translateChunkChars,
+            onChange: (e) => set('translateChunkChars', e.target.value),
+          }), t('cfgChunkCharsHint')),
+          field(t('cfgEfforts'), h('input', {
+            className: 'zr-input zr-cfg-input',
+            value: effortsText,
+            placeholder: `off, low, ${t('effortDefaultToken')}`,
+            onChange: (e) => setEffortsText(e.target.value),
+          }), t('cfgEffortsHint').replace('{{default}}', t('effortDefaultToken'))),
+        ),
+
+        h('div', { className: 'zr-cfg-actions' },
+          h('button', { className: 'zr-btn zr-cfg-primary', type: 'button', disabled: saving, onClick: save },
+            saving ? t('saving') : t('saveConfig')),
+          h('button', { className: 'zr-btn', type: 'button', disabled: saving, onClick: load }, t('discardChanges')),
+          notice ? h('span', { className: 'zr-note' }, notice) : null,
+        ),
+        error ? h('div', { className: 'zr-err' }, error) : null,
       )
     }
 
@@ -2790,7 +3078,6 @@ window.__ModuleLoader__.load({
        * 否则压栈之后 React 不重渲染，按钮会一直是灰的。
        */
       const [hopDepth, setHopDepth] = useState(0)
-      const [settingsOpen, setSettingsOpen] = useState(false)
       const [highlight, setHighlight] = useState(null)  // { page, rects:[{x,y,w,h}] }
       /**
        * Zotero 里已有的批注。用 ref 而不是 state 参与渲染循环 ——
@@ -10522,13 +10809,7 @@ const placeBox = (el, l, t, wd, ht) => {
           info?.outline?.length
             ? h('button', { className: 'zr-btn', 'data-on': outlineOpen ? '1' : '0', onClick: () => setOutlineOpen((v) => !v), title: t('outline') }, '☰')
             : null,
-          // 设置：直接开面板里的设置，不指望宿主插件页（实测那边没有可点的入口）
-          h('button', {
-            className: 'zr-btn',
-            'data-on': settingsOpen ? '1' : '0',
-            title: t('settings'),
-            onClick: () => setSettingsOpen((v) => !v),
-          }, '⚙'),
+          // 设置入口已统一到 DSH 侧栏「插件」→ dsh-zotero-reader →「配置」，阅读器里不再放齿轮
           // 批注列表：显示这篇文献在 Zotero 里的所有高亮/备注
           h('button', {
             className: 'zr-btn',
@@ -10578,10 +10859,6 @@ const placeBox = (el, l, t, wd, ht) => {
                 style: o.depth ? { paddingLeft: 12 + Math.min(6, o.depth) * 10 } : undefined,
                 onClick: () => { gotoPage(o.page) },
               }, `${info.approxPages ? '≈' : ''}p${o.page}  ${o.title}`)))
-            : null,
-
-          settingsOpen
-            ? h(SettingsPanel, { t, onClose: () => setSettingsOpen(false) })
             : null,
 
           /**
@@ -11391,6 +11668,19 @@ const placeBox = (el, l, t, wd, ht) => {
             key: TAB_KEY,
             locale: NS,
           }, (props) => h(TabTitle, { ...props, bound }))))
+
+          /**
+           * 插件页配置页：侧栏「插件」→ dsh-zotero-reader →「配置」。
+           *
+           * 槽位由 ui-plugin-manager 声明；key 必须是 `<包名>#<行 id>`，
+           * 行 id 与 bundle 的 cordis.patch.yml 里那句 `id: zotero-reader` 一致。
+           * 值仍以 host 的 Config（config.js）为准，保存走 Host 的 configEditor。
+           */
+          ctx.effect(() => ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
+            name: 'plugins.row.config',
+            key: 'dsh-zotero-reader#zotero-reader',
+            locale: NS,
+          }, PluginConfigPage)), 'zotero-reader: plugin config page')
 
         })
 

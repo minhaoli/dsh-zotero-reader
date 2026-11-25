@@ -21,7 +21,10 @@ function check(label, ok) {
 }
 
 /** 取出页码 input 那一段（从 onChange 前 400 字到 style 结束），供逐条断言。 */
-const inputStart = src.indexOf("type: 'number'")
+// 不能直接 indexOf("type: 'number'")：插件页配置表单里也有数字输入框，且位置更靠前。
+// 先定位到 pageDraft 的声明，再从那里往后找第一个数字输入框 = 阅读器工具栏里的页码框。
+const draftAt = src.indexOf('const [pageDraft, setPageDraft] = useState(null)')
+const inputStart = draftAt > 0 ? src.indexOf("type: 'number'", draftAt) : -1
 check('找得到页码输入框', inputStart > 0)
 const inputBlock = inputStart > 0 ? src.slice(inputStart, inputStart + 1600) : ''
 /**
