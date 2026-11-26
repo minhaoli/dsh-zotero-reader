@@ -11,7 +11,7 @@
  * 还会得到一条内容错误的云端批注。判定见 localChannelAbsent()。
  */
 
-import { deriveSortIndex } from './annotations.js'
+import { deriveSortIndex, buildAnnotationPatch } from './annotations.js'
 import {
   ERROR_CODES,
   CloudApiError,
@@ -19,6 +19,9 @@ import {
   createCloudAnnotation,
   listCloudAnnotations,
   probeCloudKey,
+  getCloudItem,
+  updateCloudItem,
+  deleteCloudItem,
   toErrorPayload,
 } from './zotero-cloud.js'
 
@@ -226,6 +229,14 @@ export function cloudAnnotationType(kind) {
   return 'highlight'
 }
 
+/** 只读 key 的提示：新建 / 改 / 删三条写路径共用，保证文案一致。 */
+function readOnlyError(identity) {
+  return new CloudApiError(
+    ERROR_CODES.READ_ONLY,
+    `云端 key 只有读权限，写不了批注（账号 ${identity.username || identity.userID}）。去 zotero.org/settings/keys 编辑这个 key，勾上 Allow write access 后重启 DSH。`,
+  )
+}
+
 /**
  * 走云端写一条批注。成功回 `{ ok:true, key, version, parentItem, userID }`，
  * 失败**抛出** CloudApiError，由调用方用 cloudFailureResponse() 转成响应。
@@ -250,12 +261,7 @@ export async function writeAnnotationViaCloud(options = {}) {
   const io = ioOptions(options)
 
   const identity = await resolveCloudIdentity(settings, io)
-  if (identity.canWrite !== true) {
-    throw new CloudApiError(
-      ERROR_CODES.READ_ONLY,
-      `云端 key 只有读权限，写不了批注（账号 ${identity.username || identity.userID}）。去 zotero.org/settings/keys 编辑这个 key，勾上 Allow write access 后重启 DSH。`,
-    )
-  }
+  if (identity.canWrite !== true) throw readOnlyError(identity)
 
   const parentItem = String(attachmentKey ?? '').trim()
     || await findCloudPdfAttachment({ identity, itemKey, ...io })
@@ -375,7 +381,132 @@ function parsePosition(raw) {
   try { return JSON.parse(raw) } catch { return null }
 }
 
-/* ------------------------------------------------------------ 6) 失败分类 */
+/* ------------------------------------------------------ 6) 改 / 删（云端） */
+
+/**
+ * 取云端条目的当前 version，顺带确认它真的是批注。
+ *
+ * 云端 PATCH / DELETE 都要求 `If-Unmodified-Since-Version`，而本地 API 自己取版本 ——
+ * 所以云端改/删必须先读一次。少这一次读就只能盲写：要么被云端拒（412），
+ * 要么覆盖掉别人刚才的改动。
+ *
+ * 返回的是**写入前**的 version；412 就是它已经过期。
+ */
+async function readCloudAnnotation(identity, annotationKey, io) {
+  const key = String(annotationKey ?? '').trim()
+  if (!key) throw new CloudApiError(ERROR_CODES.BAD_REQUEST, '缺少批注 key')
+  const item = await getCloudItem({
+    apiKey: identity.apiKey,
+    userID: identity.userID,
+    itemKey: key,
+    ...io,
+  })
+  if (!item) {
+    throw new CloudApiError(ERROR_CODES.NOT_FOUND, `云端找不到批注 ${key}。它可能还没同步到云端，或已经被删掉了。`)
+  }
+  const version = Number(item.version)
+  if (!Number.isFinite(version) || version < 0) {
+    throw new CloudApiError(
+      ERROR_CODES.UNKNOWN,
+      `云端没有返回批注 ${key} 的 version，无法安全地改/删（缺 If-Unmodified-Since-Version 会被云端拒绝）。`,
+    )
+  }
+  const itemType = item?.data?.itemType
+  if (itemType !== 'annotation') {
+    throw new CloudApiError(
+      ERROR_CODES.NOT_FOUND,
+      `云端条目 ${key} 不是批注（itemType=${itemType ?? '未知'}），已停止，没有改动任何东西。`,
+    )
+  }
+  return { version, data: item.data ?? {} }
+}
+
+/**
+ * 412 单独翻译一次。
+ *
+ * 语义很具体：读到的 version 已经过期（这条批注刚在别处被改/删）。这里**不重试、不覆盖**，
+ * 只把「重新读一次再来」说清楚；code 仍是 version_conflict，前端可据此识别。
+ */
+function withVersionHint(error, verb) {
+  if (error instanceof CloudApiError && error.code === ERROR_CODES.VERSION_CONFLICT) {
+    return new CloudApiError(
+      ERROR_CODES.VERSION_CONFLICT,
+      `这条批注在你${verb}之前刚被改过（云端 412 版本冲突）。这次${verb}没有生效，也没有覆盖别人的改动：重新打开批注面板读到最新状态，再${verb}一次。`,
+    )
+  }
+  return error
+}
+
+/**
+ * 走云端改一条批注（颜色 / 评论 / 标签 / 类型）。
+ *
+ * 两次请求：GET 取 version（一次），PATCH 写入（一次，不重试）。
+ * 校验与字段映射复用 buildAnnotationPatch，与本地通道逐字一致。
+ */
+export async function updateAnnotationViaCloud(options = {}) {
+  const { settings = {}, annotationKey, patch = {} } = options
+  const io = ioOptions(options)
+
+  // 校验放在联网之前：颜色非法不该先探测一次 key 再报错
+  const built = buildAnnotationPatch(patch)
+  if (!built.ok) throw new CloudApiError(ERROR_CODES.BAD_REQUEST, built.reason)
+
+  const identity = await resolveCloudIdentity(settings, io)
+  if (identity.canWrite !== true) throw readOnlyError(identity)
+
+  const key = String(annotationKey ?? '').trim()
+  const { version, data } = await readCloudAnnotation(identity, key, io)
+  try {
+    await updateCloudItem({
+      apiKey: identity.apiKey,
+      userID: identity.userID,
+      itemKey: key,
+      version,
+      patch: built.body,
+      ...io,
+    })
+  } catch (error) {
+    throw withVersionHint(error, '改')
+  }
+  return {
+    ok: true,
+    patch: built.body,
+    version,
+    parentItem: data.parentItem ?? null,
+    userID: identity.userID,
+  }
+}
+
+/**
+ * 走云端删一条批注。
+ *
+ * 同样是 GET 取 version + DELETE 一次。提示要能分辨「已经没了」（404）
+ * 与「刚被改过」（412）——两种情况用户该做的事完全不同。
+ */
+export async function deleteAnnotationViaCloud(options = {}) {
+  const { settings = {}, annotationKey } = options
+  const io = ioOptions(options)
+
+  const identity = await resolveCloudIdentity(settings, io)
+  if (identity.canWrite !== true) throw readOnlyError(identity)
+
+  const key = String(annotationKey ?? '').trim()
+  const { version, data } = await readCloudAnnotation(identity, key, io)
+  try {
+    await deleteCloudItem({
+      apiKey: identity.apiKey,
+      userID: identity.userID,
+      itemKey: key,
+      version,
+      ...io,
+    })
+  } catch (error) {
+    throw withVersionHint(error, '删')
+  }
+  return { ok: true, key, version, parentItem: data.parentItem ?? null }
+}
+
+/* ------------------------------------------------------------ 7) 失败分类 */
 
 /**
  * 错误码 → HTTP 状态。

@@ -7,7 +7,7 @@
  * 运行：在插件目录里 `node test/check-cloud-fallback.mjs`
  */
 
-import { deriveSortIndex } from '../host/annotations.js'
+import { deriveSortIndex, buildAnnotationPatch } from '../host/annotations.js'
 import {
   ERROR_CODES,
   CloudApiError,
@@ -20,6 +20,8 @@ import {
   writeAnnotationViaCloud,
   readAnnotationsViaCloud,
   findCloudPdfAttachment,
+  updateAnnotationViaCloud,
+  deleteAnnotationViaCloud,
   cloudWriteCapability,
   cloudFailureResponse,
 } from '../host/annotations-fallback.js'
@@ -55,7 +57,14 @@ function makeCloud(routes = {}) {
   const fetchImpl = async (url, init = {}) => {
     const method = String(init.method || 'GET').toUpperCase()
     const pathname = new URL(String(url)).pathname
-    calls.push({ method, pathname, url: String(url), body: init.body ? JSON.parse(init.body) : null })
+    calls.push({
+      method,
+      pathname,
+      url: String(url),
+      body: init.body ? JSON.parse(init.body) : null,
+      // 改/删靠 If-Unmodified-Since-Version 防覆盖，测试必须能断言这个头
+      headers: { ...(init.headers ?? {}) },
+    })
     const route = routes[`${method} ${pathname}`]
     if (!route) return reply(404, { error: `未模拟的路由：${method} ${pathname}` })
     return typeof route === 'function' ? route(init) : route
@@ -432,6 +441,225 @@ for (const [code, status] of expectedStatus) {
 check('非 CloudApiError 归到 unknown', cloudFailureResponse(new Error('boom')).code === undefined
   ? cloudFailureResponse(new Error('boom')).body.code === ERROR_CODES.UNKNOWN
   : cloudFailureResponse(new Error('boom')).body.code === ERROR_CODES.UNKNOWN)
+
+/* ------------------------------------ 10) 云端改 / 删（必须先取 version） */
+
+/** GET /items/<key> 的响应：一条批注条目。 */
+function annotationItem(version = 5, extra = {}) {
+  return reply(200, {
+    key: 'ANN00001',
+    version,
+    data: { itemType: 'annotation', parentItem: 'ATTACH01', ...extra },
+  })
+}
+
+/* --- 改颜色：GET 取 version → PATCH 带 If-Unmodified-Since-Version --- */
+resetCloudIdentityCache()
+const u1 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': annotationItem(5),
+  'PATCH /users/123456/items/ANN00001': reply(204, ''),
+})
+const updated = await updateAnnotationViaCloud({
+  settings: { cloudApiKey: KEY },
+  annotationKey: 'ANN00001',
+  patch: { color: '#FF6666' },
+  fetchImpl: u1.fetchImpl,
+})
+const u1Patch = u1.calls.find((c) => c.method === 'PATCH')
+check('云端改色成功', updated.ok === true && updated.patch.annotationColor === '#ff6666')
+check('改色回写入前的 version', updated.version === 5)
+check('改色带 If-Unmodified-Since-Version',
+  u1Patch?.headers?.['If-Unmodified-Since-Version'] === '5',
+  String(u1Patch?.headers?.['If-Unmodified-Since-Version']))
+check('改色只发一次 PATCH（不重试）', u1.calls.filter((c) => c.method === 'PATCH').length === 1)
+check('改色 body 只带颜色字段',
+  JSON.stringify(u1Patch?.body) === JSON.stringify({ annotationColor: '#ff6666' }),
+  JSON.stringify(u1Patch?.body))
+check('改色先 GET 再 PATCH',
+  u1.calls.findIndex((c) => c.method === 'GET' && c.pathname.endsWith('/ANN00001'))
+    < u1.calls.findIndex((c) => c.method === 'PATCH'))
+
+/* --- 只改评论：不能把颜色/坐标一起发回去（局部更新） --- */
+resetCloudIdentityCache()
+const u2 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': annotationItem(5),
+  'PATCH /users/123456/items/ANN00001': reply(204, ''),
+})
+await updateAnnotationViaCloud({
+  settings: { cloudApiKey: KEY },
+  annotationKey: 'ANN00001',
+  patch: { comment: '新评论' },
+  fetchImpl: u2.fetchImpl,
+})
+check('只改评论时 body 只有 annotationComment',
+  JSON.stringify(u2.calls.find((c) => c.method === 'PATCH')?.body) === JSON.stringify({ annotationComment: '新评论' }))
+
+/* --- 标签：归一 + 去重，与本地同一套规则 --- */
+resetCloudIdentityCache()
+const u3 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': annotationItem(5),
+  'PATCH /users/123456/items/ANN00001': reply(204, ''),
+})
+await updateAnnotationViaCloud({
+  settings: { cloudApiKey: KEY },
+  annotationKey: 'ANN00001',
+  patch: { tags: ['重点', '重点', ' 方法 '] },
+  fetchImpl: u3.fetchImpl,
+})
+check('标签归一为 [{tag}] 并去重',
+  JSON.stringify(u3.calls.find((c) => c.method === 'PATCH')?.body)
+    === JSON.stringify({ tags: [{ tag: '重点' }, { tag: '方法' }] }))
+
+/* --- 412：不覆盖、不重试，提示重开面板 --- */
+resetCloudIdentityCache()
+const u4 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': annotationItem(9),
+  'PATCH /users/123456/items/ANN00001': reply(412, 'Precondition Failed'),
+})
+let conflictErr = null
+try {
+  await updateAnnotationViaCloud({
+    settings: { cloudApiKey: KEY },
+    annotationKey: 'ANN00001',
+    patch: { color: '#00ff00' },
+    fetchImpl: u4.fetchImpl,
+  })
+} catch (error) { conflictErr = error }
+check('改色 412 → version_conflict', conflictErr?.code === ERROR_CODES.VERSION_CONFLICT, String(conflictErr?.code))
+check('412 提示重新读取后再改', /重新打开批注面板|最新状态/.test(conflictErr?.message ?? ''), conflictErr?.message)
+check('412 只发一次 PATCH（没有静默重试）', u4.calls.filter((c) => c.method === 'PATCH').length === 1)
+
+/* --- 只读 key：连条目都不去读，更不许发写请求 --- */
+resetCloudIdentityCache()
+const u5 = makeCloud({ 'GET /keys/current': probeReadOnly })
+let roPatchErr = null
+try {
+  await updateAnnotationViaCloud({
+    settings: { cloudApiKey: KEY },
+    annotationKey: 'ANN00001',
+    patch: { color: '#ff6666' },
+    fetchImpl: u5.fetchImpl,
+  })
+} catch (error) { roPatchErr = error }
+check('改色 只读 key → read_only', roPatchErr?.code === ERROR_CODES.READ_ONLY, String(roPatchErr?.code))
+check('只读 key 改色不发写请求', u5.calls.filter((c) => c.method === 'PATCH' || c.method === 'DELETE').length === 0)
+check('只读 key 改色不去读条目', u5.calls.filter((c) => c.pathname.includes('/items/')).length === 0)
+
+/* --- 非法颜色：联网之前就拒 --- */
+resetCloudIdentityCache()
+const u6 = makeCloud({ 'GET /keys/current': probeWrite })
+let badPatchErr = null
+try {
+  await updateAnnotationViaCloud({
+    settings: { cloudApiKey: KEY },
+    annotationKey: 'ANN00001',
+    patch: { color: '#xyz' },
+    fetchImpl: u6.fetchImpl,
+  })
+} catch (error) { badPatchErr = error }
+check('非法颜色 → bad_request', badPatchErr?.code === ERROR_CODES.BAD_REQUEST, String(badPatchErr?.code))
+check('非法颜色不发任何请求', u6.calls.length === 0, `calls=${u6.calls.length}`)
+
+/* --- 目标不是批注：拒绝改，且不发写请求 --- */
+resetCloudIdentityCache()
+const u7 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': reply(200, { key: 'ANN00001', version: 9, data: { itemType: 'journalArticle' } }),
+})
+let notAnnErr = null
+try {
+  await updateAnnotationViaCloud({
+    settings: { cloudApiKey: KEY },
+    annotationKey: 'ANN00001',
+    patch: { color: '#ff6666' },
+    fetchImpl: u7.fetchImpl,
+  })
+} catch (error) { notAnnErr = error }
+check('非批注条目 → not_found', notAnnErr?.code === ERROR_CODES.NOT_FOUND, String(notAnnErr?.code))
+check('非批注条目不写', u7.calls.filter((c) => c.method === 'PATCH').length === 0)
+
+/* --- 删除：GET 取 version → DELETE 带头 --- */
+resetCloudIdentityCache()
+const d1 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': annotationItem(7),
+  'DELETE /users/123456/items/ANN00001': reply(204, ''),
+})
+const deleted = await deleteAnnotationViaCloud({
+  settings: { cloudApiKey: KEY },
+  annotationKey: 'ANN00001',
+  fetchImpl: d1.fetchImpl,
+})
+const d1Delete = d1.calls.find((c) => c.method === 'DELETE')
+check('云端删除成功', deleted.ok === true && deleted.key === 'ANN00001')
+check('删除回写入前的 version', deleted.version === 7)
+check('删除带 If-Unmodified-Since-Version',
+  d1Delete?.headers?.['If-Unmodified-Since-Version'] === '7',
+  String(d1Delete?.headers?.['If-Unmodified-Since-Version']))
+check('删除只发一次 DELETE', d1.calls.filter((c) => c.method === 'DELETE').length === 1)
+check('删除没有 body', d1Delete?.body === null)
+
+/* --- 删除 404：已经没了，要说清楚 --- */
+resetCloudIdentityCache()
+const d2 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': reply(404, { error: 'Not found' }),
+})
+let goneErr = null
+try {
+  await deleteAnnotationViaCloud({
+    settings: { cloudApiKey: KEY },
+    annotationKey: 'ANN00001',
+    fetchImpl: d2.fetchImpl,
+  })
+} catch (error) { goneErr = error }
+check('删除时条目不存在 → not_found', goneErr?.code === ERROR_CODES.NOT_FOUND, String(goneErr?.code))
+check('删除 404 不发 DELETE', d2.calls.filter((c) => c.method === 'DELETE').length === 0)
+
+/* --- 删除 412：提示里要出现「删」，别复用「改」的文案 --- */
+resetCloudIdentityCache()
+const d3 = makeCloud({
+  'GET /keys/current': probeWrite,
+  'GET /users/123456/items/ANN00001': annotationItem(3),
+  'DELETE /users/123456/items/ANN00001': reply(412, 'Precondition Failed'),
+})
+let delConflict = null
+try {
+  await deleteAnnotationViaCloud({
+    settings: { cloudApiKey: KEY },
+    annotationKey: 'ANN00001',
+    fetchImpl: d3.fetchImpl,
+  })
+} catch (error) { delConflict = error }
+check('删除 412 → version_conflict', delConflict?.code === ERROR_CODES.VERSION_CONFLICT, String(delConflict?.code))
+check('删除 412 提示说的是「删」', /删/.test(delConflict?.message ?? ''), delConflict?.message)
+check('删除 412 只发一次 DELETE', d3.calls.filter((c) => c.method === 'DELETE').length === 1)
+
+/* --------------------------- 11) patch 归一（本地与云端共用的那份校验） */
+
+const patchColor = buildAnnotationPatch({ color: '#FF6666' })
+check('颜色归一为小写', patchColor.ok && patchColor.body.annotationColor === '#ff6666')
+check('颜色非法被拒', !buildAnnotationPatch({ color: '#xyz' }).ok)
+check('非法颜色的提示', /颜色格式不对/.test(buildAnnotationPatch({ color: '#xyz' }).reason ?? ''))
+
+const patchComment = buildAnnotationPatch({ comment: '' })
+check('空评论是合法的「清空」操作', patchComment.ok && patchComment.body.annotationComment === '')
+check('只改颜色时 body 不带评论', !('annotationComment' in buildAnnotationPatch({ color: '#ffd400' }).body))
+
+check('类型只能在 highlight/underline 之间转',
+  !buildAnnotationPatch({ type: 'note' }).ok && buildAnnotationPatch({ type: 'underline' }).body.annotationType === 'underline')
+
+const patchTags = buildAnnotationPatch({ tags: ['重点', '重点', ' 方法 '] })
+check('标签去重并去空白',
+  JSON.stringify(patchTags.body.tags) === JSON.stringify([{ tag: '重点' }, { tag: '方法' }]))
+check('空标签数组是合法的「清空标签」操作',
+  JSON.stringify(buildAnnotationPatch({ tags: [] }).body.tags) === '[]')
+check('一个字段都没有 → 拒绝', !buildAnnotationPatch({}).ok)
+check('无字段的提示列全四个字段', /color.*comment.*tags.*type/.test(buildAnnotationPatch({}).reason ?? ''))
 
 /* ------------------------------------------------------------ 汇总 */
 

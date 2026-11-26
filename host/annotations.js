@@ -522,9 +522,22 @@ export async function createAnnotation(options) {
 /** 删除一条批注（按 key）。 */
 export async function deleteAnnotation(annotationKey) {
   const probe = await probeLocalApi()
-  if (!probe.available) return { ok: false, reason: probe.reason }
+  /**
+   * 和创建同一条规矩：探测失败要留**机器可读**标记。
+   * 云端回退只认这两个标记决定要不要换通道（见 localChannelAbsent），不猜文案。
+   */
+  if (!probe.available) {
+    return { ok: false, unavailable: true, probeCode: probe.code ?? '', reason: probe.reason }
+  }
   const serverId = probe.serverId
-  if (!serverId) return { ok: false, needAuth: true, reason: '当前 Zotero 不支持本地写入（需要 Zotero 10+）。' }
+  if (!serverId) {
+    return {
+      ok: false,
+      needAuth: true,
+      unsupported: true,
+      reason: '当前 Zotero 不支持本地写入（需要 Zotero 10+）。',
+    }
+  }
 
   try {
     // 复用缓存的 key（与创建共用），避免删除时又弹一次授权框
@@ -575,25 +588,22 @@ export async function updateAnnotationColor(annotationKey, color) {
 }
 
 /**
- * 改一条已有批注的若干字段（颜色 / 评论 / 标签，可同时传）。
+ * 把前端的 patch 归一成 Zotero 条目的 JSON 字段。**不发请求**。
  *
- * 和 updateAnnotationColor 走同一条 PATCH，只是 body 不止一个字段。
- * Zotero 的 PATCH 是**局部更新**：没提到的字段保持原样，
- * 所以只改评论时不必回传颜色和坐标。
+ * 抽成纯函数是因为它现在有两条通道：本地 PATCH 与云端 PATCH。校验规则、错误
+ * 文案、字段名必须逐字一致 —— 各写一份的话，迟早出现「本地拒了非法颜色、
+ * 云端却写进去」这种只有用户能发现的偏差。
  *
  * 字段映射（Zotero item 的 JSON 字段名）：
  *   color   → annotationColor
  *   comment → annotationComment
  *   tags    → tags: [{tag}, ...]
+ *   type    → annotationType（只允许 highlight / underline 互转）
  *
- * @param {string} annotationKey
  * @param {{color?:string, comment?:string, tags?:string[]|{tag:string}[], type?:'highlight'|'underline'}} patch
- * @returns {{ok:true, patch:object}|{ok:false, reason:string, needAuth?:boolean}}
+ * @returns {{ok:true, body:object}|{ok:false, reason:string}}
  */
-export async function updateAnnotation(annotationKey, patch = {}) {
-  const key = String(annotationKey ?? '').trim()
-  if (!key) return { ok: false, reason: '缺少批注 key' }
-
+export function buildAnnotationPatch(patch = {}) {
   const body = {}
 
   if (patch.color !== undefined && patch.color !== null && patch.color !== '') {
@@ -661,10 +671,44 @@ export async function updateAnnotation(annotationKey, patch = {}) {
     return { ok: false, reason: '没有要修改的字段（color / comment / tags / type 至少给一个）' }
   }
 
+  return { ok: true, body }
+}
+
+/**
+ * 改一条已有批注的若干字段（颜色 / 评论 / 标签 / 类型，可同时传）。
+ *
+ * 走 PATCH `/api/users/0/items/<annotationKey>`，body 由 buildAnnotationPatch 归一。
+ * Zotero 的 PATCH 是**局部更新**：没提到的字段保持原样，所以只改评论时不必回传颜色和坐标。
+ *
+ * @param {string} annotationKey
+ * @param {{color?:string, comment?:string, tags?:string[]|{tag:string}[], type?:'highlight'|'underline'}} patch
+ * @returns {{ok:true, patch:object}|{ok:false, reason:string, needAuth?:boolean}}
+ */
+export async function updateAnnotation(annotationKey, patch = {}) {
+  const key = String(annotationKey ?? '').trim()
+  if (!key) return { ok: false, reason: '缺少批注 key' }
+
+  const built = buildAnnotationPatch(patch)
+  if (!built.ok) return built
+  const body = built.body
+
   const probe = await probeLocalApi()
-  if (!probe.available) return { ok: false, reason: probe.reason }
+  /**
+   * 和创建同一条规矩：探测失败要留**机器可读**标记。
+   * 云端回退只认这两个标记决定要不要换通道（见 localChannelAbsent），不猜文案。
+   */
+  if (!probe.available) {
+    return { ok: false, unavailable: true, probeCode: probe.code ?? '', reason: probe.reason }
+  }
   const serverId = probe.serverId
-  if (!serverId) return { ok: false, needAuth: true, reason: '当前 Zotero 不支持本地写入（需要 Zotero 10+）。' }
+  if (!serverId) {
+    return {
+      ok: false,
+      needAuth: true,
+      unsupported: true,
+      reason: '当前 Zotero 不支持本地写入（需要 Zotero 10+）。',
+    }
+  }
 
   try {
     // 复用缓存的 key（与创建/删除共用），改批注不该再弹一次授权框

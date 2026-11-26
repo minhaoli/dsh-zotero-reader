@@ -37,6 +37,7 @@ import {
  */
 import {
   localChannelAbsent, writeAnnotationViaCloud, readAnnotationsViaCloud,
+  updateAnnotationViaCloud, deleteAnnotationViaCloud,
   cloudWriteCapability, cloudFailureResponse, errorText,
 } from './host/annotations-fallback.js'
 import {
@@ -1686,13 +1687,37 @@ async function handleRequest(rctx, req, res, deps) {
       }
     }
 
-    /** 批注：删除。 */
+    /** 批注：删除。本地通道不在时改走云端（同样要 version）。 */
     if (sub === '/annotations' && method === 'DELETE') {
       const key = url.searchParams.get('annotKey') ?? ''
       if (!key) return sendJson(res, 400, { error: '缺少 annotKey' })
+      const cloudIo = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}
       const result = await deleteAnnotation(key)
-      if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
-      return sendJson(res, 200, { ok: true })
+      if (result.ok) return sendJson(res, 200, { ok: true, via: 'local' })
+      /**
+       * 同新建：key 不存在、服务端拒绝删除、授权被拒都是业务错误，原样回；
+       * 只有「本地通道不在」才换云端。
+       */
+      if (!localChannelAbsent(result)) {
+        return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason, via: 'local' })
+      }
+      try {
+        const cloud = await deleteAnnotationViaCloud({
+          settings: deps.settings,
+          annotationKey: key,
+          ...cloudIo,
+        })
+        return sendJson(res, 200, {
+          ok: true,
+          via: 'cloud',
+          // 让前端能说明「这条是在云端删的」，而不是静默换通道
+          localError: result.reason,
+          parentItem: cloud.parentItem,
+        })
+      } catch (error) {
+        const failure = cloudFailureResponse(error)
+        return sendJson(res, failure.status, { ...failure.body, via: null, localError: result.reason })
+      }
     }
 
     /**
@@ -1705,14 +1730,42 @@ async function handleRequest(rctx, req, res, deps) {
       const body = await readJsonBody(req)
       const key = String(body.annotKey ?? url.searchParams.get('annotKey') ?? '')
       if (!key) return sendJson(res, 400, { error: '缺少 annotKey' })
-      const result = await updateAnnotation(key, {
+      const cloudIo = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}
+      /** 四个字段原样传给本地与云端两条通道，归一化只发生在 buildAnnotationPatch。 */
+      const patch = {
         color: body.color,
         comment: body.comment,
         tags: body.tags,
         type: body.type,
-      })
-      if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
-      return sendJson(res, 200, { ok: true, patch: result.patch })
+      }
+      const result = await updateAnnotation(key, patch)
+      if (result.ok) return sendJson(res, 200, { ok: true, patch: result.patch, via: 'local' })
+      /**
+       * 同新建：颜色非法、类型不支持、key 不存在、授权被拒都是业务错误，原样回；
+       * 只有「本地通道不在」才换云端。
+       */
+      if (!localChannelAbsent(result)) {
+        return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason, via: 'local' })
+      }
+      try {
+        const cloud = await updateAnnotationViaCloud({
+          settings: deps.settings,
+          annotationKey: key,
+          patch,
+          ...cloudIo,
+        })
+        return sendJson(res, 200, {
+          ok: true,
+          patch: cloud.patch,
+          via: 'cloud',
+          // 写入前读到的 version：412 就是它过期了，所以一并回给前端便于排查
+          version: cloud.version,
+          localError: result.reason,
+        })
+      } catch (error) {
+        const failure = cloudFailureResponse(error)
+        return sendJson(res, failure.status, { ...failure.body, via: null, localError: result.reason })
+      }
     }
 
     /** Zotero 本地 API 状态：设置面板里用它提示写入是否就绪。 */
