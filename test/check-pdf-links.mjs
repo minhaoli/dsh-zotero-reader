@@ -706,9 +706,35 @@ check('类型不合的目标不触发位图渲染（位图分支在其后）',
 check('浮窗位图区可滚动（需要有滑动功能）',
   /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow-y:auto/.test(src),
   '用户明确要求「需要有滑动悬浮窗页面的功能」')
-check('位图区只纵向滚动（横向溢出会多出一条滚动条）',
-  /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow-x:hidden/.test(src),
-  '纵横都 auto 时，纵向滚动条占掉的 5px 会让 630 宽的 canvas 溢出，多出横向条')
+/**
+ * 用户否掉了「位图按宽度等比缩放，横向滚动没有意义」这条旧结论：
+ * 「由于现在窗口限制无法呈现完整，所以需要在上下滑动的基础之上
+ *   增加左右滑动查看的功能」。
+ */
+check('位图区可横向滚动（窄侧栏里看完整页宽）',
+  /\.zr-link-tip \.zr-tip-shot\{[^}]*overflow-x:auto/.test(src),
+  '用户要求：在上下滑动的基础之上增加左右滑动查看')
+
+/**
+ * 用户报「悬浮窗会超出侧边栏的范围显示在最顶层」。
+ * 两条都要在：横向以侧栏矩形为界、层级降到插件自己的尺度内。
+ */
+check('位图浮窗横向以侧栏为边界（不是视口）',
+  /const tipBarRect = \(anchor\) =>/.test(src) &&
+    /anchor\?\.closest\?\.\('\.zr-root'\)\?\.getBoundingClientRect\?\./.test(src) &&
+    /left = clampBarLeft\(left, bar, barInset, targetW\)/.test(src),
+  '按视口夹紧时，0.9×页宽 比侧栏宽就会横着探到主界面上')
+
+check('z-index 只对位图降级（文字预览保持原样）',
+  /\.zr-link-tip\[data-bitmap="1"\]\{z-index:50\}/.test(src) &&
+    /tip\.setAttribute\('data-bitmap', opts\?\.bitmap \? '1' : '0'\)/.test(src) &&
+    /\.zr-link-tip\{position:fixed;z-index:2147483000;/.test(src),
+  '用户要求只修图片/公式/表格浮窗；文字预览的层级与样式不动')
+
+check('横向滚动落在位图容器上（canvas 不被等比压窄）',
+  /shot\.scrollLeft \+= wheelX/.test(src) &&
+    /deficit <= barW \+ 1/.test(src),
+  '窄侧栏时要能滚出整页宽度，而不是把 canvas 压小')
 
 check('浮窗接收鼠标事件（pointer-events:auto）',
   /\.zr-link-tip\{[^}]*pointer-events:auto/.test(src) &&
@@ -731,14 +757,21 @@ check('wheel 处理里有 stopPropagation 与 preventDefault',
   (() => {
     const at = src.indexOf('const onTipWheel = (event) =>')
     if (at < 0) return false
-    const body = src.slice(at, at + 1400)
+    /**
+     * 结束位置按**结构**取：onTipWheel 之后紧邻 ensureTip。
+     * 原来按字符数截 1400，加了横向滚轮的注释后尾部拦截逻辑
+     * 被挤出窗口，断言假失败 —— 结构边界不会随注释增长失效。
+     */
+    const end = src.indexOf('const ensureTip =', at)
+    const body = src.slice(at, end > at ? end : at + 4000)
     const sp = body.indexOf('event.stopPropagation()')
     const pd = body.indexOf('event.preventDefault()')
     return sp > 0 && pd > sp
   })(),
   '两层都要：挡住冒泡 + 断掉浏览器默认滚动链')
 check('滚轮只滚浮窗自己的 .zr-tip-shot',
-  /shot\.scrollTop \+= event\.deltaY/.test(src),
+  /const wheelY = shiftX \? 0 : event\.deltaY/.test(src) &&
+    /shot\.scrollTop \+= wheelY/.test(src),
   '把 deltaY 用在浮窗内容上，而不是让背后的 PDF 滚')
 check('清理时移除 wheel 监听',
   /removeEventListener\('wheel', onTipWheel/.test(src),
@@ -1070,7 +1103,9 @@ check('滚轮只在真能滚时才拦截（不误吞）',
   (() => {
     const at = src.indexOf('const onTipWheel = (event) =>')
     if (at < 0) return false
-    const seg = src.slice(at, at + 1400)
+    // 同上：按结构取函数尾（onTipWheel 之后紧邻 ensureTip）
+    const end = src.indexOf('const ensureTip =', at)
+    const seg = src.slice(at, end > at ? end : at + 4000)
     return /if \(scrolled\) \{/.test(seg) &&
       /event\.preventDefault\(\)/.test(seg) &&
       !/^\s*event\.preventDefault\(\)\s*$/m.test(seg.split('if (scrolled)')[0])

@@ -1564,6 +1564,15 @@ window.__ModuleLoader__.load({
        * fixed 相对视口，直接吃 getBoundingClientRect() 的值，不会被裁剪。
        * 代价是滚动时位置不会跟着动 —— 但鼠标移出链接就会隐藏，
        * 实际不会在滚动中停留。
+       *
+       * **但 fixed 也意味着能飞出侧栏。** 原先把横向按视口夹，窄侧栏里
+       * 浮窗会横着探到主界面上，看起来就是「超出侧栏、显示在最顶层」。
+       * 现在横向由 placeHorizontal 按 .zr-root 的矩形夹住（出不了侧栏），
+       * 位图的层级也单独收低（见紧跟其后的 data-bitmap 规则）。
+       *
+       * **这里保持 2147483000 不动。** 用户明确要求「只修复图片、公式、
+       * 表格之类的悬浮窗，超链接之类的不用管」；这条规则管的是文字预览
+       * （参考文献那类），按约束原样保留。
        */
       .zr-link-tip{position:fixed;z-index:2147483000;
         /*
@@ -1592,23 +1601,43 @@ window.__ModuleLoader__.load({
         opacity:0;visibility:hidden;transition:opacity .12s}
       .zr-link-tip[data-on="1"]{opacity:1;visibility:visible}
       /*
+       * **位图浮窗的层级：50。**
+       *
+       * 只作用在位图上（「data-bitmap」，由 showLinkTip 按 opts.bitmap 写），
+       * 文字预览沿用上一条规则的 2147483000 —— 用户要求只修图片/公式/
+       * 表格这一条路径，文字预览的样式（含层级）保持不变。
+       *
+       * 取值依据全在本插件自己的层级表里：
+       *   · PDF 内容层最高 22（.zr-settings / .zr-outline、.zr-annot-panel 21），
+       *     50 > 22 → 稳定浮在 PDF 之上；
+       *   · 插件自己的交互浮层是 60/61/62（选区条 / 批注卡 / 批注菜单），
+       *     50 < 60 → 用户正在点的弹层不会被预览卡盖住；
+       *   · 宿主全局 UI（对话框、命令面板等）在几百到上千量级，
+       *     50 远低于它们，不会再出现「预览卡盖住整个应用」。
+       */
+      .zr-link-tip[data-bitmap="1"]{z-index:50}
+      /*
        * 位图预览区：**一整页**，按浮窗宽度等比缩放。
        *
        * 高度由 JS 用行内值设成 popupH（0.3 × 页高，实测 297px），
        * 内容是一整页（同一页在 630px 宽下约 892px）→ 必然溢出，
        * 滚轮与滚动条才有可滚的余量（scrollHeight - clientHeight 大于 0）。
        *
-       * **只允许纵向滚动。** 纵向滚动条会占掉约 5px 内容宽，630 宽的 canvas
-       * 在 625 的内容框里就会横向溢出，浏览器再加一条横向滚动条 ——
-       * 用户以前吐槽的「两个进度条」正是这么来的（实测 shotClientH 比
-       * popupH 少 5px）。位图是按宽度等比缩放的，横向滚动没有意义，
-       * 直接 overflow-x:hidden 把那条线去掉；代价是页面右缘约 5px
-       * （通常是白边）被裁掉。
+       * **两个方向都要能滚。**
+       * 旧结论是「位图按宽度等比缩放，横向滚动没有意义」，所以
+       * overflow-x:hidden。用户否掉了它：浮窗宽度是 0.9 × 页面宽，
+       * 侧栏一窄这个宽度就大于可视宽度，右边那截永远看不到。
+       * 现在 canvas 仍按 popupW 渲染，**容器**允许横向滚，
+       * 用户能把整页从左到右看完。
+       *
+       * 横向滚动条只在真的装不下时出现：装得下时 putTipBitmap 会把
+       * canvas 吸收掉纵向滚动条占的那几像素（实测约 5px），所以不会
+       * 出现「明明放得下却多一条横向进度条」。
        *
        * 这里保留 max-height 只作骨架帧兜底：JS 还没写行内高度时，
        * 别让空槽塌成 0 高；一旦写入行内 height，它优先于这条规则。
        */
-      .zr-link-tip .zr-tip-shot{display:block;overflow-y:auto;overflow-x:hidden;
+      .zr-link-tip .zr-tip-shot{display:block;overflow-y:auto;overflow-x:auto;
         max-height:min(80vh,780px);background:#fff;border-radius:3px;
         overscroll-behavior:contain}
       /*
@@ -6639,11 +6668,34 @@ const placeBox = (el, l, t, wd, ht) => {
                 const shot = linkTip?.querySelector?.('.zr-tip-shot')
                 if (shot) {
                   const maxTop = shot.scrollHeight - shot.clientHeight
-                  if (maxTop > 0) {
+                  const maxLeft = shot.scrollWidth - shot.clientWidth
+                  /**
+                   * **横向滚的是同一个容器。**
+                   *
+                   * 窄侧栏里 canvas（popupW）比可视宽度宽，纵向滚的是
+                   * `.zr-tip-shot`，横向也必须滚它 —— canvas 是它的子节点，
+                   * 滚容器才等于滚内容。
+                   *
+                   * 触控板/横向滚轮直接给 deltaX；普通鼠标只有 deltaY，
+                   * 约定是按住 Shift 横向滚。滚轮已经被这里接管（会
+                   * preventDefault），所以这一步换算必须自己做，
+                   * 不能指望浏览器的默认行为。
+                   */
+                  const shiftX = maxLeft > 0 && event.shiftKey && !event.deltaX
+                  const wheelY = shiftX ? 0 : event.deltaY
+                  const wheelX = shiftX ? event.deltaY : event.deltaX
+                  if (maxTop > 0 && wheelY) {
                     scrolled = true
-                    shot.scrollTop += event.deltaY
+                    shot.scrollTop += wheelY
                     if (shot.scrollTop <= 0 || shot.scrollTop >= maxTop) {
                       shot.scrollTop = Math.max(0, Math.min(maxTop, shot.scrollTop))
+                    }
+                  }
+                  if (maxLeft > 0 && wheelX) {
+                    scrolled = true
+                    shot.scrollLeft += wheelX
+                    if (shot.scrollLeft <= 0 || shot.scrollLeft >= maxLeft) {
+                      shot.scrollLeft = Math.max(0, Math.min(maxLeft, shot.scrollLeft))
                     }
                   }
                 }
@@ -6792,6 +6844,60 @@ const placeBox = (el, l, t, wd, ht) => {
             }
 
             /**
+             * **位图浮窗的横向边界 = 右侧栏的可见区域。**
+             *
+             * 为什么不能只夹视口：浮窗是 `position:fixed`（宿主
+             * `.zr-pdfviewer-host` 是 overflow:hidden，absolute 定位的提示
+             * 贴边时会被裁掉），它相对视口定位，本来不知道侧栏在哪。
+             * 0.9×页面宽 一旦大于侧栏宽度，就会横着探到主界面上 ——
+             * 用户报的「悬浮窗会超出侧边栏的范围显示在最顶层」正是这个。
+             *
+             * 边界取 `.zr-root` 的矩形（height:100%，宽度跟着宿主侧栏走）。
+             * 侧栏被调宽、全屏打开时它的矩形会跟着变，所以不缓存，
+             * 每次摆放现量一次。
+             *
+             * **从锚点往上找，而不是闭包里的 `host`**：锚点就在当前
+             * 阅读器的页面里，closest 命中的一定是这一侧的根节点
+             * （多标签时不会挑到别的阅读器），也不依赖浮窗自己挂在
+             * body 上的位置。
+             *
+             * 取不到（阅读器没挂载 / 根节点不在 DOM 里）就退回视口 ——
+             * 相当于退回改之前的行为，不会因为量不到就不出浮窗。
+             *
+             * @param {HTMLElement|null} anchor 链接元素（位图路径必有）
+             * @returns {{left:number, right:number, width:number}}
+             */
+            const tipBarRect = (anchor) => {
+              const vw = Math.max(0, window.innerWidth)
+              let rect = null
+              try {
+                rect = anchor?.closest?.('.zr-root')?.getBoundingClientRect?.() ?? null
+              } catch { /* 量不到就退回视口 */ }
+              if (!rect || !(rect.width > 0)) return { left: 0, right: vw, width: vw }
+              /**
+               * 与视口求交：`.zr-root` 自己的矩形不反映祖先的裁剪，
+               * 所以只取「两层都在」的横向区间。
+               */
+              const left = Math.max(0, Math.min(rect.left, vw))
+              const right = Math.max(left, Math.min(rect.right, vw))
+              return { left, right, width: right - left }
+            }
+
+            /**
+             * 把 `left` 夹进侧栏左右边缘（各留 `inset`）。
+             *
+             * 宽度要参与计算：[left, left+width] 整段都得在边界内，
+             * 只夹左缘的话右缘照样会探出去。
+             */
+            const clampBarLeft = (left, bar, inset, width) => {
+              const minLeft = bar.left + inset
+              const maxLeft = bar.right - inset - width
+              // 宽度已经超过边界（上游按同一边界夹过宽度，正常不可达）：贴左上
+              if (maxLeft <= minLeft) return minLeft
+              return Math.max(minLeft, Math.min(left, maxLeft))
+            }
+
+            /**
              * **浮窗尺寸：唯一一处计算 popupW / popupH。**
              *
              * 用户要的尺寸是「页面 CSS 宽 × 0.9、页面 CSS 高 × 0.3」——
@@ -6885,16 +6991,18 @@ const placeBox = (el, l, t, wd, ht) => {
               if (shotH > 0) shot.style.height = `${shotH}px`
               if (canvas) shot.appendChild(canvas)
               /**
-               * **canvas 宽度扣掉纵向滚动条的占位。**
+               * **只吸收纵向滚动条自己吃掉的那几像素。**
                *
                * 实测 `shotClientW=706` 而 `shotScrollW=711`：槽高固定成
                * popupH 后内容必然纵向溢出，浏览器给槽加一条纵向滚动条，
                * 内容框因此比 `popupW` 窄 5px。canvas 仍按 popupW 排，
-               * 就在窄 5px 的框里横向溢出 —— 虽然 `overflow-x:hidden`
-               * 已经把横向滚动条去掉了，但页面右缘那 5px 会被裁掉。
+               * 就在窄 5px 的框里横向溢出 —— 这条 5px 的横向滚动条没有
+               * 任何信息量，用户以前吐槽的「两个进度条」正是这么来的。
                *
-               * 这里在**内容已入槽、滚动条已产生**之后量一次实际内容宽度，
-               * 按它重设 canvas 的显示宽度。高度同比缩放，保持页面比例。
+               * 但**侧栏比 popupW 窄是另一回事**：那是真的要看整页宽度，
+               * 只能靠横向滚动。把 canvas 压到可视宽度会等比缩小整页、
+               * 右侧内容照样要滚才能看全，还多丢细节 —— 所以判据是
+               * 「差值不超过滚动条自身的占位」才吸收，超过就保留原宽。
                *
                * 顺序很关键：必须 append 之后再量，否则滚动条还没出现，
                * `clientWidth` 还是满宽，量不到这 5px。
@@ -6903,7 +7011,13 @@ const placeBox = (el, l, t, wd, ht) => {
                 try {
                   const contentW = shot.clientWidth
                   const cssW = parseFloat(canvas.style.width) || 0
-                  if (contentW > 0 && cssW > 0 && Math.abs(contentW - cssW) > 0.5) {
+                  /**
+                   * 纵向滚动条的占位宽度：槽没有边框，offsetWidth 比
+                   * clientWidth 多出来的就是滚动条本身（实测 5px）。
+                   */
+                  const barW = Math.max(0, shot.offsetWidth - shot.clientWidth)
+                  const deficit = cssW - contentW
+                  if (contentW > 0 && cssW > 0 && deficit > 0 && deficit <= barW + 1) {
                     const ratio = contentW / cssW
                     const cssH = parseFloat(canvas.style.height) || 0
                     canvas.style.width = `${Math.round(contentW)}px`
@@ -7094,6 +7208,13 @@ const placeBox = (el, l, t, wd, ht) => {
               const isBitmap = Boolean(opts?.bitmap)
               let left
               let targetW
+              /**
+               * 位图路径的横向边界（侧栏可见区域）。下面夹一次、
+               * 写完 DOM 读到真实宽度后再夹一次，两处必须同源，
+               * 否则会出现「理论在界内、实际又探出去」。
+               */
+              let bar = null
+              let barInset = 0
               if (isBitmap) {
                 /**
                  * **位图宽度只能来自 `opts.popupW`（单一几何源）。**
@@ -7107,15 +7228,31 @@ const placeBox = (el, l, t, wd, ht) => {
                  */
                 const popupW = Number(opts?.popupW)
                 if (!(popupW > 0)) return null
-                targetW = Math.min(popupW, window.innerWidth - 16)
-                targetW = Math.max(160, targetW)
+                /**
+                 * **上界是侧栏，不是视口。**
+                 *
+                 * 用户报「浮窗会超出侧栏、显示在最顶层」：0.9×页宽 可能比
+                 * 侧栏还宽，按视口夹紧就会横着探到主界面上。这里改用
+                 * tipBarRect()（.zr-root 的矩形，宽度由宿主侧栏决定）作
+                 * 边界 —— 侧栏调宽或全屏时它会跟着变，浮窗永远出不去。
+                 *
+                 * 装不下时**不缩 canvas**：canvas 仍按 popupW 渲染，
+                 * 宽度差交给 .zr-tip-shot 的横向滚动（见 CSS 与
+                 * putTipBitmap），用户能左右看完整个宽度。
+                 */
+                bar = tipBarRect(anchor)
+                barInset = bar.width > 24 ? 8 : 0
+                const availW = Math.max(0, bar.width - barInset * 2)
+                targetW = Math.min(popupW, availW)
+                // 保底不窄到放不下一行字，但不能超过边界本身
+                targetW = Math.max(Math.min(160, availW), targetW)
                 /**
                  * 位置：居中于**页面**（figure 通常跨栏/居中），
                  * 而不是跟随链接 x。
                  */
                 const pageCenter = pageRect && pageRect.width > 0
                   ? (pageRect.left + pageRect.right) / 2
-                  : window.innerWidth / 2
+                  : bar.left + bar.width / 2
                 left = pageCenter - targetW / 2
               } else {
                 /**
@@ -7149,8 +7286,16 @@ const placeBox = (el, l, t, wd, ht) => {
                 } catch { /* 用视口中心 */ }
                 left = centerX - targetW / 2
               }
-              // 夹进视口（只是保底，正常情况下不会触发）
-              left = Math.max(8, Math.min(left, window.innerWidth - targetW - 8))
+              /**
+               * 夹边界：位图夹**侧栏**（用户要求「不得越出侧栏可见区域」），
+               * 文字仍夹视口 —— 文字预览的尺寸/定位保持不变。
+               * `bar` 只有位图路径会赋值。
+               */
+              if (bar) {
+                left = clampBarLeft(left, bar, barInset, targetW)
+              } else {
+                left = Math.max(8, Math.min(left, window.innerWidth - targetW - 8))
+              }
               tip.style.right = 'auto'
               tip.style.left = `${Math.round(left)}px`
               tip.style.width = `${Math.round(targetW)}px`
@@ -7167,11 +7312,11 @@ const placeBox = (el, l, t, wd, ht) => {
               try {
                 const real = tip.getBoundingClientRect()
                 if (real.width > 0) {
-                  const clampedLeft = Math.max(8, Math.min(
-                    parseFloat(tip.style.left) || left,
-                    window.innerWidth - real.width - 8,
-                  ))
-                  if (Math.abs(clampedLeft - (parseFloat(tip.style.left) || left)) > 0.5) {
+                  const wrote = parseFloat(tip.style.left) || left
+                  const clampedLeft = bar
+                    ? clampBarLeft(wrote, bar, barInset, real.width)
+                    : Math.max(8, Math.min(wrote, window.innerWidth - real.width - 8))
+                  if (Math.abs(clampedLeft - wrote) > 0.5) {
                     tip.style.left = `${Math.round(clampedLeft)}px`
                     left = clampedLeft
                   }
@@ -7235,6 +7380,17 @@ const placeBox = (el, l, t, wd, ht) => {
                   viewportW: Math.round(window.innerWidth),
                   viewportH: Math.round(window.innerHeight),
                   bitmap: Boolean(opts?.bitmap),
+                  /**
+                   * 位图的横向边界（侧栏矩形，左..右）。排查「浮窗越出
+                   * 侧栏」时要能一眼区分：是边界算错了，还是宽度超了。
+                   */
+                  bar: (() => {
+                    if (!opts?.bitmap) return null
+                    try {
+                      const b = tipBarRect(anchor)
+                      return `${Math.round(b.left)}..${Math.round(b.right)}`
+                    } catch { return null }
+                  })(),
                 })
               } catch { /* 诊断失败不影响定位 */ }
             }
@@ -7254,6 +7410,12 @@ const placeBox = (el, l, t, wd, ht) => {
               if (typeof lines === 'string') renderTipLines(tip, [{ kind: 'title', text: lines }])
               else renderTipLines(tip, Array.isArray(lines) ? lines : [])
               tip.setAttribute('data-warn', warn ? '1' : '0')
+              /**
+               * 位图与文字共用同一个浮窗节点，层级只能靠属性区分：
+               * 规则见 CSS 的 `.zr-link-tip[data-bitmap="1"]`。
+               * 文字写 '0'，层级与样式都保持原样。
+               */
+              tip.setAttribute('data-bitmap', opts?.bitmap ? '1' : '0')
               /**
                * 位图槽位：需要时先放一个加载态占位。
                *
