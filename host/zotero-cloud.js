@@ -419,7 +419,8 @@ export async function getCloudFile(options = {}) {
  */
 export function makeWriteToken() {
   const g = globalThis.crypto
-  if (g?.randomUUID) return g.randomUUID()
+  // 去掉连字符：UUID 原文 36 字符，超过 Zotero 的 32 字符上限（400 会拒），去连字符正好 32。
+  if (g?.randomUUID) return g.randomUUID().replace(/-/g, '')
   // 兜底：足够随机的 16 字节十六进制
   const bytes = new Uint8Array(16)
   for (let i = 0; i < 16; i += 1) bytes[i] = Math.floor(Math.random() * 256)
