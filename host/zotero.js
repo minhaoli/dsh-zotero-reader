@@ -25,12 +25,35 @@ const DATA_DIR_CANDIDATES = () => {
   ]
 }
 
+/**
+ * 「本地库读不出来」的错误码。
+ *
+ * 为什么要一个码：上层必须区分两种失败 ——
+ *   · **通道不在**（没装 Zotero / 数据目录不对 / Node 太老 / 快照复制失败）：
+ *     批注读写可以改走云端，这是 host/annotations-fallback.js 的回退条件；
+ *   · **库是好的、只是没有这一条**（`findItem` 找不到 key、条目没有本地 PDF）：
+ *     绝不能回退云端 —— 那会把「这篇文献不在你库里」说成「云端也失败了」。
+ * 靠 code 判定而不是匹配中文文案：文案一改，判定就静默失效。
+ */
+const LOCAL_DATA_UNAVAILABLE = 'local_data_unavailable'
+
+function localDataError(message) {
+  const error = new Error(message)
+  error.code = LOCAL_DATA_UNAVAILABLE
+  return error
+}
+
+/** 这个错误是不是「本地库整体读不出来」（而不是「库里没有这一条」）。 */
+export function isLocalDataUnavailable(error) {
+  return error?.code === LOCAL_DATA_UNAVAILABLE
+}
+
 export async function detectZoteroDataDir(configured) {
   if (configured) {
     const p = configured.trim()
     if (p && fs.existsSync(path.join(p, 'zotero.sqlite'))) return p
     if (p && fs.existsSync(p)) return p
-    throw new Error(`配置的 Zotero 数据目录无效：${p}（未找到 zotero.sqlite）`)
+    throw localDataError(`配置的 Zotero 数据目录无效：${p}（未找到 zotero.sqlite）`)
   }
   for (const candidate of DATA_DIR_CANDIDATES()) {
     try {
@@ -38,7 +61,7 @@ export async function detectZoteroDataDir(configured) {
       if (st.isFile()) return candidate
     } catch { /* 继续下一个候选 */ }
   }
-  throw new Error(
+  throw localDataError(
     '未找到 Zotero 数据目录。请确认已安装 Zotero 桌面版，或在插件设置里指定数据目录'
     + `（当前查找：${DATA_DIR_CANDIDATES().join(' / ')}）。`,
   )
@@ -50,7 +73,7 @@ async function openSqlite(file, options) {
   try {
     ({ DatabaseSync } = await import('node:sqlite'))
   } catch {
-    throw new Error('当前 Node 版本不支持内置 node:sqlite（需要 Node 22.5+），无法读取 Zotero 库。')
+    throw localDataError('当前 Node 版本不支持内置 node:sqlite（需要 Node 22.5+），无法读取 Zotero 库。')
   }
   return new DatabaseSync(file, options)
 }
@@ -128,7 +151,7 @@ async function snapshotDatabase(dataDir, cacheDir) {
       await new Promise((r) => setTimeout(r, 120 * (attempt + 1)))
     }
   }
-  throw new Error(`复制 Zotero 数据库失败：${lastError?.message ?? 'unknown'}`)
+  throw localDataError(`复制 Zotero 数据库失败：${lastError?.message ?? 'unknown'}`)
 }
 
 const FIELD = {

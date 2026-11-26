@@ -22,7 +22,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
-import { loadLibrary, loadAnnotations, loadOneItem } from './host/zotero.js'
+import { loadLibrary, loadAnnotations, loadOneItem, isLocalDataUnavailable } from './host/zotero.js'
 import { extractText, searchChunks, outlineOf } from './host/pdf.js'
 import { translateSelection, pickSelection } from './host/translate.js'
 import { parseWithMineru, sectionsFromMarkdown } from './host/mineru.js'
@@ -31,6 +31,14 @@ import {
   readAnnotations, createAnnotation, deleteAnnotation, updateAnnotation,
   probeLocalApi, HIGHLIGHT_COLORS, setApiKeyStore,
 } from './host/annotations.js'
+/**
+ * 云端回退：本地 Zotero 通道不在时，批注改走 api.zotero.org。
+ * 判定、身份缓存、错误分类都在 host/annotations-fallback.js，这里只做接线。
+ */
+import {
+  localChannelAbsent, writeAnnotationViaCloud, readAnnotationsViaCloud,
+  cloudWriteCapability, cloudFailureResponse, errorText,
+} from './host/annotations-fallback.js'
 import {
   probeCloudKey, listCloudItems, getCloudItem, getCloudFile,
   listCloudAnnotations, createCloudAnnotation,
@@ -1492,17 +1500,74 @@ async function handleRequest(rctx, req, res, deps) {
      * 外加本地 API 的可用性，让前端能提前说明「能不能加」。
      */
     if (sub === '/annotations' && method === 'GET') {
-      const itemKey = url.searchParams.get('key') ?? ''
-      const item = await deps.findItem(itemKey)
-      const result = await loadAnnotations(deps.settings, deps.cacheDir, itemKey, readAnnotations)
-      const probe = await probeLocalApi()
-      return sendJson(res, 200, {
-        annotations: result.annotations,
-        attachmentKey: result.attachmentKey ?? item.attachmentKey ?? null,
-        canWrite: probe.available && probe.writable,
-        writeBlockedReason: probe.available && probe.writable ? null : (probe.reason ?? null),
-        colors: HIGHLIGHT_COLORS,
-      })
+      const itemKey = String(url.searchParams.get('key') ?? '').trim()
+      if (!itemKey) return sendJson(res, 400, { error: '缺少 key' })
+      const cloudIo = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}
+      /**
+       * 通道：本地 sqlite 快照优先（Zotero 关着不影响读），
+       * 本地库读不出来（没装 Zotero / 数据目录变了 / 快照被锁）才走云端。
+       * `via` 告诉前端这一屏数据是哪条通道给的。
+       */
+      let item = null
+      let localError = null
+      try {
+        item = await deps.findItem(itemKey)
+      } catch (error) {
+        /**
+         * 只有「本地库整体读不出来」才算通道不在；「库里没有这一条」是业务错误，
+         * 原样抛出（外层统一回 500），别让云端 404 盖掉真实原因。
+         */
+        if (!isLocalDataUnavailable(error)) throw error
+        localError = errorText(error)
+      }
+      if (item) {
+        try {
+          const result = await loadAnnotations(deps.settings, deps.cacheDir, itemKey, readAnnotations)
+          const probe = await probeLocalApi()
+          const localWritable = probe.available && probe.writable
+          /**
+           * 本地写不了不等于整体不能写：云端 key 可写时按钮必须保持可用，
+           * 否则「不打开 Zotero 也能加批注」在界面上根本点不到。
+           * 本地可写 / 没配 key 时不探测云端，省掉一次可能卡几秒的网络往返。
+           */
+          const cloud = localWritable || !deps.settings.cloudApiKey
+            ? { configured: Boolean(deps.settings.cloudApiKey), canWrite: false, reason: null }
+            : await cloudWriteCapability(deps.settings, { ...cloudIo, timeoutMs: 4000 })
+          const canWrite = localWritable || cloud.canWrite
+          return sendJson(res, 200, {
+            annotations: result.annotations,
+            attachmentKey: result.attachmentKey ?? item.attachmentKey ?? null,
+            canWrite,
+            writeBlockedReason: canWrite ? null : (probe.reason ?? cloud.reason ?? null),
+            colors: HIGHLIGHT_COLORS,
+            via: 'local',
+          })
+        } catch (error) {
+          if (!isLocalDataUnavailable(error)) throw error
+          localError ??= errorText(error)
+        }
+      }
+      if (!localError) localError = '本地读不到这篇文献的批注'
+      try {
+        const cloudResult = await readAnnotationsViaCloud({
+          settings: deps.settings,
+          itemKey,
+          attachmentKey: url.searchParams.get('attachmentKey'),
+          ...cloudIo,
+        })
+        return sendJson(res, 200, {
+          annotations: cloudResult.annotations,
+          attachmentKey: cloudResult.attachmentKey,
+          canWrite: cloudResult.canWrite === true,
+          writeBlockedReason: cloudResult.canWrite === true ? null : (cloudResult.writeBlockedReason ?? null),
+          colors: HIGHLIGHT_COLORS,
+          via: 'cloud',
+          localError,
+        })
+      } catch (error) {
+        const failure = cloudFailureResponse(error)
+        return sendJson(res, failure.status, { ...failure.body, via: null, localError })
+      }
     }
 
     /** 批注：新建（高亮 + 可选备注）。 */
@@ -1526,31 +1591,99 @@ async function handleRequest(rctx, req, res, deps) {
       if (!needsText && !text && !String(body.comment ?? '').trim() && !hasRects) {
         return sendJson(res, 400, { error: '便签需要一个位置' })
       }
-      const item = await deps.findItem(itemKey)
-
-      // 附件 key：前端可能已知（从 /annotations 拿到），否则现查一次
-      let attachmentKey = body.attachmentKey ? String(body.attachmentKey) : (item.attachmentKey ?? null)
-      if (!attachmentKey) {
-        const r = await loadAnnotations(deps.settings, deps.cacheDir, itemKey, readAnnotations)
-        attachmentKey = r.attachmentKey
+      const cloudIo = deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}
+      /**
+       * 附件 key：前端可能已知（从 /annotations 拿到），否则现查一次。
+       * 本地库读不出来时**不要立刻 400** —— 云端能按文献 key 自己找附件，
+       * 这正是「这台机器上 Zotero 没开 / 没装」时仍然可以写批注的那种情况。
+       */
+      let item = null
+      let localError = null
+      try {
+        item = await deps.findItem(itemKey)
+      } catch (error) {
+        // 同 GET：库里没有这条 → 业务错误，不回退云端
+        if (!isLocalDataUnavailable(error)) throw error
+        localError = errorText(error)
       }
-      if (!attachmentKey) return sendJson(res, 400, { error: '这篇文献没有找到 PDF 附件，无法挂批注' })
+      let attachmentKey = body.attachmentKey ? String(body.attachmentKey) : (item?.attachmentKey ?? null)
+      if (!attachmentKey) {
+        try {
+          const r = await loadAnnotations(deps.settings, deps.cacheDir, itemKey, readAnnotations)
+          attachmentKey = r.attachmentKey
+        } catch (error) {
+          if (!isLocalDataUnavailable(error)) throw error
+          localError ??= errorText(error)
+        }
+      }
+      /**
+       * 本地确实查过、确实没有 PDF：保持原来的 400，不用去云端碰运气 ——
+       * 「这篇文献没有附件」换个通道也一样，提示还能准确指向附件。
+       */
+      if (!attachmentKey && !localError) {
+        return sendJson(res, 400, { error: '这篇文献没有找到 PDF 附件，无法挂批注' })
+      }
 
-      const result = await createAnnotation({
-        parentItemKey: itemKey,
-        attachmentKey,
-        text,
-        comment: String(body.comment ?? ''),
-        color: String(body.color ?? '#ffd400'),
-        pageIndex: Number(body.pageIndex ?? 0),
-        rects: Array.isArray(body.rects) ? body.rects : [],
-        pageLabel: body.pageLabel,
-        // sortIndex 第三段要用页高算「距顶部距离」，前端拿得到 viewport 就传
-        pageHeightPt: Number(body.pageHeightPt) || undefined,
-        annotationKind: body.annotationKind,
-      })
-      if (!result.ok) return sendJson(res, result.needAuth ? 401 : 400, { error: result.reason })
-      return sendJson(res, 200, { ok: true, key: result.key })
+      const local = attachmentKey
+        ? await createAnnotation({
+          parentItemKey: itemKey,
+          attachmentKey,
+          text,
+          comment: String(body.comment ?? ''),
+          color: String(body.color ?? '#ffd400'),
+          pageIndex: Number(body.pageIndex ?? 0),
+          rects: Array.isArray(body.rects) ? body.rects : [],
+          pageLabel: body.pageLabel,
+          // sortIndex 第三段要用页高算「距顶部距离」，前端拿得到 viewport 就传
+          pageHeightPt: Number(body.pageHeightPt) || undefined,
+          annotationKind: body.annotationKind,
+        })
+        : null
+
+      if (local?.ok) return sendJson(res, 200, { ok: true, key: local.key, via: 'local' })
+      /**
+       * 只有「本地通道不在」才改走云端（判定见 localChannelAbsent）。
+       * 业务错误原样回给前端，那样才看得见「条目不存在 / 参数非法 / 授权被拒」。
+       */
+      if (local && !localChannelAbsent(local)) {
+        return sendJson(res, local.needAuth ? 401 : 400, { error: local.reason, via: 'local' })
+      }
+
+      try {
+        const cloud = await writeAnnotationViaCloud({
+          settings: deps.settings,
+          itemKey,
+          attachmentKey,
+          text,
+          comment: String(body.comment ?? ''),
+          color: String(body.color ?? '#ffd400'),
+          pageIndex: Number(body.pageIndex ?? 0),
+          rects: Array.isArray(body.rects) ? body.rects : [],
+          pageLabel: body.pageLabel,
+          pageHeightPt: Number(body.pageHeightPt) || undefined,
+          annotationKind: body.annotationKind,
+          ...cloudIo,
+        })
+        return sendJson(res, 200, {
+          ok: true,
+          key: cloud.key,
+          via: 'cloud',
+          version: cloud.version,
+          // 让前端能说明「为什么这次走了云端」，而不是静默换通道
+          localError: local ? local.reason : localError,
+        })
+      } catch (error) {
+        const failure = cloudFailureResponse(error)
+        /**
+         * `via: null`：这次没写成功，两条通道都不认领它。
+         * 云端原因在 body.error / body.code，本地原始原因在 localError。
+         */
+        return sendJson(res, failure.status, {
+          ...failure.body,
+          via: null,
+          localError: local ? local.reason : localError,
+        })
+      }
     }
 
     /** 批注：删除。 */

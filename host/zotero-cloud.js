@@ -22,6 +22,12 @@
 export const CLOUD_BASE = 'https://api.zotero.org'
 export const API_VERSION = '3'
 
+/**
+ * 云端允许的批注类型（见 buildAnnotationItem 的说明，故意不含 ink）。
+ * 放在模块作用域：它是一条数据契约，不是每次构造 item 时的临时判断。
+ */
+const CLOUD_ANNOTATION_TYPES = ['highlight', 'underline', 'note']
+
 /** 默认超时。云端 API 正常在 1 秒内响应（实测 285–1129ms）。 */
 const DEFAULT_TIMEOUT_MS = 20_000
 /** 429 最多重试几次。3 次足够跨过一分钟窗口，再多用户会以为界面卡死。 */
@@ -37,6 +43,14 @@ export const ERROR_CODES = {
   NO_KEY: 'no_key',
   INVALID_KEY: 'invalid_key',
   FORBIDDEN: 'forbidden',
+  /**
+   * key 有效但只有读权限（`access.user.write !== true`）。
+   *
+   * 与 forbidden 分开：forbidden 是「服务端拒绝了这一次写操作」，
+   * 而 read_only 是「这个 key 天生不能写」——用户在 zotero.org 重新勾一个
+   * 「Allow write access」就能修好，提示语完全不同。
+   */
+  READ_ONLY: 'read_only',
   NOT_FOUND: 'not_found',
   VERSION_CONFLICT: 'version_conflict',
   RATE_LIMITED: 'rate_limited',
@@ -531,7 +545,21 @@ export function buildAnnotationItem(fields = {}) {
   const item = {
     itemType: 'annotation',
     parentItem,
-    annotationType: fields.annotationType === 'note' ? 'note' : 'highlight',
+    /**
+     * 类型白名单：Zotero 只认 highlight / underline / note / text / image / ink。
+     *
+     * 这里不能只判 `=== 'note'`：本地写入支持 underline，云端回退若一律写成
+     * highlight，用户画的下划线会在 Zotero 阅读器里变成高亮方块 —— 同一条
+     * 批注经过两条通道会长得不一样。白名单外的值（含 undefined、前端瞎传的
+     * 'freetext'）仍按 highlight 写，与旧行为一致。
+     *
+     * 故意不含 ink：云端 ink 批注要求 `annotationPosition.paths` 里的笔迹点列，
+     * 而本插件只有矩形，写 ink 只会得到一条渲染不出来的批注。调用方负责把
+     * ink 映射成 note（见 host/annotations-fallback.js）。
+     */
+    annotationType: CLOUD_ANNOTATION_TYPES.includes(String(fields.annotationType ?? '').toLowerCase())
+      ? String(fields.annotationType).toLowerCase()
+      : 'highlight',
     annotationText: text,
     annotationComment: comment,
     annotationColor: fields.color || '#ffd400',

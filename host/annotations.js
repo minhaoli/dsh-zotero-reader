@@ -151,6 +151,8 @@ export async function probeLocalApi(timeoutMs = 2500) {
       return {
         available: false,
         writable: false,
+        /** 机器可读标记：Zotero 在跑，但本地 API 被关了（见 createAnnotation 的 unavailable）。 */
+        code: 'local_api_disabled',
         reason: 'Zotero 本地 API 未启用。请在 Zotero 里打开：设置 → 高级 → 勾选「允许此计算机上的其他应用程序与 Zotero 通信」，然后重开 Zotero。',
       }
     }
@@ -289,6 +291,30 @@ function invalidateApiKey() {
 }
 
 /**
+ * 由页码 / 矩形 / 页高算出 `annotationSortIndex`（三段：pageIndex|偏移|距顶距离）。
+ *
+ * 抽成导出的纯函数，是为了让**两条写入通道算出同一个值**：本地 API 与云端 API
+ * 都按 `/^\d{5}\|\d{6}\|\d{5}$/` 校验它，算法一旦分叉，同一条批注走云端写出
+ * 后，排序就会跟本地写的那些错开。格式的由来与踩坑见 createAnnotation 里的注释。
+ */
+export function deriveSortIndex({ pageIndex = 0, rects = [], pageHeightPt } = {}) {
+  const firstRect = Array.isArray(rects[0]) ? rects[0] : [0, 0, 0, 0]
+  const rectTop = Number(firstRect[3]) || 0
+  /**
+   * 「距页面顶部」的距离。缺 pageHeightPt 时（前端没传、或页尺寸未知）
+   * 退化为 rectTop 取整 —— 量级仍在 5 位内，Zotero 至少能接受。
+   */
+  const fromTop = Number.isFinite(Number(pageHeightPt)) && Number(pageHeightPt) > rectTop
+    ? Math.floor(Number(pageHeightPt) - rectTop)
+    : Math.floor(rectTop)
+  return [
+    String(Math.max(0, Math.trunc(pageIndex))).slice(0, 5).padStart(5, '0'),
+    '0'.padStart(6, '0'),
+    String(Math.max(0, fromTop)).slice(0, 5).padStart(5, '0'),
+  ].join('|')
+}
+
+/**
  * 向 Zotero 写入一条高亮 / 备注。
  *
  * 流程按 Zotero 10 文档：
@@ -341,11 +367,25 @@ export async function createAnnotation(options) {
   })()
 
   const probe = await probeLocalApi()
-  if (!probe.available) return { ok: false, reason: probe.reason }
+  if (!probe.available) {
+    /**
+     * `unavailable: true` 是给云端回退看的**机器可读**标记（见 host/annotations-fallback.js）。
+     *
+     * 只在「本地通道根本不存在」时置位：连接被拒 / 主机不可达 / 超时 / 本地 API 关闭（403）。
+     * **业务失败绝不置位** —— 条目不存在、参数非法、授权被拒（401）、服务端拒绝写入，
+     * 都说明本地通道是通的，改走云端只会把真实问题掩盖成「云端也失败了」。
+     */
+    return { ok: false, unavailable: true, probeCode: probe.code ?? '', reason: probe.reason }
+  }
   if (!probe.serverId) {
     return {
       ok: false,
       needAuth: true,
+      /**
+       * Zotero 太老（没有 Zotero-Server-ID）也属于「本地写不了」，但它不是授权问题：
+       * needAuth 保留是为了不改变既有 401 语义，unsupported 才是回退判定看的标记。
+       */
+      unsupported: true,
       reason: '当前 Zotero 不支持本地写入（需要 Zotero 10 及以上）。可以先在 Zotero 里手动加批注，或升级 Zotero。',
     }
   }
@@ -374,20 +414,7 @@ export async function createAnnotation(options) {
    * 直接让正则不匹配 —— 也就解释了为什么部分批注明明走到了写入却回不出 key。
    */
   const position = { pageIndex, rects }
-  const firstRect = Array.isArray(rects[0]) ? rects[0] : [0, 0, 0, 0]
-  const rectTop = Number(firstRect[3]) || 0
-  /**
-   * 「距页面顶部」的距离。缺 pageHeightPt 时（前端没传、或页尺寸未知）
-   * 退化为 rectTop 取整 —— 量级仍在 5 位内，Zotero 至少能接受。
-   */
-  const fromTop = Number.isFinite(Number(pageHeightPt)) && Number(pageHeightPt) > rectTop
-    ? Math.floor(Number(pageHeightPt) - rectTop)
-    : Math.floor(rectTop)
-  const derivedSortIndex = [
-    String(Math.max(0, Math.trunc(pageIndex))).slice(0, 5).padStart(5, '0'),
-    '0'.padStart(6, '0'),
-    String(Math.max(0, fromTop)).slice(0, 5).padStart(5, '0'),
-  ].join('|')
+  const derivedSortIndex = deriveSortIndex({ pageIndex, rects, pageHeightPt })
 
   /**
    * `annotationText` 只对 highlight / underline 合法
