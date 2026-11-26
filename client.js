@@ -23,6 +23,8 @@ window.__ModuleLoader__.load({
 
     const NS = 'dsh-zotero-reader'
     const TAB_KEY = 'zotero-reader'
+    /** 左侧栏菜单行与整页 `main` 面板共用的 key/id；两处必须同一个值。 */
+    const PANEL_ID = 'zotero-reader'
     /** 与 host 侧 ROUTE_PREFIX 一致。 */
     const API = '/zotero-reader'
     /** 会话消息里可点击的文献链接。 */
@@ -224,6 +226,9 @@ window.__ModuleLoader__.load({
       cfgCloudUserID: '云端 userID',
       cfgCloudUserIDPlaceholder: '数字 ID（可在同一页面看到）',
       cfgCloudUserIDHint: '填了 key 后也可以由 /cloud/status 探测出来，再填到这里。',
+      nav: 'Zotero 伴读',
+      configTitle: 'Zotero 伴读设置',
+      configSubtitle: '数据目录、MinerU 解析与各功能的默认模型；保存后随插件重载生效。',
       cfgModels: '模型覆盖',
       cfgModelsHint: '三项都留空表示跟随会话当前模型；只覆盖填写的项。服务商下拉只列当前 Host 上已配置（能列出模型）的服务商，其余可直接手输。',
       featureTranslate: '划词翻译',
@@ -379,6 +384,9 @@ window.__ModuleLoader__.load({
       cfgCloudUserID: 'Cloud userID',
       cfgCloudUserIDPlaceholder: 'Numeric ID (shown on the same page)',
       cfgCloudUserIDHint: 'The /cloud/status probe can discover it once the key is set; paste it here.',
+      nav: 'Zotero Paper Reader',
+      configTitle: 'Zotero Paper Reader settings',
+      configSubtitle: 'Data directories, MinerU parsing and per-feature default models. Saved changes apply when the plugin reloads.',
       cfgModels: 'Model overrides',
       cfgModelsHint: 'Leave all three empty to follow the session model; only filled entries override. The provider list shows only providers configured on this Host (the ones that list models); type any other id by hand.',
       featureTranslate: 'Selection translation',
@@ -1487,6 +1495,12 @@ window.__ModuleLoader__.load({
       .zr-check{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--dsh-text-secondary,#b6b6b6)}
       /* 插件页配置表单：常驻文档流，不浮动（渲染在侧栏「插件」详情页里） */
       .zr-cfg{display:flex;flex-direction:column;gap:12px;padding:4px 2px 10px;font-size:12px;color:var(--dsh-text-primary,#e6e6e6)}
+      /* 左侧栏整页：配置页从组合包详情页搬来后的外框（页头 + 限宽 + 滚动）。 */
+      .zr-panel-page{height:100%;box-sizing:border-box;overflow:auto;padding:22px 24px 36px}
+      .zr-panel-head{max-width:860px;margin:0 auto 14px}
+      .zr-panel-title{margin:0;font-size:16px;font-weight:600;line-height:1.4;color:var(--dsh-text-primary,#e6e6e6)}
+      .zr-panel-sub{margin-top:4px;font-size:12px;line-height:1.55;color:var(--dsh-text-tertiary,#8a9096)}
+      .zr-panel-body{max-width:860px;margin:0 auto}
       .zr-cfg-intro{font-size:11.5px;line-height:1.6;color:var(--dsh-text-tertiary,#8a9096)}
       .zr-cfg-section{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsh-border,#3a3a3a);border-radius:8px;padding:10px 12px}
       .zr-cfg-title{font-size:12px;font-weight:600;color:var(--dsh-text-primary,#e6e6e6)}
@@ -2830,7 +2844,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 配置页（注册进侧栏「插件」的组合包详情页：`plugins.bundle.config`）。
+     * 配置页（挂载在左侧栏「Zotero 伴读」菜单打开的整页 `main` 槽里，见 `PANEL_ID`）。
      *
      * 数据面只有两个：`GET /config` 读、`POST /config` 写。保存由 Host 用
      * configEditor 落到 profile patch，宿主随即重载插件 —— 所以文案里明确写
@@ -12672,6 +12686,52 @@ const placeBox = (el, l, t, wd, ht) => {
       }
     }
 
+    /**
+     * 左侧栏图标：沿用 `icon.svg` 的「文档 + 侧栏 + 高亮条」造型，
+     * 但用 `currentColor` 画，随主题明暗自动适配（侧栏其它图标也是这个约定）。
+     */
+    function ZoteroPanelIcon({ size } = {}) {
+      const edge = typeof size === 'number' && size > 0 ? size : 16
+      return h('svg', {
+        xmlns: 'http://www.w3.org/2000/svg',
+        viewBox: '0 0 24 24',
+        width: edge,
+        height: edge,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.6,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+        focusable: 'false',
+      },
+      h('rect', { x: 2.5, y: 3, width: 10, height: 18, rx: 1.6 }),
+      h('line', { x1: 5.2, y1: 7.2, x2: 9.8, y2: 7.2 }),
+      h('line', { x1: 5.2, y1: 10.2, x2: 9.8, y2: 10.2 }),
+      h('line', { x1: 5.2, y1: 13.2, x2: 8.2, y2: 13.2 }),
+      h('rect', { x: 15, y: 3, width: 6.5, height: 18, rx: 1.6 }),
+      h('rect', { x: 16.4, y: 6.4, width: 3.7, height: 1.5, rx: 0.75, fill: 'currentColor', stroke: 'none' }),
+      h('line', { x1: 16.4, y1: 10, x2: 20.1, y2: 10, opacity: 0.55 }),
+      h('line', { x1: 16.4, y1: 12.6, x2: 20.1, y2: 12.6, opacity: 0.55 }),
+      )
+    }
+
+    /**
+     * 左侧栏「Zotero 伴读」的整页外框：页头 + 限宽 + 滚动。
+     *
+     * 表单本身仍是 `PluginConfigPage`（读写逻辑一字未改），这里只补上
+     * 「这是一个整页、不是组合包详情页里的窄区域」所需的标题与边距。
+     */
+    function ConfigPanelPage({ t, view }) {
+      return h('div', { className: 'zr-panel-page' },
+        h('div', { className: 'zr-panel-head' },
+          h('h1', { className: 'zr-panel-title' }, t('configTitle')),
+          h('div', { className: 'zr-panel-sub' }, t('configSubtitle')),
+        ),
+        h('div', { className: 'zr-panel-body' }, h(PluginConfigPage, { t, view })),
+      )
+    }
+
     /* -------------------------------------------------------- 插件体 */
 
     return {
@@ -12680,6 +12740,29 @@ const placeBox = (el, l, t, wd, ht) => {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }))
         const bound = ctx.locale.bind(NS)
         const t = (key) => bound(key)
+
+        /**
+         * 左侧栏「Zotero 伴读」：一行菜单 + 一整页配置。
+         *
+         * 两个槽位配对使用（写法和 dshmarket / dsh-xdpool 一致）：
+         * `sidebar.panellist` 的 `id` 与 `main` 的 `key` 必须是同一个值 ——
+         * 宿主点菜单行时 `selectPanel(id)`，再用这个 key 找整页内容。
+         * 组合包详情页（plugins.bundle.config）不再挂配置表单，只留介绍文档。
+         */
+        ctx.effect(() => ctx.slots.register({
+          name: 'main',
+          key: PANEL_ID,
+          locale: NS,
+          inject: () => ({ t }),
+        }, (props) => h(ConfigPanelPage, props)))
+
+        ctx.effect(() => ctx.slots.register({
+          name: 'sidebar.panellist',
+          id: PANEL_ID,
+          order: 21,
+          label: () => t('nav'),
+          locale: NS,
+        }, (owner = {}) => h(ZoteroPanelIcon, { size: owner.size ?? 16 })))
 
         /**
          * 右栏 tab 类型的注册。
@@ -12727,20 +12810,6 @@ const placeBox = (el, l, t, wd, ht) => {
             locale: NS,
           }, (props) => h(TabTitle, { ...props, bound }))))
 
-          /**
-           * 组合包配置页：侧栏「插件」→ dsh-zotero-reader 的详情页。
-           *
-           * 用 `plugins.bundle.config`（key = 包名）而不是 `plugins.row.config`：
-           * 前者直接渲染在组合包页面的「描述与行之间」，用户不用再点行尾的「配置」
-           * 进二级页，进页面就能看到全部配置。
-           * 按 DSH 文档，该槽只渲染 `page` 视图；组件仍保留 summary 分支以兼容。
-           * 值以 host 的 Config（config.js）为准，保存走 Host 的 configEditor。
-           */
-          ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
-            name: 'plugins.bundle.config',
-            key: 'dsh-zotero-reader',
-            locale: NS,
-          }, PluginConfigPage)), 'zotero-reader: bundle config page')
 
         })
 

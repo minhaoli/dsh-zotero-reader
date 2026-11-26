@@ -1,7 +1,8 @@
 {
   "meta": {
     "title": "Zotero Paper Reader",
-    "description": "Detects Zotero papers found in conversation and opens their local PDF in the right sidebar, with page-linked answers, one-click Chinese, and selection translation that preserves formulas."
+    "description": "Detects Zotero papers found in conversation and opens their local PDF in the right sidebar, with page-linked answers, one-click Chinese, and selection translation that preserves formulas.",
+    "detail": "docs/DETAIL.md"
   },
   "reader": {
     "title": "Zotero Paper Reader",

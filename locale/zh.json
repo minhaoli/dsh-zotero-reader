@@ -1,7 +1,8 @@
 {
   "meta": {
     "title": "Zotero 伴读",
-    "description": "在会话里识别 AI 搜到的 Zotero 文献，右侧栏直接打开本地 PDF；回答带可点页码、一键中文版、划词翻译保留公式。"
+    "description": "在会话里识别 AI 搜到的 Zotero 文献，右侧栏直接打开本地 PDF；回答带可点页码、一键中文版、划词翻译保留公式。",
+    "detail": "docs/DETAIL.zh.md"
   },
   "reader": {
     "title": "Zotero 伴读",

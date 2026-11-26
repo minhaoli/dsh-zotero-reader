@@ -128,7 +128,11 @@ const plugin = mod.factory((name) => {
 /* ------------------------------------------------- 假 ctx + 捕获组件 */
 
 let registeredComponent = null
-let registeredConfigPage = null
+let registeredPanelPage = null
+let registeredPanelRow = null
+let registeredPanelPageSpec = null
+let registeredPanelRowSpec = null
+const registeredSlotNames = []
 const fakeCtx = {
   effect: (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} },
   inject: (deps, cb) => cb({
@@ -144,7 +148,9 @@ const fakeCtx = {
     inject: (name, cb) => cb(),
     register: (spec, component) => {
       if (spec.name === 'sidebar.right.pane.tab' && spec.key === 'zotero-reader') registeredComponent = component
-      if (spec.name === 'plugins.bundle.config' && spec.key === 'dsh-zotero-reader') registeredConfigPage = component
+      registeredSlotNames.push(spec.name)
+      if (spec.name === 'main' && spec.key === 'zotero-reader') { registeredPanelPage = component; registeredPanelPageSpec = spec }
+      if (spec.name === 'sidebar.panellist' && spec.id === 'zotero-reader') { registeredPanelRow = component; registeredPanelRowSpec = spec }
       return () => {}
     },
   },
@@ -228,21 +234,34 @@ if (effectErrors.length === 0) {
   }
 }
 
-/* ---------------------------------- 3. 组合包配置页（plugins.bundle.config） */
+/* ------------------- 3. 左侧栏整页（sidebar.panellist + main） */
 
-console.log('\n=== 3. 组合包配置页（plugins.bundle.config）===')
-if (!registeredConfigPage) {
+console.log('\n=== 3. 左侧栏「Zotero 伴读」整页（sidebar.panellist + main）===')
+if (!registeredPanelPage || !registeredPanelRow) {
   process.exitCode = 1
-  console.log('  FAIL: 没有注册 plugins.bundle.config（key 应为 dsh-zotero-reader）')
+  console.log('  FAIL: 没有同时注册 main 与 sidebar.panellist（id/key 应为 zotero-reader）')
 } else {
   const t = (key) => key
   try {
-    const summary = registeredConfigPage({ t, view: 'summary' })
-    console.log('  summary 返回类型:', typeof summary)
-    if (typeof summary !== 'string' || summary.length === 0) throw new Error('summary 不是非空字符串')
-    const page = registeredConfigPage({ t, view: 'page' })
+    console.log('  main.key =', registeredPanelPageSpec.key)
+    console.log('  sidebar.id =', registeredPanelRowSpec.id)
+    if (registeredPanelPageSpec.key !== 'zotero-reader' || registeredPanelRowSpec.id !== 'zotero-reader') {
+      throw new Error('main.key 与 sidebar.panellist.id 不一致')
+    }
+    if (registeredSlotNames.includes('plugins.bundle.config')) {
+      throw new Error('仍在注册 plugins.bundle.config（组合包页不应再挂配置表单）')
+    }
+    const label = registeredPanelRowSpec.label()
+    console.log('  label =', label)
+    if (typeof label !== 'string' || label.length === 0) throw new Error('菜单 label 为空')
+    const iconNode = registeredPanelRow({ size: 20 })
+    const icon = typeof iconNode?.type === 'function' ? iconNode.type(iconNode.props) : iconNode
+    console.log('  图标:', icon?.type, icon?.props?.width)
+    if (icon?.type !== 'svg' || icon?.props?.width !== 20) throw new Error('图标没有按 owner.size 渲染')
+    const page = registeredPanelPage({ t })
     console.log('  page 返回类型:', page?.type?.name ?? typeof page?.type)
-    if (!page) throw new Error('page 没有返回节点')
+    const rendered = typeof page?.type === 'function' ? page.type(page.props) : page
+    if (!rendered || rendered.props?.className !== 'zr-panel-page') throw new Error('整页外框没有渲染')
     console.log('  OK')
   } catch (error) {
     process.exitCode = 1
