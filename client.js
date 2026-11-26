@@ -1610,10 +1610,21 @@ window.__ModuleLoader__.load({
        * 取值依据全在本插件自己的层级表里：
        *   · PDF 内容层最高 22（.zr-settings / .zr-outline、.zr-annot-panel 21），
        *     50 > 22 → 稳定浮在 PDF 之上；
-       *   · 插件自己的交互浮层是 60/61/62（选区条 / 批注卡 / 批注菜单），
-       *     50 < 60 → 用户正在点的弹层不会被预览卡盖住；
+       *   · 插件自己的交互浮层写的是 60/61/62（选区条 / 批注卡 / 批注菜单），
+       *     但它们渲染在 React 树里，跟 .zr-root 一起被关在 dockkit 标签页
+       *     上下文（10）中 —— 并不在本浮窗之上。这个相对关系改动前就存在
+       *     （原先浮窗是 2^31，同样压着它们），本轮不改变；
        *   · 宿主全局 UI（对话框、命令面板等）在几百到上千量级，
-       *     50 远低于它们，不会再出现「预览卡盖住整个应用」。
+       *     50 远低于它们，不会再出现「预览卡盖住整个应用」；
+       *   · 已知边界：把 tab 浮出时 dockkit 浮动层是 60，会盖过本浮窗；
+       *     插件默认以 docked 形态使用侧栏，本轮未处理该形态。
+       *
+       * **工具栏不在上面这张表里，也不能靠把它抬到 55 解决。**
+       * 宿主 dockkit 把标签页格子渲成 grid item 且带 z-index:10
+       * （--dsh-dockkit-dock-layer），grid item 带非 auto 的 z-index
+       * 会新建层叠上下文 —— .zr-bar 连同整棵子树被关在 10 这一层，
+       * 写多少都超不过这里 fixed 的 50。所以位图浮窗改为几何避让：
+       * 顶边不越过 .zr-bar 下沿（见 tipTopInset / computeTipPlacement）。
        */
       .zr-link-tip[data-bitmap="1"]{z-index:50}
       /*
@@ -6898,6 +6909,40 @@ const placeBox = (el, l, t, wd, ht) => {
             }
 
             /**
+             * **位图浮窗的垂直上界 = 阅读器工具栏（.zr-bar）的下沿。**
+             *
+             * 为什么只能几何避让、不能抬工具栏的层级：
+             *   浮窗是 `position:fixed`、挂在 body 下、z-index 50；
+             *   工具栏在宿主 dockkit 的 ._tabCell 里，而那是
+             *   `z-index: var(--dsh-dockkit-dock-layer,10)` 的 **grid item**
+             *   —— grid item 带非 auto 的 z-index 会新建层叠上下文。
+             *   于是工具栏连同整个子树都被关在 10 这一层，给它写
+             *   z-index:55 也越不过外层 fixed 的 50（用户实测被覆盖
+             *   正是这个原因）。所以让浮窗自己在几何上让开。
+             *
+             * 取 .zr-root 里所有 .zr-bar 的**最大下沿**：阅读器有两种
+             * 工具条（标题条 + 操作条），bare 模式只剩后者；按最大下沿
+             * 算，工具条换行变高时浮窗也会跟着下移。
+             *
+             * @param {HTMLElement|null} anchor 链接元素（位图路径必有）
+             * @returns {number} 顶边最小值（视口坐标），至少 8
+             */
+            const tipTopInset = (anchor) => {
+              let bottom = 0
+              try {
+                const root = anchor?.closest?.('.zr-root')
+                const bars = root?.querySelectorAll?.('.zr-bar')
+                if (bars) {
+                  for (const bar of bars) {
+                    const r = bar.getBoundingClientRect()
+                    if (r.height > 0) bottom = Math.max(bottom, r.bottom)
+                  }
+                }
+              } catch { /* 量不到就让浮窗从视口顶开始 */ }
+              return bottom > 0 ? Math.max(8, Math.round(bottom) + 8) : 8
+            }
+
+            /**
              * **浮窗尺寸：唯一一处计算 popupW / popupH。**
              *
              * 用户要的尺寸是「页面 CSS 宽 × 0.9、页面 CSS 高 × 0.3」——
@@ -7145,14 +7190,21 @@ const placeBox = (el, l, t, wd, ht) => {
               const mayCover = isBitmap
               if (mayCover) {
                 /**
-                 * 位图：高度取「整个视口能给的全部」，不再被链接上沿截断。
-                 * 位置仍尽量放在上方，实在放不下就贴顶 —— 宁可盖住链接
-                 * 那一行几个字，也要让 figure 看清。
+                 * 位图：高度取「工具栏以下、整个视口能给的全部」，
+                 * 不再被链接上沿截断。
+                 * 位置仍尽量放在上方，实在放不下就贴到工具栏下沿 ——
+                 * 宁可盖住链接那一行几个字，也要让 figure 看清。
+                 *
+                 * **为什么让出工具栏**：`.zr-bar` 在宿主 dockkit 的
+                 * `._tabCell`（grid item，z-index:10）这个层叠上下文里，
+                 * 给它写 z-index 永远超不过 body 下 fixed 的浮窗（50）。
+                 * 层级这条路走不通，只能几何避让（见 tipTopInset）。
                  */
-                const height = Math.max(MIN_H, Math.min(want, viewportH - 16))
+                const minTop = tipTopInset(anchor)
+                const height = Math.max(MIN_H, Math.min(want, viewportH - minTop - 8))
                 const idealTop = r.top - gap - height
-                const top = Math.max(8, Math.min(idealTop, viewportH - height - 8))
-                return { top, height }
+                const top = Math.max(minTop, Math.min(idealTop, viewportH - height - 8))
+                return { top, height, minTop }
               }
 
               /**
@@ -7363,6 +7415,11 @@ const placeBox = (el, l, t, wd, ht) => {
                   desiredH: typeof desiredHValue === 'number' ? Math.round(desiredHValue) : null,
                   chosenH: placed ? Math.round(placed.height) : null,
                   chosenTop: placed ? Math.round(placed.top) : null,
+                  /**
+                   * 位图的顶边下界（工具栏下沿）。排查「浮窗盖住工具栏」
+                   * 时要能看出是避让没生效，还是工具栏自身位置变了。
+                   */
+                  topBound: typeof placed?.minTop === 'number' ? Math.round(placed.minTop) : null,
                   /**
                    * 浮窗最终值：优先用本次写入的结果；没有就**读 DOM 实际值**。
                    *

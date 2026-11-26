@@ -730,6 +730,24 @@ check('z-index 只对位图降级（文字预览保持原样）',
     /tip\.setAttribute\('data-bitmap', opts\?\.bitmap \? '1' : '0'\)/.test(src) &&
     /\.zr-link-tip\{position:fixed;z-index:2147483000;/.test(src),
   '用户要求只修图片/公式/表格浮窗；文字预览的层级与样式不动')
+/**
+ * 用户报「插件的工具栏没有置顶，会被覆盖掉」。
+ *
+ * 宿主 dockkit 把标签页格子渲成 grid item 且带 z-index:10
+ * （--dsh-dockkit-dock-layer），grid item 带非 auto 的 z-index
+ * 会新建层叠上下文 —— 工具栏整棵子树被关在 10 里，写多少 z-index
+ * 都超不过 body 下 fixed 的浮窗（50）。所以修法是几何避让。
+ */
+check('位图浮窗垂直避让工具栏（顶边不越过 .zr-bar 下沿）',
+  /const tipTopInset = \(anchor\) =>/.test(src) &&
+    /querySelectorAll\?\.\('\.zr-bar'\)/.test(src) &&
+    /const minTop = tipTopInset\(anchor\)/.test(src) &&
+    /Math\.max\(minTop, Math\.min\(idealTop, viewportH - height - 8\)\)/.test(src),
+  'dockkit 的 ._tabCell 带 z-index:10 自成层叠上下文，抬 .zr-bar 的 z-index 无效')
+
+check('没有用 z-index 抬工具栏（宿主层叠上下文会关住它）',
+  !/\.zr-bar\{[^}]*z-index:/.test(src),
+  '写了也超不过浮窗；层级表里 50 的前提是不再依赖工具栏抬层')
 
 check('横向滚动落在位图容器上（canvas 不被等比压窄）',
   /shot\.scrollLeft \+= wheelX/.test(src) &&
@@ -1067,9 +1085,9 @@ check('wasOn 回流也发定位诊断',
  * 位图高度：`mayCover` 分支必须按整屏可用高度给，不能被
  * `r.top - gap - 8` 截断（那会让链接位于视口中部时只给到 511）。
  */
-check('位图高度按整屏可用高度给（不被链接上沿截断）',
-  /const height = Math\.max\(MIN_H, Math\.min\(want, viewportH - 16\)\)/.test(src),
-  '被 r.top 截断会让 figure 在高链接位置上只能拿到半屏')
+check('位图高度按「工具栏以下」的可用高度给（不被链接上沿截断）',
+  /const height = Math\.max\(MIN_H, Math\.min\(want, viewportH - minTop - 8\)\)/.test(src),
+  '被 r.top 截断会让 figure 在高链接位置上只能拿到半屏；上界换成工具栏下沿')
 
 /* ---------- 4m. 四条新需求（3/7 宽、单滚动面、canvas 跟随浮窗、诊断） ---------- */
 
