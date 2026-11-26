@@ -4,10 +4,11 @@
  * 覆盖：
  *   1. 只投影 provider/model 的 id 与展示名，上游附带的敏感字段不出现
  *   2. listProviders 抛错 → 空目录（前端据此退回手输入）
- *   3. 单个 provider 的 listModels 抛错 → 该 provider 空列表，其它 provider 不受影响
+ *   3. 只有列得出模型的 provider 才进目录；listModels 抛错/空列表 → 整个 provider 不出现
  *   4. model-info 返回推理档位与默认档位；缺参 400；解析失败 → 200 空列表 + error
  *   5. llm 服务没有这些方法时同样降级为空，不抛错
  *   6. client.js 里确实存在 datalist/select 与失败降级路径（源码断言）
+ *   7. 判据与 DSH 模型选择器一致：注册 ≠ 已配置，零模型的 provider 不出现
  *
  * 全部本地：桩 llm + 临时 dataDir，不联网。
  *
@@ -110,7 +111,11 @@ boot(makeLlm())
   const r = await call('/zotero-reader/models')
   const body = r.json ?? {}
   check('GET /models → 200', r.statusCode === 200, `status=${r.statusCode}`)
-  check('GET /models 返回两个 provider', body.providers?.length === 2, JSON.stringify(body.providers))
+  check('GET /models 只返回能列出模型的 provider',
+    body.providers?.length === 1 && body.providers?.[0]?.id === 'deepseek', JSON.stringify(body.providers))
+  check('注册但没配置（零模型）的 provider 不进目录',
+    !body.providers?.some((p) => p.id === 'siliconflow') && !('siliconflow' in (body.models ?? {})),
+    JSON.stringify(body.models))
   check('provider 只含 id/name', body.providers?.every((p) => Object.keys(p).sort().join(',') === 'id,name'),
     JSON.stringify(body.providers?.[0]))
   check('models.deepseek 有两个模型', body.models?.deepseek?.length === 2, JSON.stringify(body.models?.deepseek))
@@ -129,7 +134,7 @@ boot(makeLlm({ listProviders: () => { throw new Error('llm down') } }))
     && r.json?.models && Object.keys(r.json.models).length === 0, r.text.slice(0, 120))
 }
 
-/* ------------------- 3) 单个 provider 的 listModels 抛错 → 仅该 provider 为空 */
+/* ------------------- 3) 单个 provider 的 listModels 抛错 → 该 provider 不出现 */
 
 boot(makeLlm({
   listModels: async (provider) => {
@@ -139,10 +144,12 @@ boot(makeLlm({
 }))
 {
   const r = await call('/zotero-reader/models')
-  check('单个 provider 失败 → 该 provider 空、其它保留',
-    JSON.stringify(r.json?.models?.deepseek) === '[]'
+  check('单个 provider 失败 → 该 provider 不出现、其它保留',
+    !('deepseek' in (r.json?.models ?? {}))
+    && !r.json?.providers?.some((p) => p.id === 'deepseek')
+    && r.json?.providers?.length === 1
     && r.json?.models?.siliconflow?.length === 1,
-    JSON.stringify(r.json?.models))
+    JSON.stringify(r.json))
 }
 
 /* ------------------------------------------ 4) model-info 档位 */
@@ -179,6 +186,32 @@ boot({ stream: async function* () { yield { type: 'text-delta', text: '' } } })
   const info = await call('/zotero-reader/model-info?provider=x&model=y')
   check('llm 无 resolveModelInfo → 200 空档位',
     info.statusCode === 200 && Array.isArray(info.json?.efforts) && info.json.efforts.length === 0)
+}
+
+/* ------------- 7) 判据：注册 ≠ 已配置，只有列得出模型的才进目录 */
+
+boot(makeLlm({
+  listProviders: () => [
+    { id: 'configured', name: 'Configured' },
+    { id: 'registered-empty', name: 'Registered, no key' },
+    { id: 'registered-throws', name: 'Registered, broken' },
+  ],
+  listModels: async (provider) => {
+    if (provider === 'configured') return [{ id: 'm1', name: 'M1' }, { id: 'm2' }]
+    if (provider === 'registered-throws') throw new Error('no credentials')
+    return []
+  },
+}))
+{
+  const r = await call('/zotero-reader/models')
+  check('只保留列得出模型的 provider',
+    JSON.stringify(r.json?.providers?.map((p) => p.id)) === JSON.stringify(['configured']),
+    JSON.stringify(r.json?.providers))
+  check('缺展示名时回落到 id，且不因缺 name 丢模型',
+    r.json?.models?.configured?.length === 2 && r.json?.models?.configured?.[1]?.name === 'm2',
+    JSON.stringify(r.json?.models?.configured))
+  check('抛错与空列表一样视为未配置',
+    Object.keys(r.json?.models ?? {}).join(',') === 'configured', JSON.stringify(r.json?.models))
 }
 
 /* ---------------------- 6) client 侧降级路径（源码断言） */

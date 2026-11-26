@@ -967,38 +967,55 @@ function llmFacade(rctx) {
 /**
  * 当前可用的服务商/模型目录。
  *
+ * 「可用」的判据与 DSH Web GUI 顶部模型选择器完全一致：
+ * `@deepseek-ai/dsh-api-session-controller` 的 `buildModelCatalog()` 先取
+ * `llm.listProviders()`（已注册的实时路由），再逐个 `llm.listModels(id)`，
+ * 最后用 `.filter(group => group.models.length > 0)` 把空分组挡在选择器之外。
+ *
+ * 这一步不能省：`listProviders()` 只表示 adapter 注册了路由，不等于用户配过凭据。
+ * 官方 adapter 就是无条件注册的 —— `dsh-llm-deepseek` 的 `registerDeepSeekProvider()`
+ * 直接 `registerAdapter([provider], adapter)`，而它的 `listModels()` 走
+ * `discoverModels()`；没配 `DEEPSEEK_API_KEY` 时返回空数组。
+ * 于是「没配置」在服务层就表现为「该 provider 的 listModels 为空」。
+ *
+ * 所以这里对每个 provider 先取模型，取不到（抛错或空列表）就不输出：
+ * 配置页的服务商下拉只列出真正已配置、能用的服务商，不给用户空选项。
+ *
  * 只投影 `id` 和展示名：`LlmProviderInfo` / `LlmModelInfo` 本身不含 api key，
  * 这里仍显式挑字段，避免以后上游加字段时被原样带出去。
- * 任何一层失败（服务不可用、某个 provider 的 listModels 抛错）都降级为空目录，
+ * 任何一层失败（listProviders 抛错、服务不可用）都降级为空目录，
  * 前端据此退回手输入，不影响整页。
  */
 async function modelCatalog(llm) {
   const providers = []
   const models = {}
+  let listed
   try {
-    const listed = typeof llm?.listProviders === 'function' ? llm.listProviders() : []
-    for (const item of listed ?? []) {
-      if (!item || typeof item.id !== 'string' || !item.id) continue
-      providers.push({
-        id: item.id,
-        name: typeof item.name === 'string' && item.name ? item.name : item.id,
-      })
-    }
+    listed = typeof llm?.listProviders === 'function' ? llm.listProviders() : []
   } catch {
     return { providers: [], models: {} }
   }
-  for (const provider of providers) {
+  for (const item of listed ?? []) {
+    if (!item || typeof item.id !== 'string' || !item.id) continue
+    let entries = []
     try {
-      const list = typeof llm?.listModels === 'function' ? await llm.listModels(provider.id) : []
-      models[provider.id] = (list ?? [])
+      const list = typeof llm?.listModels === 'function' ? await llm.listModels(item.id) : []
+      entries = (list ?? [])
         .filter((model) => model && typeof model.id === 'string' && model.id)
         .map((model) => ({
           id: model.id,
           name: typeof model.name === 'string' && model.name ? model.name : model.id,
         }))
     } catch {
-      models[provider.id] = []
+      entries = []
     }
+    // 注册不等于已配置：列不出模型，说明这条路由还没配好，不进目录。
+    if (entries.length === 0) continue
+    providers.push({
+      id: item.id,
+      name: typeof item.name === 'string' && item.name ? item.name : item.id,
+    })
+    models[item.id] = entries
   }
   return { providers, models }
 }
