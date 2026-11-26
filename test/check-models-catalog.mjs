@@ -7,7 +7,7 @@
  *   3. 只有列得出模型的 provider 才进目录；listModels 抛错/空列表 → 整个 provider 不出现
  *   4. model-info 返回推理档位与默认档位；缺参 400；解析失败 → 200 空列表 + error
  *   5. llm 服务没有这些方法时同样降级为空，不抛错
- *   6. client.js 里确实存在 datalist/select 与失败降级路径（源码断言）
+ *   6. client.js 里确实存在 datalist 与失败降级路径、档位始终可选的兜底（源码断言）
  *   7. 判据与 DSH 模型选择器一致：注册 ≠ 已配置，零模型的 provider 不出现
  *
  * 全部本地：桩 llm + 临时 dataDir，不联网。
@@ -223,8 +223,24 @@ boot(makeLlm({
     /fetchJson\(`\$\{API\}\/models`\)[\s\S]{0,400}?\.catch\(/.test(src))
   check('provider 使用 datalist 可手输',
     src.includes("list: 'zr-cfg-provider-options'") && src.includes('zr-cfg-model-options-'))
-  check('推理档位有数据时用 select', /efforts && efforts\.length > 0[\s\S]{0,400}?h\('select'/.test(src))
-  check('拿不到档位时退回 input', /return h\('input', \{[\s\S]{0,120}?cfgEffortPlaceholder/.test(src))
+  check('档位用 input + datalist（始终可选、可手输）',
+    src.includes('list: listId')
+    && src.includes("h('datalist', { key: 'effort-options', id: listId }")
+    && src.includes('zr-cfg-effort-options-'))
+  check('datalist 第一项是空值的「模型默认」',
+    /h\('option', \{ value: '' \}, t\('cfgEffortModelDefault'\)\)/.test(src))
+  const fallbackMatch = /const EFFORT_FALLBACKS = (\[[^\]]*\])/.exec(src)
+  let fallback = []
+  try {
+    fallback = fallbackMatch ? JSON.parse(fallbackMatch[1].replace(/'/g, '"')) : []
+  } catch {
+    fallback = []
+  }
+  check('兜底档位非空且按 canonical 顺序覆盖 DSH 已知档位',
+    JSON.stringify(fallback) === JSON.stringify(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+    JSON.stringify(fallback))
+  check('有真实 efforts 时优先用真实的',
+    /const efforts = effortsOf\(provider, model\)[\s\S]{0,80}?if \(efforts && efforts\.length > 0\) return efforts/.test(src))
 }
 
 const failed = results.filter((r) => !r.ok).length

@@ -2791,6 +2791,18 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------ 插件页配置表单 */
 
+    /**
+     * 模型没有公布推理档位时的兜底候选。
+     *
+     * 取自 DSH 自己的 pi-ai 适配器 `THINKING_LEVEL_GATE`（canonical escalation order，
+     * 且带 drift gate：pi-ai 增删档位会编译失败）：
+     * off / minimal / low / medium / high / xhigh / max。
+     * 官方 DeepSeek adapter 的档位是它的子集（off/low/high/max），Gemini 协议层是
+     * minimal/low/medium/high —— 所以这个并集覆盖 DSH 已知的全部档位，又保持
+     * 「由弱到强」的顺序（与 LlmReasoningCapabilities.efforts 的语义一致）。
+     */
+    const EFFORT_FALLBACKS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
     /** 推理档位序列 → 文本；`null` 用本地化的「默认」表示。 */
     function effortsToText(list, nullToken) {
       return (Array.isArray(list) ? list : [])
@@ -2964,6 +2976,16 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * 档位下拉的候选：模型的真实 efforts 优先；模型没公布（null 或空数组）时
+       * 用标准兜底档位，保证任何模型都能直接选，不必手打。
+       */
+      const effortOptionsOf = (provider, model) => {
+        const efforts = effortsOf(provider, model)
+        if (efforts && efforts.length > 0) return efforts
+        return EFFORT_FALLBACKS.map((id) => ({ id, name: id }))
+      }
+
+      /**
        * 环境变量名输入 + 状态行。
        *
        * 输入的是**变量名**；后端只回 Present/Length，页面拿不到值，
@@ -3131,26 +3153,24 @@ window.__ModuleLoader__.load({
               (() => {
                 const provider = draft.features?.[name]?.provider ?? ''
                 const model = draft.features?.[name]?.model ?? ''
-                const efforts = effortsOf(provider, model)
-                if (efforts && efforts.length > 0) {
-                  return h('select', {
+                const listId = `zr-cfg-effort-options-${name}`
+                return [
+                  h('input', {
+                    key: 'effort',
                     className: 'zr-input zr-cfg-input',
+                    placeholder: t('cfgEffortPlaceholder'),
+                    list: listId,
                     value: draft.features?.[name]?.reasoningEffort ?? '',
                     onChange: (e) => setFeature(name, 'reasoningEffort', e.target.value),
-                  },
-                  h('option', { value: '' }, t('cfgEffortModelDefault')),
-                  ...efforts.map((effort) => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id)))
-                }
-                return h('input', {
-                  className: 'zr-input zr-cfg-input',
-                  placeholder: t('cfgEffortPlaceholder'),
-                  value: draft.features?.[name]?.reasoningEffort ?? '',
-                  onChange: (e) => setFeature(name, 'reasoningEffort', e.target.value),
-                  onBlur: () => {
-                    const current = draft.features?.[name]?.model
-                    if (provider && current) void loadEfforts(provider, current)
-                  },
-                })
+                    onBlur: () => {
+                      const current = draft.features?.[name]?.model
+                      if (provider && current) void loadEfforts(provider, current)
+                    },
+                  }),
+                  h('datalist', { key: 'effort-options', id: listId },
+                    h('option', { value: '' }, t('cfgEffortModelDefault')),
+                    ...effortOptionsOf(provider, model).map((effort) => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id))),
+                ]
               })(),
               h('datalist', { id: `zr-cfg-model-options-${name}` },
                 ...modelsOf(draft.features?.[name]?.provider)
